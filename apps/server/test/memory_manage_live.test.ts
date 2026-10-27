@@ -310,14 +310,41 @@ async function waitForOperation(
   }
 }
 
+// Store-every-turn stages several `record.remember` rows per turn (the fact
+// plus a Japanese summary). Waiting for the first ack is not enough: the fact
+// row may still be pending when recall runs. Wait until every row of the kind
+// has acked (no pending retry, no failed row) before asserting on recall.
+async function waitForOutboxKindSettled(
+  dbPath: string,
+  kind: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const started = Date.now();
+  for (;;) {
+    const rows = queryOutbox(dbPath).filter((row) => row.kind === kind);
+    if (rows.length > 0 && rows.every((row) => row.status === "acked")) {
+      return;
+    }
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(
+        `timed out waiting for every outbox ${kind} row to ack: ` +
+          JSON.stringify(queryOutbox(dbPath)),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+type MemoryCliAddress = {
+  executable: string;
+  entry: string;
+  config: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+};
+
 async function recallSnippets(
-  address: {
-    executable: string;
-    entry: string;
-    config: string;
-    timeoutMs: number;
-    maxResponseBytes: number;
-  },
+  address: MemoryCliAddress,
   query: string,
 ): Promise<string[]> {
   const recall = await callMemoryCli(
@@ -331,6 +358,35 @@ async function recallSnippets(
     recall.data as unknown as { items: Array<{ snippet: string }> }
   ).items;
   return items.map((item) => item.snippet);
+}
+
+// Recall is eventually consistent with the remind CLI writes: poll a bounded
+// number of real recalls until the expected snippet text appears. On timeout
+// report the last snippets and the outbox dump so flakes are diagnosable.
+async function waitForRecalledSnippet(
+  address: MemoryCliAddress,
+  dbPath: string,
+  query: string,
+  expectedSubstring: string,
+  timeoutMs = 30_000,
+): Promise<string[]> {
+  const started = Date.now();
+  let snippets: string[] = [];
+  for (;;) {
+    snippets = await recallSnippets(address, query);
+    if (snippets.some((snippet) => snippet.includes(expectedSubstring))) {
+      return snippets;
+    }
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(
+        `timed out waiting for recall "${query}" to include ` +
+          `"${expectedSubstring}" (last snippets: ` +
+          `${JSON.stringify(snippets)}; outbox: ` +
+          `${JSON.stringify(queryOutbox(dbPath))})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 }
 
 describe("live memory management lifecycle (real server + real remind CLI)", () => {
@@ -438,10 +494,17 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
       expect(turn1.text).toContain("green tea");
       const runId = turn1.runId;
 
-      // Cultivation wrote through the REAL CLI.
+      // Cultivation wrote through the REAL CLI. Store-every-turn enqueues
+      // several remember rows (fact + Japanese summary), so wait for all of
+      // them before recalling, then poll recall until the fact is visible.
       await waitForOutboxKind(dbPath, "event.append", "acked");
-      await waitForOutboxKind(dbPath, "record.remember", "acked");
-      const recalled = await recallSnippets(address, "green tea");
+      await waitForOutboxKindSettled(dbPath, "record.remember");
+      const recalled = await waitForRecalledSnippet(
+        address,
+        dbPath,
+        "green tea",
+        "green tea",
+      );
       expect(recalled.length).toBeGreaterThanOrEqual(1);
       // Store-every-turn also stores a Japanese summary; target the fact
       // row by its snippet text, never by list position.
@@ -533,8 +596,13 @@ describe("live memory management lifecycle (real server + real remind CLI)", () 
       };
       expect(correct.deduplicated).toBe(false);
       await waitForOperation(base, sessionId, correct.operationId, "acked");
-      await waitForOutboxKind(dbPath, "record.correct", "acked");
-      const correctedRecall = await recallSnippets(address, "green tea");
+      await waitForOutboxKindSettled(dbPath, "record.correct");
+      const correctedRecall = await waitForRecalledSnippet(
+        address,
+        dbPath,
+        "green tea",
+        "decaf",
+      );
       expect(correctedRecall.some((snippet) => snippet.includes("decaf"))).toBe(
         true,
       );
