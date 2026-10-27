@@ -443,14 +443,21 @@ function fitResultLineBudget(raw, request, config) {
 }
 
 // Conservative RELIABILITY downgrade over an UNTRUSTED guest report. The
-// reported worker status is guest-reported/unattested (the guest can rewrite
-// guest.json); it is never host evidence and never authorizes permission,
-// adoption, resources, or trust. A reported `done` proves nothing and cannot
-// make a host check pass or widen candidate scope. Missing/failed reports may
-// only downgrade the result to unknown/error. Host authority is exclusively:
-// every fixed operator check passed + candidate scope revalidated + retained
-// artifact hashes matched. That still does not attest delegation, completion,
-// or semantic correctness.
+// reported execution status is guest-reported/unattested (the guest can
+// rewrite guest.json); it is never host evidence and never authorizes
+// permission, adoption, resources, or trust. A reported success proves nothing
+// and cannot make a host check pass or widen candidate scope. Missing/failed
+// reports may only downgrade the result to unknown/error. Host authority is
+// exclusively: every fixed operator check passed + candidate scope revalidated
+// + retained artifact hashes matched. That still does not attest execution,
+// delegation, completion, or semantic correctness.
+//
+// The sealed real-pi guest is a DIRECT worker (read/grep/glob[,write]); it does
+// not have to delegate through task/opencode, so a report without delegated
+// workers is the expected shape. The gate is instead the guest's own observed
+// execution: the observation must report ompExitCode 0, no error, at least one
+// observed tool call, and every observed tool result "ok". A delegated-worker
+// report is optional; when present the legacy per-worker checks still apply.
 const DELEGATED_WORKER_STATUSES = new Set([
   "running",
   "done",
@@ -458,31 +465,53 @@ const DELEGATED_WORKER_STATUSES = new Set([
   "cancelled",
 ]);
 
-function evaluateDelegatedWorkers(observation, realPiRequired) {
+function evaluateGuestExecution(observation, realPiRequired) {
   if (observation === null || observation.executorKind !== "real-pi") {
     return realPiRequired
       ? { ok: false, missing: true }
       : { ok: true, missing: false };
   }
-  if (!Array.isArray(observation.delegatedWorkers)) {
+  if (!Array.isArray(observation.tools)) {
     return { ok: false, missing: true };
   }
-  const workers = observation.delegatedWorkers.slice(0, 32);
-  if (workers.length === 0) return { ok: false, missing: true };
-  for (const worker of workers) {
-    if (
-      !worker ||
-      typeof worker !== "object" ||
-      typeof worker.id !== "string" ||
-      worker.id.length === 0 ||
-      typeof worker.status !== "string" ||
-      !DELEGATED_WORKER_STATUSES.has(worker.status)
-    ) {
+  if (observation.tools.length === 0) return { ok: false, missing: true };
+  const reportedWorkers = observation.delegatedWorkers;
+  if (reportedWorkers !== undefined && reportedWorkers !== null) {
+    if (!Array.isArray(reportedWorkers)) return { ok: false, missing: true };
+    for (const worker of reportedWorkers.slice(0, 32)) {
+      if (
+        !worker ||
+        typeof worker !== "object" ||
+        typeof worker.id !== "string" ||
+        worker.id.length === 0 ||
+        typeof worker.status !== "string" ||
+        !DELEGATED_WORKER_STATUSES.has(worker.status)
+      ) {
+        return { ok: false, missing: true };
+      }
+      if (worker.status !== "done" || worker.isError === true) {
+        return { ok: false, missing: false };
+      }
+    }
+  }
+  if (!Number.isSafeInteger(observation.ompExitCode)) {
+    return { ok: false, missing: true };
+  }
+  if (observation.ompExitCode !== 0 || observation.timedOut === true) {
+    return { ok: false, missing: false };
+  }
+  if (
+    observation.error !== undefined &&
+    observation.error !== null &&
+    observation.error !== ""
+  ) {
+    return { ok: false, missing: false };
+  }
+  for (const tool of observation.tools) {
+    if (!tool || typeof tool !== "object" || typeof tool.name !== "string") {
       return { ok: false, missing: true };
     }
-    if (worker.status !== "done" || worker.isError === true) {
-      return { ok: false, missing: false };
-    }
+    if (tool.result !== "ok") return { ok: false, missing: false };
   }
   return { ok: true, missing: false };
 }
@@ -1249,15 +1278,15 @@ async function main() {
                 } else {
                   const changes = finalValidation.artifact.changes;
                   const observation = readGuestObservation(workRoot);
-                  const guestReportEvidence = evaluateDelegatedWorkers(
+                  const guestExecutionEvidence = evaluateGuestExecution(
                     observation,
                     config.profile.executor.kind === "real-pi",
                   );
-                  if (!guestReportEvidence.ok) {
+                  if (!guestExecutionEvidence.ok) {
                     // The guest report is not authority. A failed or missing
                     // report may conservatively downgrade a run for reliability;
                     // it is never promoted into host attestation.
-                    outcome = guestReportEvidence.missing
+                    outcome = guestExecutionEvidence.missing
                       ? {
                           raw: rawResult(
                             request,
@@ -1265,11 +1294,11 @@ async function main() {
                             false,
                             {
                               summary:
-                                "companion bridge: guest-reported worker evidence missing",
+                                "companion bridge: guest execution evidence missing",
                               files: [],
                               findings: reportFindings(observation),
                               unresolved: [
-                                "blocked: guest-reported worker evidence (unattested)",
+                                "blocked: guest execution evidence (guest-reported, unattested)",
                               ],
                             },
                             { checks },
@@ -1277,11 +1306,11 @@ async function main() {
                           storedExit: 1,
                         }
                       : errorOutcome(
-                          "companion bridge: guest-reported worker did not complete",
+                          "companion bridge: guest execution did not complete reliably",
                           checks,
                           10,
                           [
-                            "blocked: guest-reported worker did not complete (unattested)",
+                            "blocked: guest execution did not complete reliably (guest-reported, unattested)",
                           ],
                         );
                     if (outcome.raw.report.findings.length === 0) {
@@ -1312,8 +1341,8 @@ async function main() {
                     // result; the guest worker report stays unattested.
                     const summary =
                       request.mode === "write"
-                        ? `sealed trial completed: ${changes.length} host-checked change(s); worker status guest-reported/unattested`
-                        : "sealed read-only trial completed; worker status guest-reported/unattested";
+                        ? `sealed trial completed: ${changes.length} host-checked change(s); guest execution guest-reported/unattested`
+                        : "sealed read-only trial completed; guest execution guest-reported/unattested";
                     const artifact = {
                       sha256: sha256(artifactBytes),
                       entryCount: changes.length,
