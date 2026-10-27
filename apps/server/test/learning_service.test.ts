@@ -376,7 +376,7 @@ describe("learning service extraction", () => {
         },
         {
           kind: "user_confirmed_feedback",
-          lesson: "ユーザーは水の沸点を高圧で測りたい",
+          lesson: "ユーザーは水の沸点を高圧容器で測りたい",
           evidence: "水の沸点を測りたい",
           applicability: "実験",
         },
@@ -386,7 +386,7 @@ describe("learning service extraction", () => {
     const service = makeService(repo, gateway);
     const run = completeRun(repo, {
       text: "週末は釣りに行きたい。水の沸点を測りたい。",
-      answer: "水の沸点は高圧で測れます。",
+      answer: "水の沸点は高圧容器で測れます。",
     });
     service.onRunCompleted(run.runId);
     await waitFor(() => service.store.listProposals().length === 2);
@@ -398,7 +398,7 @@ describe("learning service extraction", () => {
       "user_confirmed_feedback",
     ]);
     expect(proposals.find((row) => row.kind === "observation")?.lesson).toBe(
-      "ユーザーは水の沸点を高圧で測りたい",
+      "ユーザーは水の沸点を高圧容器で測りたい",
     );
   });
 

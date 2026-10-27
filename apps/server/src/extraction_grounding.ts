@@ -10,9 +10,14 @@
 // pipelines cannot drift apart.
 //
 // PR #142 checked the QUOTE only. A real quote can still back an unrelated or
-// embellished BODY, so the body must also be covered by the user's own words.
-// `extractionBodyDowngrade` is that second, deliberately conservative check:
-// it can only DOWNGRADE provenance, never drop the extracted memory/lesson.
+// embellished BODY, so the body must also be grounded in the user's own words.
+// The conservative coverage rule from the first pass rejected faithful
+// paraphrases (colloquial user wording restated as formal prose) because it
+// demanded 60% surface overlap. The current rule instead targets the signal we
+// actually care about: substantive terms that occur in the assistant answer
+// but NOT in the user turn. A very loose coverage floor remains only for
+// near-zero overlap (e.g. a greeting-only turn that somehow produces a factual
+// body). Both checks only DOWNGRADE provenance, never drop the item.
 
 /**
  * Escape a speaker segment so content cannot close or open the extraction
@@ -60,25 +65,32 @@ export function isGroundedExtractionQuote(
 }
 
 /**
- * Minimum fraction of a body's content tokens that must occur in the USER's
- * own turn before the body can remain `user_fact` / `user_confirmed_feedback`.
- *
- * 0.6 is deliberately high: a user_stated fact that shares fewer than three
- * fifths of its content with the user's turn is usually the model's own
- * elaboration. It does make the rule conservative for heavily paraphrased
- * (e.g. colloquial-to-formal) bodies; those are downgraded rather than risked
- * as user-stated facts. Downgrade-only means the memory/lesson is preserved.
+ * Near-zero coverage floor. Paraphrase is explicitly allowed, so this is NOT
+ * a similarity threshold: it only catches a body that shares almost nothing
+ * with the user turn (for example a greeting-only turn whose body invents a
+ * factual claim). Everything above this floor is judged by assistant-only
+ * content terms instead.
  */
-export const EXTRACTION_BODY_COVERAGE_MIN = 0.6;
+export const EXTRACTION_BODY_COVERAGE_MIN = 0.12;
 
 /**
  * Assistant-derived body terms are tolerated only as isolated fragments. A
- * Japanese run of three or more characters (two overlapping bigrams) or an
- * ASCII word of four or more characters that occurs in the body and assistant
- * but NOT in the user turn is treated as assistant embellishment.
+ * Japanese run of four or more characters (three overlapping bigrams) or an
+ * ASCII word of five or more characters that occurs in the body and assistant
+ * but NOT in the user turn is treated as assistant embellishment. Four/five
+ * characters keeps common verbs and short generic words out; see
+ * `EXTRACTION_BODY_GENERIC_TERMS`.
  */
-export const EXTRACTION_ASSISTANT_RUN_MIN = 3;
-export const EXTRACTION_ASSISTANT_ASCII_MIN = 4;
+export const EXTRACTION_ASSISTANT_RUN_MIN = 4;
+export const EXTRACTION_ASSISTANT_ASCII_MIN = 5;
+
+/**
+ * A candidate assistant-only term is ignored when at least half of its
+ * character bigrams already occur in the user turn. This treats a paraphrase
+ * that reuses particles/conjugation (e.g. a verb restated in another form) as
+ * covered, while a genuinely new content term still counts.
+ */
+export const EXTRACTION_TERM_COVERAGE_MAX = 0.5;
 
 /**
  * Framing/extractionese removed before token comparison. Keep this list
@@ -92,19 +104,165 @@ export const EXTRACTION_BODY_FRAMING_PHRASES: readonly string[] = [
   "と感じている",
   "と述べた",
   "と言った",
+  "における",
+  "に対して",
+  "によって",
+  "として",
+  "について",
+  "に関して",
+  "という",
   "ユーザーは",
   "ユーザーが",
   "ユーザーの",
   "ユーザー",
   "している",
-  "について",
-  "という",
-  "である",
   "したい",
+  "である",
   "こと",
   "もの",
   "the user",
   "user",
+];
+
+/**
+ * Generic words that carry no topic content and must never count as an
+ * assistant-only addition. Covers particles, common verbs/auxiliaries,
+ * report verbs, deictic words, and broad function nouns. Topic words (bike
+ * models, URLs, technical names) are deliberately absent. Matching is
+ * bidirectional substring: a fragment of a generic word (e.g. a 4-gram cut
+ * out of プロジェクト) is also generic.
+ */
+export const EXTRACTION_BODY_GENERIC_TERMS: readonly string[] = [
+  "している",
+  "してる",
+  "しまった",
+  "てしま",
+  "でしま",
+  "すぎ",
+  "あり",
+  "いる",
+  "ある",
+  "なる",
+  "する",
+  "やる",
+  "くる",
+  "いく",
+  "おく",
+  "もらう",
+  "くれる",
+  "あげる",
+  "いただ",
+  "くださ",
+  "ござ",
+  "です",
+  "ます",
+  "ません",
+  "でしょう",
+  "だろう",
+  "こと",
+  "もの",
+  "ため",
+  "ところ",
+  "よう",
+  "そう",
+  "など",
+  "なんか",
+  "なんて",
+  "って",
+  "この",
+  "その",
+  "あの",
+  "どの",
+  "これ",
+  "それ",
+  "あれ",
+  "どれ",
+  "今日",
+  "明日",
+  "昨日",
+  "今年",
+  "去年",
+  "来年",
+  "自分",
+  "僕",
+  "私",
+  "君",
+  "あなた",
+  "皆",
+  "たち",
+  "さん",
+  "ちゃん",
+  "プロジェクト",
+  "サービス",
+  "システム",
+  "データ",
+  "モデル",
+  "アプリ",
+  "アシスタント",
+  "ユーザー",
+  "ウェブ",
+  "検索",
+  "内容",
+  "情報",
+  "機能",
+  "方法",
+  "場合",
+  "今回",
+  "現在",
+  "本当",
+  "実際",
+  "可能",
+  "必要",
+  "重要",
+  "有効",
+  "不安",
+  "問題",
+  "意味",
+  "関係",
+  "状態",
+  "結果",
+  "理由",
+  "目的",
+  "対象",
+  "一部",
+  "全て",
+  "全部",
+  "感じ",
+  "考え",
+  "思い",
+  "述べ",
+  "言っ",
+  "尋ね",
+  "話せ",
+  "依頼",
+  "指示",
+  "利用",
+  "使用",
+  "管理",
+  "変更",
+  "参加",
+  "予定",
+  "興味",
+  "関心",
+  "遅刻",
+  "挨拶",
+  "日",
+  "月",
+  "年",
+  "時間",
+  "分",
+  "秒",
+  "今",
+  "時点",
+  "頃",
+  "的",
+  "化",
+  "性",
+  "者",
+  "等",
+  "theuser",
+  "user",
+  "assistant",
 ];
 
 /** Coverage normalization: NFKC, lowercase, drop whitespace and punctuation. */
@@ -115,9 +273,22 @@ function normalizeCoverageText(text: string): string {
     .replace(/[\s\p{P}\p{S}]/gu, "");
 }
 
+/** Cheap kana folding: katakana -> hiragana so variant spellings match. */
+function foldKana(text: string): string {
+  return text.replace(/[\u30a1-\u30f6]/g, (char) =>
+    String.fromCharCode(char.charCodeAt(0) - 0x60),
+  );
+}
+
 const FRAMING_NORMALIZED = EXTRACTION_BODY_FRAMING_PHRASES.map(
   normalizeCoverageText,
 ).sort((a, b) => b.length - a.length);
+
+const GENERIC_NORMALIZED = EXTRACTION_BODY_GENERIC_TERMS.map(
+  normalizeCoverageText,
+).filter((term) => term.length > 0);
+
+const PARTICLES_NORMALIZED = /[はをがにでとのやもへ]/g;
 
 function stripFraming(text: string): string {
   let out = normalizeCoverageText(text);
@@ -128,33 +299,130 @@ function stripFraming(text: string): string {
   return out;
 }
 
+/** Framing plus single-character particles, used for token comparison only. */
+function compactCoverageText(text: string): string {
+  return stripFraming(text).replace(PARTICLES_NORMALIZED, "");
+}
+
+function isGenericTerm(term: string): boolean {
+  for (const generic of GENERIC_NORMALIZED) {
+    if (term === generic) return true;
+    if (
+      generic.length >= 2 &&
+      (term.includes(generic) || generic.includes(term))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const CJK_RUN_PATTERN =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]+/gu;
-const ASCII_WORD_PATTERN = /[a-z0-9][a-z0-9_-]+/g;
-const ASCII_FRAMING_TOKENS: ReadonlySet<string> = new Set(["user"]);
+const ASCII_WORD_PATTERN = /[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*/g;
+const ASCII_FRAMING_TOKENS: ReadonlySet<string> = new Set([
+  "the",
+  "and",
+  "for",
+  "you",
+  "that",
+  "this",
+  "with",
+  "are",
+  "was",
+  "not",
+  "but",
+  "have",
+  "has",
+  "had",
+  "will",
+  "can",
+  "just",
+  "like",
+  "about",
+  "from",
+  "your",
+  "when",
+  "what",
+  "how",
+  "why",
+  "who",
+  "its",
+  "it",
+  "is",
+  "be",
+  "to",
+  "of",
+  "in",
+  "on",
+  "at",
+  "by",
+  "as",
+  "or",
+  "an",
+  "a",
+  "user",
+  "assistant",
+]);
 
 /**
- * Content tokens for coverage: Japanese character bigrams plus ASCII words of
- * length >= 2. Bigrams are intentionally language-agnostic and require no
- * tokenizer; ASCII words are kept whole because they carry most identifiers.
- * ASCII words are split on their original whitespace/punctuation boundaries,
- * NOT after coverage normalization (which would weld a whole sentence into
- * one token).
+ * ASCII terms from normalized text. Kept whole (split on the ORIGINAL
+ * whitespace/punctuation boundaries), not after coverage normalization which
+ * would weld a whole sentence into one token.
  */
-export function extractionContentTokens(text: string): Set<string> {
+function extractionAsciiTerms(text: string): Set<string> {
   const tokens = new Set<string>();
-  const asciiSource = text.normalize("NFKC").toLowerCase();
-  for (const match of asciiSource.matchAll(ASCII_WORD_PATTERN)) {
-    if (!ASCII_FRAMING_TOKENS.has(match[0])) tokens.add(match[0]);
+  const source = text.normalize("NFKC").toLowerCase();
+  for (const match of source.matchAll(ASCII_WORD_PATTERN)) {
+    if (match[0].length >= 2 && !ASCII_FRAMING_TOKENS.has(match[0])) {
+      tokens.add(match[0]);
+    }
   }
-  const japaneseSource = stripFraming(text);
-  for (const match of japaneseSource.matchAll(CJK_RUN_PATTERN)) {
+  return tokens;
+}
+
+/**
+ * CJK bigrams plus ASCII terms. `stripped` is the coverage-normalized form
+ * (used for CJK bigrams); `asciiSource` keeps original word boundaries so an
+ * English sentence is not welded into one token.
+ */
+function extractionBigrams(stripped: string, asciiSource: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const match of stripped.matchAll(CJK_RUN_PATTERN)) {
     const chars = Array.from(match[0]);
     for (let index = 0; index + 1 < chars.length; index += 1) {
       tokens.add(`${chars[index]}${chars[index + 1]}`);
     }
   }
+  for (const token of extractionAsciiTerms(asciiSource)) tokens.add(token);
   return tokens;
+}
+
+/**
+ * Content tokens for coverage: Japanese character bigrams plus ASCII words of
+ * length >= 2. Bigrams are intentionally language-agnostic and require no
+ * tokenizer; ASCII words are kept whole because they carry most identifiers.
+ */
+export function extractionContentTokens(text: string): Set<string> {
+  return extractionBigrams(stripFraming(text), text);
+}
+
+interface CoverageHaystack {
+  normalized: string;
+  folded: string;
+}
+
+function coverageHaystack(text: string): CoverageHaystack {
+  const normalized = normalizeCoverageText(text);
+  return { normalized, folded: foldKana(normalized) };
+}
+
+function containsCandidate(haystack: CoverageHaystack, term: string): boolean {
+  const normalizedTerm = normalizeCoverageText(term);
+  return (
+    haystack.normalized.includes(normalizedTerm) ||
+    haystack.folded.includes(foldKana(normalizedTerm))
+  );
 }
 
 /**
@@ -174,10 +442,28 @@ export function extractionBodyCoverage(body: string, userText: string): number {
 }
 
 /**
+ * Fraction of a candidate term's bigrams already present in the user turn.
+ * Used to forgive paraphrases that only differ by particles/conjugation.
+ */
+function extractionTermCoverage(
+  term: string,
+  userBigrams: ReadonlySet<string>,
+): number {
+  const termBigrams = extractionBigrams(term, term);
+  if (termBigrams.size === 0) return 1;
+  let matched = 0;
+  for (const bigram of termBigrams) {
+    if (userBigrams.has(bigram)) matched += 1;
+  }
+  return matched / termBigrams.size;
+}
+
+/**
  * True when the body contains a substantive term that is absent from the user
- * message but present in the assistant message: a >=3-character Japanese run
- * (two overlapping assistant-only bigrams) or a >=4-character assistant-only
- * ASCII word. Isolated differences are tolerated.
+ * message but present in the assistant message: a >=4-character Japanese run
+ * (three overlapping assistant-only bigrams) or a >=5-character assistant-only
+ * ASCII word. Generic framing/verbs and terms already largely covered by the
+ * user turn are ignored, so colloquial-to-formal paraphrases stay user_fact.
  */
 export function hasAssistantDerivedBodyTerms(
   body: string,
@@ -185,30 +471,43 @@ export function hasAssistantDerivedBodyTerms(
   assistantText: string | null | undefined,
 ): boolean {
   if (typeof assistantText !== "string") return false;
-  const bodyTokens = extractionContentTokens(body);
-  if (bodyTokens.size === 0) return false;
-  const userTokens = extractionContentTokens(userText);
-  const assistantTokens = extractionContentTokens(assistantText);
-  const assistantOnly = new Set<string>();
-  for (const token of bodyTokens) {
-    if (!userTokens.has(token) && assistantTokens.has(token)) {
-      assistantOnly.add(token);
-    }
+  const user = coverageHaystack(userText);
+  const assistant = coverageHaystack(assistantText);
+  const userBigrams = extractionBigrams(stripFraming(userText), userText);
+
+  for (const term of extractionAsciiTerms(body)) {
+    if (term.length < EXTRACTION_ASSISTANT_ASCII_MIN) continue;
+    if (isGenericTerm(term)) continue;
+    if (containsCandidate(user, term)) continue;
+    if (!containsCandidate(assistant, term)) continue;
+    return true;
   }
-  if (assistantOnly.size === 0) return false;
-  for (const token of assistantOnly) {
-    if (
-      token.length >= EXTRACTION_ASSISTANT_ASCII_MIN &&
-      /^[a-z0-9]/.test(token)
+
+  const compactBody = compactCoverageText(body);
+  for (const match of compactBody.matchAll(CJK_RUN_PATTERN)) {
+    const chars = Array.from(match[0]);
+    const seen = new Set<string>();
+    for (
+      let index = 0;
+      index + EXTRACTION_ASSISTANT_RUN_MIN <= chars.length;
+      index += 1
     ) {
+      const term = chars
+        .slice(index, index + EXTRACTION_ASSISTANT_RUN_MIN)
+        .join("");
+      if (seen.has(term)) continue;
+      seen.add(term);
+      if (isGenericTerm(term)) continue;
+      if (containsCandidate(user, term)) continue;
+      if (
+        extractionTermCoverage(term, userBigrams) >=
+        EXTRACTION_TERM_COVERAGE_MAX
+      ) {
+        continue;
+      }
+      if (!containsCandidate(assistant, term)) continue;
       return true;
     }
-  }
-  const chars = Array.from(stripFraming(body));
-  for (let index = 0; index + 2 < chars.length; index += 1) {
-    const first = `${chars[index]}${chars[index + 1]}`;
-    const second = `${chars[index + 1]}${chars[index + 2]}`;
-    if (assistantOnly.has(first) && assistantOnly.has(second)) return true;
   }
   return false;
 }
@@ -218,7 +517,7 @@ export type ExtractionBodyDowngrade = "coverage" | "assistant_terms";
 
 /**
  * Body-level sibling of `isGroundedExtractionQuote`. Returns null when the
- * body is covered, otherwise the first failing check. Without a user turn
+ * body is grounded, otherwise the first failing check. Without a user turn
  * (legacy direct parser callers) no verdict is possible and null is returned.
  */
 export function extractionBodyDowngrade(
