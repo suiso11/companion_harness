@@ -85,6 +85,7 @@ export type {
   AgentModelDeltaCallback,
   AgentModelStepFailedCallback,
   AgentModelStepFailure,
+  AgentModelStepRetry,
   AgentRepairReason,
   AgentStrategyOptions,
   AgentVoiceLayer,

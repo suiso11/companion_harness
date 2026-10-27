@@ -14,7 +14,7 @@ import type {
 } from "@companion/model-local";
 import { ModelLocalError } from "@companion/model-local";
 import type Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   AGENT_MAX_STEPS,
@@ -23,6 +23,7 @@ import {
   AGENT_TOOL_CALLER,
   AGENT_TOOL_CONCURRENCY,
   AGENT_TOOL_ORIGIN,
+  type AgentModelStepRetry,
   answerSubmitToolDefinition,
   BUNDLED_SCHEMA_VERSION,
   buildAgentToolDefinitions,
@@ -1367,6 +1368,239 @@ describe("recordModelCall terminal finality (PR r3943538936)", () => {
       ).toThrow(/terminal/);
       expect(repo.listModelCalls(runId).map((r) => r.step)).toEqual([1]);
     } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("transient model-step retry", () => {
+  function transient503(): ModelLocalError {
+    return new ModelLocalError("request_failed", "fixed", undefined, {
+      httpStatus: 503,
+    });
+  }
+
+  it("retries the same step once after a 503 before any delta", async () => {
+    const { handle, repo } = await setup();
+    vi.useFakeTimers();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        transient503(),
+        chatResult([answerCall([{ text: "recovered", citations: [] }])]),
+      ]);
+      const retried: AgentModelStepRetry[] = [];
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+        onModelStepRetried: (event): void => {
+          retried.push(event);
+        },
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const pending = strategy(strategyCtx(repo, sessionId, runId));
+      const settled = expect(pending).resolves.toEqual({
+        version: 2,
+        text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      await settled;
+      expect(calls).toHaveLength(2);
+      expect(retried).toHaveLength(1);
+      expect(retried[0]).toMatchObject({
+        runId,
+        step: 1,
+        delayMs: 3000,
+        httpStatus: 503,
+      });
+      expect(repo.listModelCalls(runId)).toHaveLength(1);
+      expect(repo.listModelCalls(runId)[0]).toMatchObject({
+        step: 1,
+        outcome: "completed",
+        errorCode: null,
+      });
+    } finally {
+      vi.useRealTimers();
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fails with 503 diagnostics after the single retry also fails", async () => {
+    const { handle, repo } = await setup();
+    vi.useFakeTimers();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        transient503(),
+        transient503(),
+      ]);
+      const retried: AgentModelStepRetry[] = [];
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+        onModelStepRetried: (event): void => {
+          retried.push(event);
+        },
+      });
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      const pending = strategy(strategyCtx(repo, sessionId, runId));
+      const settled = expect(pending).rejects.toMatchObject({
+        errorCode: "execution_failed",
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      await settled;
+      expect(calls).toHaveLength(2);
+      expect(retried).toHaveLength(1);
+      const run = repo.getRun(runId);
+      const failed = repo
+        .getEvents(run.sessionId, runId, {})
+        .events.filter((event) => event.type === "model.step.failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.payload).toMatchObject({
+        step: 1,
+        errorCode: "model_unavailable",
+        gatewayErrorCode: "request_failed",
+        httpStatus: 503,
+      });
+    } finally {
+      vi.useRealTimers();
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("never retries after a streamed delta or a non-transient failure", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      let deltaCalls = 0;
+      const deltaGateway: ModelGateway = {
+        provider: "ollama",
+        capabilities: { toolCalling: true },
+        baseUrl: "http://127.0.0.1:11434",
+        chatUrl: "http://127.0.0.1:11434/api/chat",
+        chat: async (_request, options): Promise<ChatResult> => {
+          deltaCalls += 1;
+          options?.onDelta?.({ kind: "content" as const, text: "partial" });
+          throw transient503();
+        },
+      };
+      const retried: AgentModelStepRetry[] = [];
+      const deltaStrategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway: deltaGateway,
+        model: "test-model",
+        onModelStepRetried: (event): void => {
+          retried.push(event);
+        },
+      });
+      const deltaTurn = newRunningTurn(repo, T0);
+      await expect(
+        deltaStrategy(strategyCtx(repo, deltaTurn.sessionId, deltaTurn.runId)),
+      ).rejects.toMatchObject({ errorCode: "execution_failed" });
+      expect(deltaCalls).toBe(1);
+      expect(retried).toHaveLength(0);
+
+      for (const error of [
+        new ModelLocalError("timeout", "fixed"),
+        new ModelLocalError("invalid_response", "fixed", undefined, {
+          invalidResponseCause: "malformed_json",
+        }),
+      ]) {
+        const { gateway, calls } = scriptGateway([
+          error,
+          chatResult([answerCall()]),
+        ]);
+        const strategy = createAgentStrategy({
+          db: handle.raw,
+          repo,
+          broker,
+          gateway,
+          model: "test-model",
+          onModelStepRetried: (event): void => {
+            retried.push(event);
+          },
+        });
+        const turn = newRunningTurn(repo, T0 + calls.length + 20);
+        await expect(
+          strategy(strategyCtx(repo, turn.sessionId, turn.runId)),
+        ).rejects.toMatchObject({ errorCode: "execution_failed" });
+        expect(calls).toHaveLength(1);
+      }
+      expect(retried).toHaveLength(0);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("aborts the retry wait without a second gateway call", async () => {
+    const { handle, repo } = await setup();
+    vi.useFakeTimers();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        transient503(),
+        chatResult([answerCall()]),
+      ]);
+      const retried: AgentModelStepRetry[] = [];
+      const strategy = createAgentStrategy({
+        db: handle.raw,
+        repo,
+        broker,
+        gateway,
+        model: "test-model",
+        onModelStepRetried: (event): void => {
+          retried.push(event);
+        },
+      });
+      const { runId } = newRunningTurn(repo, T0);
+      const run = repo.getRun(runId);
+      const turn = repo.getTurn(run.turnId);
+      const controller = new AbortController();
+      const ctx = freezeStrategyContext(
+        {
+          id: run.id,
+          turnId: run.turnId,
+          sessionId: run.sessionId,
+          attempt: run.attempt,
+          strategy: run.strategy,
+        },
+        {
+          id: turn.id,
+          sessionId: turn.sessionId,
+          seq: turn.seq,
+          input: turn.input,
+          frozenContext: turn.frozenContext,
+        },
+        controller.signal,
+      );
+      const pending = strategy(ctx);
+      const settled = expect(pending).rejects.toMatchObject({
+        errorCode: "execution_cancelled",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(3000);
+      await settled;
+      expect(calls).toHaveLength(1);
+      expect(retried).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
       const { closeKernelDatabase } = await import("../src/index.js");
       closeKernelDatabase(handle);
     }

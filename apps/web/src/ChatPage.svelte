@@ -1503,7 +1503,9 @@ function renderRunView(runId: string): void {
   if (runView.visible === "failed") {
     // PR-4: a failed run discards the provisional draft.
     draft = null;
-    showNotice("生成に失敗しました");
+    // Reducer-owned fixed reason from the latest model.step.failed
+    // diagnostics, falling back to the generic failure notice.
+    showNotice(runView.notice);
     const turnId = runTurns.get(runId) ?? activeTurnId;
     const retryVisible = runView.retryVisible;
     finishActiveRun();

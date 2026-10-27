@@ -2650,6 +2650,23 @@ export type AgentModelStepFailedCallback = (
   failure: AgentModelStepFailure,
 ) => void;
 
+/** Fixed metadata for one transient model.step.retried event/log. */
+export interface AgentModelStepRetry {
+  readonly runId: string;
+  readonly step: number;
+  /** Fixed abortable backoff before the single retry. */
+  readonly delayMs: number;
+  /** Numeric HTTP status for a retry-eligible request failure. */
+  readonly httpStatus?: number;
+  /** Fixed connection-level cause for a retry-eligible transport failure. */
+  readonly invalidResponseCause?: ModelLocalInvalidResponseCause;
+}
+
+/** Best-effort model.step.retried sink (exceptions are swallowed). */
+export type AgentModelStepRetriedCallback = (
+  retry: AgentModelStepRetry,
+) => void;
+
 /**
  * Optional auxiliary voice layer (voice-layer wiring). `render` is the
  * never-throwing renderer created by `createVoiceRenderer`; the optional
@@ -2730,6 +2747,12 @@ export interface AgentStrategyOptions {
    * `reason` code when applicable. Never receives model text/args/body.
    */
   readonly onModelStepFailed?: AgentModelStepFailedCallback;
+  /**
+   * Optional model.step.retried sink (transient retry observability,
+   * additive). Receives only the fixed step/delay plus a numeric HTTP status
+   * or fixed connection cause; never model text/args/body.
+   */
+  readonly onModelStepRetried?: AgentModelStepRetriedCallback;
   /**
    * Optional pre-answer memory recall (server-owned remind CLI boundary).
    * When present, the strategy performs one bounded recall before the first
@@ -2829,6 +2852,7 @@ export function createAgentStrategy(
   }
   const clock = options.clock ?? { now: () => Date.now() };
   const onModelStepFailed = options.onModelStepFailed;
+  const onModelStepRetried = options.onModelStepRetried;
   const stepTimeoutMs =
     options.stepTimeoutMs === undefined
       ? AGENT_STEP_TIMEOUT_MS
@@ -3080,6 +3104,7 @@ export function createAgentStrategy(
           isWallExpired,
           onModelDelta: options.onModelDelta,
           onModelStepFailed,
+          onModelStepRetried,
           ...(options.executionRecorder === undefined
             ? {}
             : { executionRecorder: options.executionRecorder }),
@@ -3701,6 +3726,76 @@ function isEngineAbortRejection(error: unknown, signal: AbortSignal): boolean {
   return signal.aborted === true && isAbortRejection(error);
 }
 
+/** Fixed retry delay for one transient foreground model-step retry. */
+const AGENT_TRANSIENT_RETRY_DELAY_MS = 3000;
+
+/** Connection-level transport causes eligible for the single retry. */
+const TRANSIENT_CONNECTION_CAUSES: ReadonlySet<ModelLocalInvalidResponseCause> =
+  new Set(["connection_refused", "connection_reset", "connection_closed"]);
+
+/**
+ * Fixed diagnostics for one retry-eligible gateway failure: only
+ * request_failed 502/503/504 and connection-level transport failures
+ * (before any response delta). Timeouts, invalid_response,
+ * response_too_large, cancellation, and answer/tool failures are never
+ * retried.
+ */
+function transientRetryDiagnostics(error: unknown): {
+  readonly httpStatus?: number;
+  readonly invalidResponseCause?: ModelLocalInvalidResponseCause;
+} | null {
+  if (!(error instanceof ModelLocalError)) {
+    return null;
+  }
+  if (error.code === "request_failed") {
+    return error.httpStatus === 502 ||
+      error.httpStatus === 503 ||
+      error.httpStatus === 504
+      ? { httpStatus: error.httpStatus }
+      : null;
+  }
+  if (
+    error.code === "transport_error" &&
+    error.invalidResponseCause !== undefined &&
+    TRANSIENT_CONNECTION_CAUSES.has(error.invalidResponseCause)
+  ) {
+    return { invalidResponseCause: error.invalidResponseCause };
+  }
+  return null;
+}
+
+/** Abortable fixed-delay wait; run/wall cancellation wins over elapsed. */
+function waitForTransientRetry(
+  delayMs: number,
+  signal: AbortSignal,
+  wallSignal: AbortSignal,
+): Promise<"elapsed" | "aborted" | "wall"> {
+  if (signal.aborted) {
+    return Promise.resolve("aborted");
+  }
+  if (wallSignal.aborted) {
+    return Promise.resolve("wall");
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: "elapsed" | "aborted" | "wall"): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      wallSignal.removeEventListener("abort", onWallAbort);
+      resolve(value);
+    };
+    const onAbort = (): void => finish("aborted");
+    const onWallAbort = (): void => finish("wall");
+    const timer = setTimeout(() => finish("elapsed"), delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    wallSignal.addEventListener("abort", onWallAbort, { once: true });
+  });
+}
+
 /**
  * One bounded generateTurn call: exactly one gateway.chat attempt (no
  * retry/fallback) with the per-step AbortSignal forwarded so the
@@ -3744,6 +3839,7 @@ async function runModelStep(args: {
   isWallExpired: () => boolean;
   onModelDelta?: AgentModelDeltaCallback | undefined;
   onModelStepFailed?: AgentModelStepFailedCallback | undefined;
+  onModelStepRetried?: AgentModelStepRetriedCallback | undefined;
   executionRecorder?: ExecutionRecorder;
   harnessFingerprint: string;
   systemPrompt: string;
@@ -3766,6 +3862,7 @@ async function runModelStep(args: {
     isWallExpired,
     onModelDelta,
     onModelStepFailed,
+    onModelStepRetried,
     executionRecorder,
   } = args;
   const recordCallId = generateId();
@@ -3851,165 +3948,235 @@ async function runModelStep(args: {
     | { kind: "timeout" }
     | { kind: "wall" }
     | { kind: "aborted" };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const stepController = new AbortController();
-  let settlement: Settlement = await new Promise<Settlement>((resolve) => {
-    let done = false;
-    const finish = (value: Settlement): void => {
-      if (done) {
+  // Assigned by the first (always-entered) attempt below; the initializer
+  // only satisfies definite assignment because the loop is bounded.
+  let settlement: Settlement = { kind: "aborted" };
+  let lastAttemptSawDelta = false;
+  // Exactly one transient retry for the SAME step. Never retried:
+  // timeouts, invalid_response, response_too_large, cancellation, any
+  // attempt that already streamed a delta, or a failure without remaining
+  // step/wall budget. The retry wait is abortable by the run/wall signals.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stepController = new AbortController();
+    const attemptRemaining = stepDeadline - clock.now();
+    const attemptTimeout = Math.max(
+      Math.min(stepTimeoutMs, wallDeadline - clock.now(), attemptRemaining),
+      1,
+    );
+    lastAttemptSawDelta = false;
+    settlement = await new Promise<Settlement>((resolve) => {
+      let done = false;
+      const finish = (value: Settlement): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        signal.removeEventListener("abort", onExternalAbort);
+        wallSignal.removeEventListener("abort", onWallAbort);
+        resolve(value);
+      };
+      const onExternalAbort = (): void => {
+        // Cancel the underlying fetch, then settle as cancelled. Late
+        // gateway results remain discarded via `done`.
+        try {
+          stepController.abort();
+        } catch {
+          // Abort must never throw; cancellation carries the fate.
+        }
+        finish({ kind: "aborted" });
+      };
+      const onWallAbort = (): void => {
+        // Wall expiry aborts the fetch like a deadline: the Run fails
+        // (never misclassified as user cancellation). Engine cancel keeps
+        // priority via the `done` race and the checks below.
+        try {
+          stepController.abort();
+        } catch {
+          // Abort must never throw; the wall failure carries the fate.
+        }
+        finish({ kind: "wall" });
+      };
+      const onStepTimeout = (): void => {
+        try {
+          stepController.abort();
+        } catch {
+          // Abort must never throw; the timeout carries the fate.
+        }
+        finish({ kind: "timeout" });
+      };
+      if (signal.aborted) {
+        try {
+          stepController.abort();
+        } catch {}
+        finish({ kind: "aborted" });
         return;
       }
-      done = true;
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
-      signal.removeEventListener("abort", onExternalAbort);
-      wallSignal.removeEventListener("abort", onWallAbort);
-      resolve(value);
-    };
-    const onExternalAbort = (): void => {
-      // Cancel the underlying fetch, then settle as cancelled. Late
-      // gateway results remain discarded via `done`.
-      try {
-        stepController.abort();
-      } catch {
-        // Abort must never throw; cancellation carries the fate.
-      }
-      finish({ kind: "aborted" });
-    };
-    const onWallAbort = (): void => {
-      // Wall expiry aborts the fetch like a deadline: the Run fails
-      // (never misclassified as user cancellation). Engine cancel keeps
-      // priority via the `done` race and the checks below.
-      try {
-        stepController.abort();
-      } catch {
-        // Abort must never throw; the wall failure carries the fate.
-      }
-      finish({ kind: "wall" });
-    };
-    const onStepTimeout = (): void => {
-      try {
-        stepController.abort();
-      } catch {
-        // Abort must never throw; the timeout carries the fate.
-      }
-      finish({ kind: "timeout" });
-    };
-    if (signal.aborted) {
-      try {
-        stepController.abort();
-      } catch {}
-      finish({ kind: "aborted" });
-      return;
-    }
-    if (wallSignal.aborted || isWallExpired()) {
-      try {
-        stepController.abort();
-      } catch {}
-      finish({ kind: "wall" });
-      return;
-    }
-    signal.addEventListener("abort", onExternalAbort, { once: true });
-    wallSignal.addEventListener("abort", onWallAbort, { once: true });
-    timer = setTimeout(onStepTimeout, effectiveTimeout);
-    let chat: Promise<ChatResult>;
-    try {
-      // PR-2 streaming progress: forward provisional gateway deltas with
-      // run/step correlation (best-effort; never durable, never validated).
-      // Settlement/abort gate (same as the late result handlers): once
-      // `finish` settled the step, or the step controller aborted
-      // (cancellation / deadline in flight), later deltas from a
-      // non-cooperative gateway are dropped — stale pieces must never
-      // surface as progress from a call whose result was discarded.
-      const onDelta =
-        onModelDelta === undefined
-          ? undefined
-          : (delta: ModelStreamDelta): void => {
-              if (done || stepController.signal.aborted) {
-                return;
-              }
-              try {
-                onModelDelta({
-                  runId,
-                  step,
-                  delta,
-                  elapsedMs: Math.max(clock.now() - startedAt, 0),
-                });
-              } catch {
-                // Best effort: progress consumers never fail the step.
-              }
-            };
-      chat = gateway.chat(request, {
-        signal: stepController.signal,
-        ...(onDelta === undefined ? {} : { onDelta }),
-        ...(executionRecorder === undefined
-          ? {}
-          : {
-              onRawResponse: (raw) => {
-                // Precedes JSON parse/normalization; no headers are exposed.
-                executionRecorder.record({
-                  kind: "model.response.raw",
-                  runId,
-                  step,
-                  callId: recordCallId,
-                  data: {
-                    status: raw.status,
-                    body: redactRawResponseBody(raw.body),
-                  },
-                });
-              },
-            }),
-      });
-    } catch (error) {
-      if (signal.aborted) {
-        finish({ kind: "aborted" });
-      } else if (wallSignal.aborted || isWallExpired()) {
+      if (wallSignal.aborted || isWallExpired()) {
+        try {
+          stepController.abort();
+        } catch {}
         finish({ kind: "wall" });
-      } else {
-        finish({ kind: "error", error });
+        return;
       }
-      return;
-    }
-    chat.then(
-      (result) => {
-        // Late-success race: a non-cooperative gateway resolving at/after
-        // an abort or deadline must not win on callback ordering alone.
-        // The authoritative state decides before the step can succeed.
-        const late = classifyLateSuccess();
-        if (late === "aborted") {
-          finish({ kind: "aborted" });
-          return;
-        }
-        if (late === "wall" || late === "timeout") {
-          finish({ kind: late });
-          return;
-        }
-        finish({ kind: "result", result });
-      },
-      (error: unknown) => {
-        // No double classification: an already-settled deadline keeps
-        // timeout/wall; engine cancellation wins otherwise. Cooperative
-        // abort rejections surface here when the timer/listener has not
-        // yet settled the race.
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+      wallSignal.addEventListener("abort", onWallAbort, { once: true });
+      timer = setTimeout(onStepTimeout, attemptTimeout);
+      let chat: Promise<ChatResult>;
+      try {
+        // PR-2 streaming progress: forward provisional gateway deltas with
+        // run/step correlation (best-effort; never durable, never validated).
+        // Settlement/abort gate (same as the late result handlers): once
+        // `finish` settled the step, or the step controller aborted
+        // (cancellation / deadline in flight), later deltas from a
+        // non-cooperative gateway are dropped — stale pieces must never
+        // surface as progress from a call whose result was discarded.
+        // The internal flag also decides retry eligibility: any streamed
+        // delta for this attempt disqualifies a transient retry.
+        const onDelta = (delta: ModelStreamDelta): void => {
+          if (done || stepController.signal.aborted) {
+            return;
+          }
+          lastAttemptSawDelta = true;
+          if (onModelDelta === undefined) {
+            return;
+          }
+          try {
+            onModelDelta({
+              runId,
+              step,
+              delta,
+              elapsedMs: Math.max(clock.now() - startedAt, 0),
+            });
+          } catch {
+            // Best effort: progress consumers never fail the step.
+          }
+        };
+        chat = gateway.chat(request, {
+          signal: stepController.signal,
+          onDelta,
+          ...(executionRecorder === undefined
+            ? {}
+            : {
+                onRawResponse: (raw) => {
+                  // Precedes JSON parse/normalization; no headers are exposed.
+                  executionRecorder.record({
+                    kind: "model.response.raw",
+                    runId,
+                    step,
+                    callId: recordCallId,
+                    data: {
+                      status: raw.status,
+                      body: redactRawResponseBody(raw.body),
+                    },
+                  });
+                },
+              }),
+        });
+      } catch (error) {
         if (signal.aborted) {
           finish({ kind: "aborted" });
-          return;
-        }
-        if (wallSignal.aborted || isWallExpired()) {
+        } else if (wallSignal.aborted || isWallExpired()) {
           finish({ kind: "wall" });
-          return;
+        } else {
+          finish({ kind: "error", error });
         }
-        if (isAbortRejection(error) && stepController.signal.aborted) {
-          // Step-deadline abort reached fetch before the timer callback
-          // settled the race: still a deadline timeout, not cancellation.
-          finish({ kind: "timeout" });
-          return;
+        return;
+      }
+      chat.then(
+        (result) => {
+          // Late-success race: a non-cooperative gateway resolving at/after
+          // an abort or deadline must not win on callback ordering alone.
+          // The authoritative state decides before the step can succeed.
+          const late = classifyLateSuccess();
+          if (late === "aborted") {
+            finish({ kind: "aborted" });
+            return;
+          }
+          if (late === "wall" || late === "timeout") {
+            finish({ kind: late });
+            return;
+          }
+          finish({ kind: "result", result });
+        },
+        (error: unknown) => {
+          // No double classification: an already-settled deadline keeps
+          // timeout/wall; engine cancellation wins otherwise. Cooperative
+          // abort rejections surface here when the timer/listener has not
+          // yet settled the race.
+          if (signal.aborted) {
+            finish({ kind: "aborted" });
+            return;
+          }
+          if (wallSignal.aborted || isWallExpired()) {
+            finish({ kind: "wall" });
+            return;
+          }
+          if (isAbortRejection(error) && stepController.signal.aborted) {
+            // Step-deadline abort reached fetch before the timer callback
+            // settled the race: still a deadline timeout, not cancellation.
+            finish({ kind: "timeout" });
+            return;
+          }
+          finish({ kind: "error", error });
+        },
+      );
+    });
+    if (attempt === 1 && settlement.kind === "error" && !lastAttemptSawDelta) {
+      const diagnostics = transientRetryDiagnostics(settlement.error);
+      const remainingStep = stepDeadline - clock.now();
+      const remainingWall = wallDeadline - clock.now();
+      if (
+        diagnostics !== null &&
+        !signal.aborted &&
+        !wallSignal.aborted &&
+        !isWallExpired() &&
+        remainingStep > AGENT_TRANSIENT_RETRY_DELAY_MS &&
+        remainingWall > AGENT_TRANSIENT_RETRY_DELAY_MS
+      ) {
+        const waited = await waitForTransientRetry(
+          AGENT_TRANSIENT_RETRY_DELAY_MS,
+          signal,
+          wallSignal,
+        );
+        if (waited !== "elapsed") {
+          settlement = { kind: waited };
+          break;
         }
-        finish({ kind: "error", error });
-      },
-    );
-  });
+        if (signal.aborted) {
+          settlement = { kind: "aborted" };
+          break;
+        }
+        if (
+          wallSignal.aborted ||
+          isWallExpired() ||
+          clock.now() >= wallDeadline
+        ) {
+          settlement = { kind: "wall" };
+          break;
+        }
+        if (clock.now() >= stepDeadline) {
+          settlement = { kind: "timeout" };
+          break;
+        }
+        try {
+          onModelStepRetried?.({
+            runId,
+            step,
+            delayMs: AGENT_TRANSIENT_RETRY_DELAY_MS,
+            ...diagnostics,
+          });
+        } catch {
+          // Observability sink is best effort; the retry itself proceeds.
+        }
+        continue;
+      }
+    }
+    break;
+  }
   // Post-await recheck: an abort or deadline that landed between the
   // gateway resolve and this continuation (after `done` was already set)
   // still discards the late result with timeout/cancel semantics, before

@@ -3350,7 +3350,9 @@ class ConversationApp {
       return;
     }
     if (view.visible === "failed") {
-      this.showNotice("生成に失敗しました");
+      // Reducer-owned fixed reason from the latest model.step.failed
+      // diagnostics, falling back to the generic failure notice.
+      this.showNotice(view.notice);
       // Failure-only retry (§16.6 exact): offer one retry for the same Turn
       // (a fresh Run). Capture the Turn before finishActiveRun clears it.
       // The retry control must survive the history refresh below, so hydrate

@@ -28,6 +28,7 @@ import {
   assertAssistantTextWithinBound,
   assertToolArgumentsByteLengthForTool,
   assertToolCallCountWithinBound,
+  connectionFailureError,
   isAnswerSubmitTool,
   isRecord,
   MAX_MESSAGE_CONTENT_LENGTH,
@@ -42,6 +43,20 @@ import type {
   ModelStreamDeltaCallback,
   RawHttpResponse,
 } from "./types.js";
+
+/** Fixed redacted `invalid_response` with a closed, non-sensitive cause. */
+function invalidResponse(
+  cause: import("./errors.js").ModelLocalInvalidResponseCause,
+): ModelLocalError {
+  return new ModelLocalError(
+    "invalid_response",
+    cause === "response_too_large"
+      ? "model returned an oversized response"
+      : "model returned an invalid response",
+    undefined,
+    { invalidResponseCause: cause },
+  );
+}
 
 /** Raw per-chunk pieces produced by the accumulator (callback input). */
 export interface StreamChunkPieces {
@@ -189,30 +204,18 @@ export class OpenAIStreamAccumulator {
   /** Append one parsed chunk body; returns the provisional pieces. */
   pushChunkBody(body: unknown): StreamChunkPieces {
     if (this.done) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("chunk_shape_invalid");
     }
     if (!isRecord(body)) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("chunk_shape_invalid");
     }
     if (body.message !== undefined) {
       // Non-streaming shape inside a stream: wrong envelope for this path.
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("chunk_shape_invalid");
     }
     const choices = body.choices;
     if (!Array.isArray(choices)) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("chunk_shape_invalid");
     }
     let contentPiece = "";
     let reasoningPiece = "";
@@ -223,28 +226,19 @@ export class OpenAIStreamAccumulator {
     }> = [];
     for (const choice of choices) {
       if (!isRecord(choice)) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (choice.message !== undefined) {
         // Non-streaming `message` shape inside a stream chunk: wrong
         // envelope for this path (stream chunks carry `delta` only).
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (
         choice.finish_reason !== undefined &&
         choice.finish_reason !== null &&
         typeof choice.finish_reason !== "string"
       ) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (
         typeof choice.finish_reason === "string" &&
@@ -257,20 +251,14 @@ export class OpenAIStreamAccumulator {
         continue;
       }
       if (!isRecord(delta)) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (
         delta.content !== undefined &&
         delta.content !== null &&
         typeof delta.content !== "string"
       ) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         this.content += delta.content;
@@ -283,10 +271,7 @@ export class OpenAIStreamAccumulator {
         delta.reasoning_content !== null &&
         typeof delta.reasoning_content !== "string"
       ) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("chunk_shape_invalid");
       }
       if (
         typeof delta.reasoning_content === "string" &&
@@ -298,18 +283,12 @@ export class OpenAIStreamAccumulator {
         // Same character bound as assistant text: reasoning buffers stay
         // finite under the identical redacted code.
         if (this.reasoning.length > MAX_MESSAGE_CONTENT_LENGTH) {
-          throw new ModelLocalError(
-            "invalid_response",
-            "model returned an invalid response",
-          );
+          throw invalidResponse("content_too_long");
         }
       }
       if (delta.tool_calls !== undefined && delta.tool_calls !== null) {
         if (!Array.isArray(delta.tool_calls)) {
-          throw new ModelLocalError(
-            "invalid_response",
-            "model returned an invalid response",
-          );
+          throw invalidResponse("tool_call_shape_invalid");
         }
         for (const entry of delta.tool_calls) {
           const piece = this.appendToolCallDelta(entry);
@@ -321,10 +300,7 @@ export class OpenAIStreamAccumulator {
     }
     if (body.usage !== undefined && body.usage !== null) {
       if (!isRecord(body.usage)) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("usage_invalid");
       }
       // Terminal usage summary (present only with
       // `stream_options.include_usage`); validated at finalize through the
@@ -367,10 +343,7 @@ export class OpenAIStreamAccumulator {
     const ordered = [...this.tools.entries()].sort((a, b) => a[0] - b[0]);
     assertToolCallCountWithinBound(ordered.length);
     if (ordered.length > MAX_TOOL_CALLS_PER_MESSAGE) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("tool_call_shape_invalid");
     }
     const toolCalls = ordered.map(([streamIndex, call]) => ({
       id: call.seenId ? (call.id as string) : `call_${streamIndex}`,
@@ -466,10 +439,7 @@ export class OpenAIStreamAccumulator {
     argumentsText: string;
   } | null {
     if (!isRecord(entry)) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("tool_call_shape_invalid");
     }
     const index = entry.index;
     if (
@@ -477,18 +447,12 @@ export class OpenAIStreamAccumulator {
       !Number.isSafeInteger(index) ||
       index < 0
     ) {
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("tool_call_shape_invalid");
     }
     let call = this.tools.get(index);
     if (call === undefined) {
       if (this.tools.size >= MAX_TOOL_CALLS_PER_MESSAGE) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
       call = {
         id: undefined,
@@ -501,51 +465,33 @@ export class OpenAIStreamAccumulator {
     }
     if (entry.id !== undefined && entry.id !== null) {
       if (typeof entry.id !== "string") {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
       if (!call.seenId) {
         call.id = entry.id;
         call.seenId = true;
       } else if (call.id !== entry.id) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
     }
     if (entry.type !== undefined && entry.type !== null) {
       if (typeof entry.type !== "string") {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
       if (call.type === undefined) {
         call.type = entry.type;
       } else if (call.type !== entry.type) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
     }
     const fn = entry.function;
     if (fn !== undefined && fn !== null) {
       if (!isRecord(fn)) {
-        throw new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        );
+        throw invalidResponse("tool_call_shape_invalid");
       }
       if (fn.name !== undefined && fn.name !== null) {
         if (typeof fn.name !== "string") {
-          throw new ModelLocalError(
-            "invalid_response",
-            "model returned an invalid response",
-          );
+          throw invalidResponse("tool_call_shape_invalid");
         }
         if (fn.name.length > 0) {
           const previousName = call.name;
@@ -562,10 +508,7 @@ export class OpenAIStreamAccumulator {
           } else {
             // Any other name for the same index conflicts: reject the
             // stream instead of combining arguments across tool names.
-            throw new ModelLocalError(
-              "invalid_response",
-              "model returned an invalid response",
-            );
+            throw invalidResponse("tool_call_shape_invalid");
           }
           if (call.name !== previousName) {
             this.draftDirty = true;
@@ -577,10 +520,7 @@ export class OpenAIStreamAccumulator {
       }
       if (fn.arguments !== undefined && fn.arguments !== null) {
         if (typeof fn.arguments !== "string") {
-          throw new ModelLocalError(
-            "invalid_response",
-            "model returned an invalid response",
-          );
+          throw invalidResponse("tool_call_shape_invalid");
         }
         call.argumentsText += fn.arguments;
         this.toolArgumentBytes += utf8ByteLength(fn.arguments);
@@ -886,6 +826,17 @@ export async function postChatCompletionStream(options: {
       rawCapture.emit();
       throw requestFailed(response.status);
     }
+    // A successful streaming response must actually be SSE. A JSON/HTML
+    // content type means the endpoint/provider did not stream: fail closed
+    // with a fixed cause instead of parsing arbitrary bytes as SSE lines.
+    const contentType = response.headers.get("content-type");
+    if (
+      contentType !== null &&
+      !contentType.trim().toLowerCase().startsWith("text/event-stream")
+    ) {
+      cancelBody(response);
+      throw invalidResponse("unexpected_content_type");
+    }
     await readSseStream(
       response,
       controller,
@@ -931,10 +882,7 @@ async function readSseStream(
     // No body bytes were received; still expose the status before failing
     // so an empty/malformed HTTP response is observable.
     rawCapture.emit();
-    throw new ModelLocalError(
-      "invalid_response",
-      "model returned an invalid response",
-    );
+    throw invalidResponse("stream_incomplete");
   }
   const reader = stream.getReader() as unknown as {
     read(): Promise<{ done: boolean; value?: Uint8Array | undefined }>;
@@ -966,12 +914,7 @@ async function readSseStream(
       return fatalDecoder.decode(raw);
     } catch {
       cancelQuietly(reader, "bad encoding");
-      return fail(
-        new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        ),
-      );
+      return fail(invalidResponse("sse_line_invalid"));
     }
   };
   const readNext = async (): Promise<{
@@ -980,12 +923,9 @@ async function readSseStream(
   }> => {
     try {
       return await reader.read();
-    } catch {
+    } catch (error) {
       return fail(
-        new ModelLocalError(
-          "invalid_response",
-          "model returned an invalid response",
-        ),
+        connectionFailureError(error) ?? invalidResponse("sse_line_invalid"),
       );
     }
   };
@@ -1055,12 +995,7 @@ async function readSseStream(
           const text = line.endsWith("\r") ? line.slice(0, -1) : line;
           if (seenDone) {
             cancelQuietly(reader, "trailing data");
-            fail(
-              new ModelLocalError(
-                "invalid_response",
-                "model returned an invalid response",
-              ),
-            );
+            fail(invalidResponse("trailing_data"));
           }
           if (text === "") {
             dispatchWithCleanup(dataLines);
@@ -1094,12 +1029,7 @@ async function readSseStream(
     }
     if (dataLines.length > 0) {
       if (seenDone) {
-        fail(
-          new ModelLocalError(
-            "invalid_response",
-            "model returned an invalid response",
-          ),
-        );
+        fail(invalidResponse("trailing_data"));
       }
       dispatchWithCleanup(dataLines);
     }
@@ -1113,10 +1043,7 @@ async function readSseStream(
       // EOF before the `data: [DONE]` sentinel: a truncated stream must
       // never be normalized into a successful ChatResult (a partial tool
       // call could otherwise execute). Abort/timeout keep priority above.
-      throw new ModelLocalError(
-        "invalid_response",
-        "model returned an invalid response",
-      );
+      throw invalidResponse("stream_incomplete");
     }
   } catch (error) {
     // Malformed chunk / invalid-response failures report the bytes received
@@ -1250,14 +1177,17 @@ async function drainBounded(
   // deadline surfaces as `timeout` — the caller's HTTP-status
   // `request_failed` classification only applies when the drain completes
   // (a drainBounded throw replaces it).
-  const classifyAbort = (): never => {
+  const classifyAbort = (error?: unknown): never => {
     if (isAborted(externalSignal)) {
       throw toAbortRejection(externalSignal as AbortSignal);
     }
     if (controller.signal.aborted) {
       throw new ModelLocalError("timeout", "model request timed out");
     }
-    throw new ModelLocalError("transport_error", "model transport failed");
+    throw (
+      connectionFailureError(error) ??
+      new ModelLocalError("transport_error", "model transport failed")
+    );
   };
   let total = 0;
   try {
@@ -1265,10 +1195,10 @@ async function drainBounded(
       let next: { done: boolean; value?: Uint8Array | undefined };
       try {
         next = await reader.read();
-      } catch {
+      } catch (error) {
         // A read rejected because an abort/deadline landed mid-drain:
         // classify it instead of swallowing into the status error.
-        classifyAbort();
+        classifyAbort(error);
         return;
       }
       if (next.done || next.value === undefined) {
@@ -1331,7 +1261,10 @@ function mapFetchRejection(error: unknown): ModelLocalError {
   if (error instanceof Error && error.name === "AbortError") {
     return new ModelLocalError("timeout", "model request timed out");
   }
-  return new ModelLocalError("transport_error", "model transport failed");
+  return (
+    connectionFailureError(error) ??
+    new ModelLocalError("transport_error", "model transport failed")
+  );
 }
 
 export type { ModelStreamDelta, ModelStreamDeltaCallback };

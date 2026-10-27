@@ -131,6 +131,10 @@ export interface ServerLogFields {
   readonly invalidResponseCause?: ModelLocalInvalidResponseCause;
   /** Numeric HTTP status for a model request failure (100..599). */
   readonly httpStatus?: number;
+  /** Model-step ordinal (1..8) for model.step.* diagnostics. */
+  readonly step?: number;
+  /** Fixed abortable retry delay in ms (model.step.retried only). */
+  readonly delayMs?: number;
   readonly bytes?: number;
   readonly durationMs?: number;
   readonly attempt?: number;
@@ -267,6 +271,14 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
     httpStatus <= 599
   ) {
     out.httpStatus = httpStatus;
+  }
+  const step = sanitizeNumber(fields.step);
+  if (step !== undefined && Number.isInteger(step) && step >= 1 && step <= 8) {
+    out.step = step;
+  }
+  const delayMs = sanitizeNumber(fields.delayMs);
+  if (delayMs !== undefined && Number.isInteger(delayMs) && delayMs >= 0) {
+    out.delayMs = delayMs;
   }
   const bytes = sanitizeNumber(fields.bytes);
   if (bytes !== undefined) {
