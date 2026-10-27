@@ -830,10 +830,12 @@ export {
   revokeAllClaimedForStop,
   stageTrialProposal,
   TRIAL_REPORT_FINDING_MAX_BYTES,
+  TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS,
   TRIAL_REPORT_MAX_CHECKS,
   TRIAL_REPORT_MAX_FINDINGS,
   TRIAL_REPORT_MAX_UNRESOLVED,
   TRIAL_REPORT_SUMMARY_MAX_BYTES,
+  TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS,
   wireModeForReadOnly,
 } from "./trial_authority.js";
 export type { TrialProposalToolsOptions } from "./trial_proposal_tools.js";

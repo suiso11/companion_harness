@@ -1861,7 +1861,12 @@ function parseReportSurface(record: Record<string, unknown>) {
         : null;
     checks.push({
       name: item.id,
-      outcome: exitCode === 0 && item.timedOut === false ? "passed" : "failed",
+      // Same success predicate as parseWireCheckEntry: a zero exit still
+      // fails when the check timed out or its stdout assertion did not match.
+      outcome:
+        exitCode === 0 && item.timedOut === false && item.outputMatched === true
+          ? "passed"
+          : "failed",
       exit,
     });
   }

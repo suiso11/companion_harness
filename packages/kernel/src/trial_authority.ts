@@ -2441,6 +2441,10 @@ export const TRIAL_REPORT_FINDING_MAX_BYTES = 1024;
 export const TRIAL_REPORT_MAX_FINDINGS = 16;
 export const TRIAL_REPORT_MAX_UNRESOLVED = 8;
 export const TRIAL_REPORT_MAX_CHECKS = 16;
+/** Serialized-column budgets; MUST mirror the length() CHECKs in
+ * migrations/0033_trial_worker_reports.sql. */
+export const TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS = 32768;
+export const TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS = 16384;
 
 export interface TrialWorkerCheckView {
   name: string;
@@ -2550,6 +2554,45 @@ export function normalizeWorkerReport(
   };
 }
 
+/** Serialize a string array to JSON within `maxChars` so the storage CHECK
+ * limits hold even for worst-case escaping (quotes/backslashes/control
+ * characters) — presentation text must never roll back a durable outcome.
+ * Items are kept in order; the item that overflows the budget is shrunk at a
+ * code-point boundary so its JSON fits the remaining space, and everything
+ * after it is dropped (the durable outcome is never discarded over text). */
+function serializeBoundedJsonArray(
+  items: readonly string[],
+  maxChars: number,
+): string {
+  const encoded: string[] = [];
+  let size = 2;
+  for (const item of items) {
+    const json = JSON.stringify(item);
+    const separator = encoded.length === 0 ? 0 : 1;
+    if (size + separator + json.length <= maxChars) {
+      encoded.push(json);
+      size += separator + json.length;
+      continue;
+    }
+    // Shrink this item to the remaining budget instead of losing all text.
+    const budget = maxChars - size - separator - 2;
+    if (budget > 0) {
+      const codePoints = Array.from(item);
+      while (codePoints.length > 0) {
+        const candidate = JSON.stringify(codePoints.join(""));
+        if (candidate.length <= budget) {
+          encoded.push(candidate);
+          size += separator + candidate.length;
+          break;
+        }
+        codePoints.pop();
+      }
+    }
+    break;
+  }
+  return `[${encoded.join(",")}]`;
+}
+
 function insertWorkerReport(
   db: Database.Database,
   sessionId: string,
@@ -2563,8 +2606,14 @@ function insertWorkerReport(
     executionId,
     sessionId,
     report.summary,
-    JSON.stringify(report.findings),
-    JSON.stringify(report.unresolved),
+    serializeBoundedJsonArray(
+      report.findings,
+      TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS,
+    ),
+    serializeBoundedJsonArray(
+      report.unresolved,
+      TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS,
+    ),
     JSON.stringify(report.checks),
     report.artifact === null ? null : JSON.stringify(report.artifact),
     report.verified ? 1 : 0,
