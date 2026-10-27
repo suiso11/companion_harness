@@ -115,6 +115,18 @@ describe("goal confirmation", () => {
         .get(goal.id) as { confirmed_from: string; confirmed_at: number };
       expect(row.confirmed_from).toBe("conversation_proposal");
       expect(row.confirmed_at).toBe(NOW + 5);
+      // Confirmation is a policy change (provenance + version), so it
+      // must enqueue shadow work in the same transaction instead of
+      // letting an in-flight job fence with no successor.
+      const jobs = repo
+        .listShadowJobs(sessionId, { limit: 50 })
+        .items.filter(
+          (job) =>
+            job.triggerEvent === "purpose.confirmed" &&
+            job.triggerId === goal.id,
+        );
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.status).toBe("pending");
       const st = repo.stageTrial(sessionId, stageInput(task.id), {
         key: randomUUID(),
         now: NOW + 6,

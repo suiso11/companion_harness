@@ -13,7 +13,8 @@
 //   200 → 取り消しました, else 取り消しに失敗しました.
 // Every string renders via text interpolation only (no {@html}).
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
-import { trialGoalAuthorityHint } from "./lib/goal_confirm.js";
+import type { GoalConfirmationFields } from "./lib/goal_confirm.js";
+import { trialHintForParentGoal } from "./lib/goal_confirm.js";
 import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
 // Shared reactive session store (session-rebinding group): a direct deep-link
 // into /trials adopts or creates the session ON BOOT here (the chat shell is
@@ -336,8 +337,8 @@ let formVisible = $state(false);
 let formStatus = $state("");
 let submitting = $state(false);
 let tasks = $state<TaskOption[]>([]);
-/** purposeId → explicit (trial authority requires an explicit user goal). */
-let goalExplicit = $state<Record<string, boolean>>({});
+/** purposeId → confirmation-relevant purpose fields (kind/status/explicit). */
+let goalFields = $state<Record<string, GoalConfirmationFields>>({});
 let taskId = $state("");
 let objective = $state("");
 let acceptanceText = $state("");
@@ -437,15 +438,26 @@ async function refreshForm(sessionId: string): Promise<void> {
     purposesResult.status === 200
       ? (purposesResult.body as { items?: unknown }).items
       : undefined;
-  const nextGoalExplicit: Record<string, boolean> = {};
+  const nextGoalFields: Record<string, GoalConfirmationFields> = {};
   if (Array.isArray(purposesBody)) {
     for (const entry of purposesBody) {
-      const row = entry as { id?: unknown; explicit?: unknown };
+      const row = entry as {
+        id?: unknown;
+        explicit?: unknown;
+        status?: unknown;
+        sourceKind?: unknown;
+        kind?: unknown;
+      };
       if (typeof row.id === "string")
-        nextGoalExplicit[row.id] = row.explicit === true;
+        nextGoalFields[row.id] = {
+          explicit: row.explicit,
+          status: row.status,
+          sourceKind: row.sourceKind,
+          kind: row.kind,
+        };
     }
   }
-  goalExplicit = nextGoalExplicit;
+  goalFields = nextGoalFields;
   tasks = [...collect(openResult), ...collect(inProgressResult)];
   if (taskId !== "" && !tasks.some((task) => task.id === taskId)) {
     taskId = "";
@@ -460,14 +472,7 @@ async function refreshForm(sessionId: string): Promise<void> {
  * confirmation button in the goals list, never a bypass here). */
 const selectedGoalHint = $derived.by<string | null>(() => {
   const task = tasks.find((entry) => entry.id === taskId);
-  if (task === undefined || task.parentPurposeId === null) return null;
-  const explicit = goalExplicit[task.parentPurposeId];
-  if (explicit !== false) return null;
-  return trialGoalAuthorityHint({
-    explicit: false,
-    status: "active",
-    sourceKind: "self",
-  });
+  return trialHintForParentGoal(goalFields, task?.parentPurposeId ?? null);
 });
 
 /** POST one strict stage body with a fresh Idempotency-Key, then select the

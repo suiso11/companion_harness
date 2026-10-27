@@ -43,3 +43,14 @@ export function trialGoalAuthorityHint(
   if (parentGoal === null || parentGoal === undefined) return null;
   return isUnconfirmedGoal(parentGoal) ? TRIAL_GOAL_AUTHORITY_HINT : null;
 }
+
+/** Resolve the hint from the purposes list keyed by purpose id. The full
+ * purpose fields (kind/status/explicit) are required: an id-only or
+ * explicit-only view would hide the hint for non-goal parents. */
+export function trialHintForParentGoal(
+  goals: Readonly<Record<string, GoalConfirmationFields>>,
+  parentPurposeId: string | null,
+): string | null {
+  if (parentPurposeId === null) return null;
+  return trialGoalAuthorityHint(goals[parentPurposeId]);
+}

@@ -1945,6 +1945,19 @@ export function confirmPurpose(
         row.statement,
         now,
       );
+      // Confirmation changes provenance + version, so it is a policy
+      // change like every other purpose mutation: same-TX durable shadow
+      // source (advances the scope epoch and fences any in-flight job, so
+      // a successor deliberates on the confirmed goal).
+      enqueueShadowPolicyChangeInTx(
+        db,
+        session,
+        row.scope,
+        "purpose",
+        row.id,
+        "purpose.confirmed",
+        now,
+      );
     }
     const current = readPurpose(db, row.id);
     if (current === null) {

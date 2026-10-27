@@ -5,6 +5,7 @@ import {
   isConversationAdoptedGoal,
   isUnconfirmedGoal,
   trialGoalAuthorityHint,
+  trialHintForParentGoal,
   UNCONFIRMED_GOAL_BADGE,
 } from "../src/lib/goal_confirm.js";
 
@@ -93,5 +94,28 @@ describe("goal confirmation mapping", () => {
       }),
     ).toBeNull();
     expect(trialGoalAuthorityHint(null)).toBeNull();
+  });
+
+  it("hints from the parent's full purpose fields, not id alone", () => {
+    const goals = {
+      "g-1": {
+        explicit: false,
+        status: "active",
+        sourceKind: "self",
+        kind: "goal",
+      },
+      "c-1": {
+        explicit: false,
+        status: "active",
+        sourceKind: "self",
+        kind: "constraint",
+      },
+    };
+    expect(trialHintForParentGoal(goals, "g-1")).toContain(
+      "自分の目的として確定",
+    );
+    expect(trialHintForParentGoal(goals, "c-1")).toBeNull();
+    expect(trialHintForParentGoal(goals, "missing")).toBeNull();
+    expect(trialHintForParentGoal(goals, null)).toBeNull();
   });
 });
