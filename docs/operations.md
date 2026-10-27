@@ -412,6 +412,22 @@ connector instance owns **all** configured roots.
   kind and states that only `[user_confirmed_feedback]` reflects what the
   user said; all other kinds are unverified model observations. The
   pending/approval flow is unchanged.
+- Body grounding (2026-10-27): a real quote is necessary but not sufficient;
+  the BODY must also be covered by the user's own turn, for BOTH memory
+  `user_fact` and learning `user_confirmed_feedback` (the shared check lives
+  in `extraction_grounding.ts`). It normalizes (NFKC, lowercase, whitespace/punctuation removal), tokenizes into
+  Japanese character bigrams plus ASCII words, and drops a small documented
+  framing list (`ユーザーは`, `と考えている`, `している`, etc.). A would-be
+  `user_fact`/`user_confirmed_feedback` is downgraded when body-token coverage
+  by the user turn is below 0.6, or when the body contains a >=3-character
+  Japanese run / >=4-character ASCII word that is absent from the user turn
+  but present in the assistant answer. Both checks only downgrade (to
+  `model_inference` / `observation`); the item is never dropped. Fixed counts
+  (`downgraded_by_coverage`, `downgraded_by_assistant_terms`) ride the
+  `memory.extract_grounded` / `memory.extract_none` / `memory.extract_invalid`
+  logs; no content is logged. The quote is still grounding-only:
+  remind's `record.remember` has no `meta`/`evidence` field (tags are
+  topic-only and capped), so no quote is stored or rendered.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted
