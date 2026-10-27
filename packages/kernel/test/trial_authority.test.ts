@@ -341,6 +341,43 @@ describe("pathless read-only wire scope", () => {
       const req = (c.body as { request: { relevantPaths: string[] } }).request;
       expect(req.relevantPaths).toEqual(many.slice(0, 16));
       expect(req.relevantPaths.length).toBeLessThanOrEqual(16);
+      // Bridge `needRelevantPaths` rejects overlapping scopes: nested
+      // descendants of another allowed scope are dropped.
+      const nestedProfile = profile({
+        allowedPaths: ["src", "src/lib", "docs"],
+      });
+      const st2 = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "investigate",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 7,
+          profile: nestedProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      const ap2 = repo.approveTrial(sessionId, st2.body.id, {
+        key: randomUUID(),
+        now: NOW + 8,
+        profile: nestedProfile,
+        workspaceAlias: "ws",
+      });
+      const exec2 = (ap2.body as { executionId: string }).executionId;
+      const c2 = repo.claimTrial(sessionId, exec2, {
+        key: randomUUID(),
+        now: NOW + 9,
+        profile: nestedProfile,
+        workspaceAlias: "ws",
+      });
+      expect(
+        (c2.body as { request: { relevantPaths: string[] } }).request
+          .relevantPaths,
+      ).toEqual(["src", "docs"]);
     } finally {
       closeKernelDatabase(handle);
     }

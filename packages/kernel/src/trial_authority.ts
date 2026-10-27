@@ -510,18 +510,25 @@ export function wireModeForReadOnly(readOnly: boolean): TrialWireMode {
  * frozen allowedPaths. The wire therefore stays inside the same fail-closed
  * scope staging validated, and a profile that does allow "." still works.
  *
- * `TrialLaunchRequestSchema.relevantPaths` caps at 16 while a profile may
- * declare up to 64 allowedPaths, so the synthesized list is bounded to the
- * wire cap (a subset of allowed scope, never wider). Deterministic order:
- * the frozen profile's declared order.
+ * The bridge (`needRelevantPaths`) rejects duplicate and overlapping scopes
+ * and caps the list at 16, while a profile may declare up to 64 allowedPaths.
+ * The synthesized list is therefore deduped, descendants of another entry
+ * dropped, and bounded to the wire cap: always a subset of allowed scope,
+ * never wider, and accepted by the bridge. Deterministic: profile order.
  */
 export function trialWireRelevantPaths(
   literalPatchPaths: readonly string[],
   allowedPaths: readonly string[],
 ): string[] {
-  return literalPatchPaths.length > 0
-    ? [...literalPatchPaths]
-    : allowedPaths.slice(0, 16);
+  const source =
+    literalPatchPaths.length > 0 ? literalPatchPaths : allowedPaths;
+  const unique = [...new Set(source)];
+  if (unique.includes(".")) return ["."];
+  const scoped = unique.filter(
+    (path) =>
+      !unique.some((other) => other !== path && path.startsWith(`${other}/`)),
+  );
+  return scoped.slice(0, 16);
 }
 
 export interface StageInput {
