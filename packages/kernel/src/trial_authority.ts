@@ -2432,6 +2432,259 @@ export function readWorkerOutcomeByProposal(
   return readWorkerOutcome(db, session, g.execution_id);
 }
 
+/** Bounded sealed-trial report surface. Guest text (summary/findings/
+ * unresolved) is presentation-only and unattested; checks/artifact/verified
+ * stay host-checked. Oversized values are truncated UTF-8-safely, extra
+ * findings/unresolved are dropped (never an authorization input). */
+export const TRIAL_REPORT_SUMMARY_MAX_BYTES = 2048;
+export const TRIAL_REPORT_FINDING_MAX_BYTES = 1024;
+export const TRIAL_REPORT_MAX_FINDINGS = 16;
+export const TRIAL_REPORT_MAX_UNRESOLVED = 8;
+export const TRIAL_REPORT_MAX_CHECKS = 16;
+/** Serialized-column budgets; MUST mirror the length() CHECKs in
+ * migrations/0033_trial_worker_reports.sql. */
+export const TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS = 32768;
+export const TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS = 16384;
+
+export interface TrialWorkerCheckView {
+  name: string;
+  outcome: "passed" | "failed";
+  exit: number | null;
+}
+
+export interface TrialWorkerReportInput {
+  summary: string;
+  findings: string[];
+  unresolved: string[];
+  checks: TrialWorkerCheckView[];
+  artifact: { sha256: string; entryCount: number } | null;
+  verified: boolean;
+}
+
+export interface TrialWorkerReportView extends TrialWorkerReportInput {
+  provenance: {
+    findings: "guest-reported-unattested";
+    checks: "host-checked";
+    artifact: "host-checked";
+  };
+}
+
+const REPORT_PROVENANCE = {
+  findings: "guest-reported-unattested",
+  checks: "host-checked",
+  artifact: "host-checked",
+} as const;
+
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function boundedReportText(value: unknown, maxBytes: number): string {
+  if (typeof value !== "string") return "";
+  return truncateUtf8Bytes(value.replaceAll("\u0000", ""), maxBytes);
+}
+
+/**
+ * Validate + bound one already-parsed wire report. Host authority is never
+ * derived from these fields; malformed presentation fields degrade to empty
+ * values instead of discarding the durable outcome (checks are validated by
+ * the bridge proof path separately).
+ */
+export function normalizeWorkerReport(
+  input: unknown,
+): TrialWorkerReportInput | null {
+  if (typeof input !== "object" || input === null) return null;
+  const record = input as Record<string, unknown>;
+  const findingsRaw = Array.isArray(record.findings) ? record.findings : [];
+  const unresolvedRaw = Array.isArray(record.unresolved)
+    ? record.unresolved
+    : [];
+  const checksRaw = Array.isArray(record.checks) ? record.checks : [];
+  const checks: TrialWorkerCheckView[] = [];
+  for (const entry of checksRaw) {
+    if (checks.length >= TRIAL_REPORT_MAX_CHECKS) break;
+    if (typeof entry !== "object" || entry === null) continue;
+    const check = entry as Record<string, unknown>;
+    if (
+      typeof check.name !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(check.name) ||
+      (check.outcome !== "passed" && check.outcome !== "failed")
+    ) {
+      continue;
+    }
+    const exit = check.exit;
+    if (
+      exit !== null &&
+      (typeof exit !== "number" || !Number.isSafeInteger(exit))
+    ) {
+      continue;
+    }
+    checks.push({ name: check.name, outcome: check.outcome, exit });
+  }
+  let artifact: TrialWorkerReportInput["artifact"] = null;
+  const rawArtifact = record.artifact;
+  if (typeof rawArtifact === "object" && rawArtifact !== null) {
+    const a = rawArtifact as Record<string, unknown>;
+    if (
+      typeof a.sha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(a.sha256) &&
+      typeof a.entryCount === "number" &&
+      Number.isSafeInteger(a.entryCount) &&
+      a.entryCount >= 0 &&
+      a.entryCount <= 1_000_000
+    ) {
+      artifact = { sha256: a.sha256, entryCount: a.entryCount };
+    }
+  }
+  return {
+    summary: boundedReportText(record.summary, TRIAL_REPORT_SUMMARY_MAX_BYTES),
+    findings: findingsRaw
+      .slice(0, TRIAL_REPORT_MAX_FINDINGS)
+      .map((entry) => boundedReportText(entry, TRIAL_REPORT_FINDING_MAX_BYTES)),
+    unresolved: unresolvedRaw
+      .slice(0, TRIAL_REPORT_MAX_UNRESOLVED)
+      .map((entry) => boundedReportText(entry, TRIAL_REPORT_FINDING_MAX_BYTES)),
+    checks,
+    artifact,
+    verified: record.verified === true,
+  };
+}
+
+/** Serialize a string array to JSON within `maxChars` so the storage CHECK
+ * limits hold even for worst-case escaping (quotes/backslashes/control
+ * characters) — presentation text must never roll back a durable outcome.
+ * Items are kept in order; the item that overflows the budget is shrunk at a
+ * code-point boundary so its JSON fits the remaining space, and everything
+ * after it is dropped (the durable outcome is never discarded over text). */
+function serializeBoundedJsonArray(
+  items: readonly string[],
+  maxChars: number,
+): string {
+  const encoded: string[] = [];
+  let size = 2;
+  for (const item of items) {
+    const json = JSON.stringify(item);
+    const separator = encoded.length === 0 ? 0 : 1;
+    if (size + separator + json.length <= maxChars) {
+      encoded.push(json);
+      size += separator + json.length;
+      continue;
+    }
+    // Shrink this item to the remaining budget instead of losing all text.
+    const budget = maxChars - size - separator - 2;
+    if (budget > 0) {
+      const codePoints = Array.from(item);
+      while (codePoints.length > 0) {
+        const candidate = JSON.stringify(codePoints.join(""));
+        if (candidate.length <= budget) {
+          encoded.push(candidate);
+          size += separator + candidate.length;
+          break;
+        }
+        codePoints.pop();
+      }
+    }
+    break;
+  }
+  return `[${encoded.join(",")}]`;
+}
+
+function insertWorkerReport(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+  report: TrialWorkerReportInput,
+  now: number,
+): void {
+  db.prepare(
+    "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  ).run(
+    executionId,
+    sessionId,
+    report.summary,
+    serializeBoundedJsonArray(
+      report.findings,
+      TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS,
+    ),
+    serializeBoundedJsonArray(
+      report.unresolved,
+      TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS,
+    ),
+    JSON.stringify(report.checks),
+    report.artifact === null ? null : JSON.stringify(report.artifact),
+    report.verified ? 1 : 0,
+    now,
+  );
+}
+
+/** Pure report read for the session trial surface (never mutates). */
+export function readWorkerReport(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+): TrialWorkerReportView | null {
+  const session = requireId(sessionId, "sessionId");
+  const exec = requireId(executionId, "executionId");
+  const g = db
+    .prepare("SELECT session_id FROM trial_grants WHERE execution_id=?")
+    .get(exec) as { session_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  const row = db
+    .prepare(
+      "SELECT summary, findings_json, unresolved_json, checks_json, artifact_json, verified FROM trial_worker_reports WHERE execution_id=?",
+    )
+    .get(exec) as
+    | {
+        summary: string;
+        findings_json: string;
+        unresolved_json: string;
+        checks_json: string;
+        artifact_json: string | null;
+        verified: number;
+      }
+    | undefined;
+  if (!row) return null;
+  const parseArray = (text: string): unknown[] => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  const normalized = normalizeWorkerReport({
+    summary: row.summary,
+    findings: parseArray(row.findings_json),
+    unresolved: parseArray(row.unresolved_json),
+    checks: parseArray(row.checks_json),
+    artifact: row.artifact_json === null ? null : JSON.parse(row.artifact_json),
+    verified: row.verified === 1,
+  });
+  if (normalized === null) return null;
+  return { ...normalized, provenance: REPORT_PROVENANCE };
+}
+
+/** Pure report read by proposal (null before a grant/report exists). */
+export function readWorkerReportByProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): TrialWorkerReportView | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const g = db
+    .prepare(
+      "SELECT session_id, execution_id FROM trial_grants WHERE proposal_id=?",
+    )
+    .get(pid) as { session_id: string; execution_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  return readWorkerReport(db, session, g.execution_id);
+}
+
 /**
  * Record a trusted validated worker result. The result proof (taskHash,
  * exitCode, exact check list vs the frozen requiredChecks, outputMatched,
@@ -2460,6 +2713,7 @@ export function recordWorkerResult(
       outputMatched: boolean;
       noTimeout: boolean;
     };
+    report?: TrialWorkerReportInput | null;
   },
 ): {
   executionId: string;
@@ -2568,6 +2822,10 @@ export function recordWorkerResult(
       db.prepare(
         "INSERT INTO trial_worker_outcomes (execution_id, session_id, succeeded, quiescent, authorized, task_hash, detail, recorded_at) VALUES (?,?,?,?,?,?,?,?)",
       ).run(exec, session, 1, 0, 0, r.taskHash, input.detail, now);
+      const lateReport = normalizeWorkerReport(input.report ?? null);
+      if (lateReport !== null && lateReport !== undefined) {
+        insertWorkerReport(db, session, exec, lateReport, now);
+      }
       return {
         executionId: exec,
         outcome: "observed" as const,
@@ -2706,6 +2964,10 @@ export function recordWorkerResult(
         : `observed-not-authorized:${reason}:${input.detail}`.slice(0, 2000),
       now,
     );
+    const report = normalizeWorkerReport(input.report ?? null);
+    if (report !== null && report !== undefined) {
+      insertWorkerReport(db, session, exec, report, now);
+    }
     if (authorized) {
       db.prepare(
         "UPDATE trial_grants SET status='consumed' WHERE execution_id=? AND status='claimed'",
