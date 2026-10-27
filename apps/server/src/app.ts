@@ -5143,8 +5143,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       {
         workspaceAlias: frozen.workspaceAlias,
         mandatoryChecks: [...frozen.profile.mandatoryChecks],
-        allowedPaths: [...(frozen.profile.allowedPaths ?? [])],
-        modelRoute: frozen.profile.modelRoute ?? "local",
+        allowedPaths: [...frozen.profile.allowedPaths],
+        modelRoute: frozen.profile.modelRoute,
         ceilings: {
           timeoutMs: frozen.profile.timeoutMs,
           maxOutputBytes: frozen.profile.maxOutputBytes,

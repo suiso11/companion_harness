@@ -4414,7 +4414,8 @@ proposals, grants, runner, or bridge spawn.
   the runner keeps a bounded (≤2048-byte) UTF-8-safe redacted stderr head
   and stores its lines as `report.unresolved` entries prefixed `bridge: `
   with a fixed summary, so the reason is visible instead of only
-  `bridge-exit:N`.
+  `bridge-exit:N`; the same host-observed bridge failure reasons are
+  mirrored in `report.hostDiagnostics` (bounded to 4 entries × 512 bytes).
 - A nonzero executor remains exit 10, but the journal report now carries
   bounded (2048-byte) redacted diagnostics: guest observation fields
   (`engine`, `executorKind`, `ompExitCode`, `timedOut`, tool counts,
