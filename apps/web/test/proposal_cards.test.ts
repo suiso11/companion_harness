@@ -3,7 +3,6 @@ import {
   conversationProposalCards,
   createProposalSyncGuard,
   frozenProposalDecision,
-  isDefinitiveProposalReply,
   proposalCardErrorText,
   trialProposalCards,
 } from "../src/lib/proposal_cards.js";
@@ -266,15 +265,13 @@ describe("frozenProposalDecision", () => {
   it("reuses the same key and body for an uncertain retry", () => {
     const first = frozenProposalDecision(
       null,
-      "p1",
-      "accept",
+      "p1accept",
       { expectedVersion: 3 },
       "key-1",
     );
     const retry = frozenProposalDecision(
       first,
-      "p1",
-      "accept",
+      "p1accept",
       { expectedVersion: 4 },
       "key-2",
     );
@@ -286,15 +283,13 @@ describe("frozenProposalDecision", () => {
   it("starts a new command for a different action or proposal", () => {
     const first = frozenProposalDecision(
       null,
-      "p1",
-      "accept",
+      "p1accept",
       { expectedVersion: 3 },
       "key-1",
     );
     const reject = frozenProposalDecision(
       first,
-      "p1",
-      "reject",
+      "p1reject",
       { expectedVersion: 4 },
       "key-2",
     );
@@ -302,20 +297,10 @@ describe("frozenProposalDecision", () => {
     expect(reject.body.expectedVersion).toBe(4);
     const other = frozenProposalDecision(
       reject,
-      "p2",
-      "reject",
+      "p2reject",
       { expectedVersion: 5 },
       "key-3",
     );
     expect(other.key).toBe("key-3");
-  });
-
-  it("treats only 2xx/4xx as definitive (0 and 5xx stay uncertain)", () => {
-    for (const status of [200, 201, 204, 400, 404, 409]) {
-      expect(isDefinitiveProposalReply(status)).toBe(true);
-    }
-    for (const status of [0, 301, 500, 503]) {
-      expect(isDefinitiveProposalReply(status)).toBe(false);
-    }
   });
 });

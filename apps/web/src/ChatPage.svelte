@@ -23,7 +23,6 @@ import {
   createProposalSyncGuard,
   type FrozenProposalDecision,
   frozenProposalDecision,
-  isDefinitiveProposalReply,
   type ParentPurposeSnapshot,
   proposalCardErrorText,
   trialProposalCards,
@@ -2369,35 +2368,31 @@ async function decideConversationProposalCard(
   proposalNotice = "";
   // Same body the Proposals panel sends: CAS on the staged version. An
   // uncertain retry reuses this exact key + expectedVersion (review #154).
-  const decision = frozenProposalDecision(
+  pendingCardDecision = frozenProposalDecision(
     pendingCardDecision,
-    card.proposalId,
-    action,
+    card.key + action,
     { expectedVersion: card.version },
     randomUuid(),
   );
-  pendingCardDecision = decision;
   let result: { status: number };
   try {
     result = await postJson(
       `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals/${encodeURIComponent(card.proposalId)}/${action}`,
-      decision.body,
-      decision.key,
+      pendingCardDecision.body,
+      pendingCardDecision.key,
     );
   } catch {
     if (sessionId === sid) {
       proposalDeciding = null;
-      proposalNotice =
-        "通信が不確定です。もう一度「採用する」または「見送る」を押してください";
+      proposalNotice = proposalCardErrorText(0);
     }
     return;
   }
   if (sessionId !== sid) return;
   proposalDeciding = null;
-  if (!isDefinitiveProposalReply(result.status)) {
+  if (result.status === 0 || result.status >= 500) {
     // Network / 5xx: keep the frozen command and the card for a retry.
-    proposalNotice =
-      "通信が不確定です。もう一度「採用する」または「見送る」を押してください";
+    proposalNotice = proposalCardErrorText(0);
     return;
   }
   pendingCardDecision = null;
@@ -2419,24 +2414,13 @@ async function decideTrialProposalCard(
   const sid = sessionId;
   proposalDeciding = card.key;
   proposalNotice = "";
-  // approve is keyed; expire is deliberately keyless (state-idempotent).
-  const decision =
-    action === "approve"
-      ? frozenProposalDecision(
-          pendingCardDecision,
-          card.proposalId,
-          action,
-          {},
-          randomUuid(),
-        )
-      : null;
-  if (decision !== null) pendingCardDecision = decision;
   let result: { status: number };
   try {
     result = await postJson(
       `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
       {},
-      decision?.key ?? null,
+      // approve is keyed; expire is deliberately keyless (state-idempotent).
+      action === "approve" ? randomUuid() : null,
     );
   } catch {
     if (sessionId === sid) {
@@ -2447,12 +2431,6 @@ async function decideTrialProposalCard(
   }
   if (sessionId !== sid) return;
   proposalDeciding = null;
-  if (decision !== null && !isDefinitiveProposalReply(result.status)) {
-    // Network / 5xx: keep the frozen approve command for an idempotent retry.
-    proposalNotice = "通信が不確定です。もう一度「承認する」を押してください";
-    return;
-  }
-  if (decision !== null) pendingCardDecision = null;
   const ok =
     action === "approve" ? result.status === 201 : result.status === 200;
   proposalNotice = ok

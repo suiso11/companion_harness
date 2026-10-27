@@ -312,8 +312,8 @@ export function proposalCardErrorText(status: number): string {
  * different body under the same key.
  */
 export interface FrozenProposalDecision<Body> {
-  readonly proposalId: string;
-  readonly action: string;
+  /** proposalId + action — the freeze identity. */
+  readonly id: string;
   readonly key: string;
   readonly body: Body;
 }
@@ -322,25 +322,11 @@ export interface FrozenProposalDecision<Body> {
  * freeze a new key + body. A different action/proposal starts a new command. */
 export function frozenProposalDecision<Body>(
   pending: FrozenProposalDecision<Body> | null,
-  proposalId: string,
-  action: string,
+  id: string,
   body: Body,
-  newKey: string,
+  key: string,
 ): FrozenProposalDecision<Body> {
-  if (
-    pending !== null &&
-    pending.proposalId === proposalId &&
-    pending.action === action
-  ) {
-    return pending;
-  }
-  return { proposalId, action, key: newKey, body };
-}
-
-/** A definitive reply (2xx/4xx) ends the frozen command. Status 0 (network)
- * and 5xx stay uncertain, so the next retry reuses the SAME key + body. */
-export function isDefinitiveProposalReply(status: number): boolean {
-  return (status >= 200 && status < 300) || (status >= 400 && status < 500);
+  return pending?.id === id ? pending : { id, key, body };
 }
 
 /**
