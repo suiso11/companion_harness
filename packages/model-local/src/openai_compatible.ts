@@ -120,6 +120,8 @@ export function normalizeOpenAIResponse(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "response_shape_invalid" },
     );
   }
   const choice = body.choices[0];
@@ -127,6 +129,8 @@ export function normalizeOpenAIResponse(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "response_shape_invalid" },
     );
   }
   const message = choice.message;
@@ -136,6 +140,8 @@ export function normalizeOpenAIResponse(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "response_shape_invalid" },
       );
     }
     text = message.content;
@@ -152,6 +158,8 @@ export function normalizeOpenAIResponse(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "tool_call_shape_invalid" },
       );
     }
     // Atomic: any oversize/invalid call throws before a ChatResult is
@@ -178,6 +186,8 @@ export function normalizeOpenAIResponse(
           throw new ModelLocalError(
             "invalid_response",
             "model returned an invalid response",
+            undefined,
+            { invalidResponseCause: "tool_call_shape_invalid" },
           );
         }
         throw new ModelLocalError(
@@ -211,6 +221,8 @@ export function normalizeOpenAIResponse(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "usage_invalid" },
     );
   } else {
     usage = extractModelUsage(

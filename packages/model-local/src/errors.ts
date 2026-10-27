@@ -37,6 +37,21 @@ export type ModelLocalAnswerInvalidReason =
 export const MODEL_LOCAL_INVALID_RESPONSE_CAUSES = [
   "response_too_large",
   "malformed_json",
+  "sse_line_invalid",
+  "chunk_shape_invalid",
+  "content_too_long",
+  "tool_call_shape_invalid",
+  "tool_call_arguments_too_large",
+  "stream_incomplete",
+  "trailing_data",
+  "unexpected_content_type",
+  "response_shape_invalid",
+  "result_shape_invalid",
+  "usage_invalid",
+  "encoding_invalid",
+  "connection_refused",
+  "connection_reset",
+  "connection_closed",
 ] as const;
 export type ModelLocalInvalidResponseCause =
   (typeof MODEL_LOCAL_INVALID_RESPONSE_CAUSES)[number];

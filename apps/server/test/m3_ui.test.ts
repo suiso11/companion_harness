@@ -432,6 +432,97 @@ describe("M3 client reducer contract", () => {
     expect(abandoned.state.answer).toEqual([]);
   });
 
+  it("maps model.step.failed diagnostics to fixed Japanese failure reasons", () => {
+    const cases: Array<{
+      payload: Record<string, unknown>;
+      expected: string;
+    }> = [
+      {
+        payload: { step: 1, errorCode: "model_step_timeout" },
+        expected: "時間切れ（1回5分）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "request_failed",
+          httpStatus: 503,
+        },
+        expected: "モデルサーバーが応答しません（起動中の可能性）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "transport_error",
+          invalidResponseCause: "connection_refused",
+        },
+        expected: "モデルサーバーが応答しません（起動中の可能性）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "invalid_response",
+          invalidResponseCause: "response_too_large",
+        },
+        expected: "返答が大きすぎます",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "invalid_response",
+          invalidResponseCause: "malformed_json",
+        },
+        expected: "モデルの返答形式が不正です（malformed_json）",
+      },
+      {
+        payload: { step: 1, errorCode: "answer_invalid" },
+        expected: "回答の形式が崩れました",
+      },
+    ];
+    for (const testCase of cases) {
+      const started = applyRunEvent(INITIAL_RUN_VIEW, {
+        seq: 1,
+        type: "run.started",
+        payload: {},
+      }).state;
+      const failedStep = applyRunEvent(started, {
+        seq: 2,
+        type: "model.step.failed",
+        payload: testCase.payload,
+      });
+      expect(failedStep.outcome.kind).toBe("applied");
+      const failed = applyRunEvent(failedStep.state, {
+        seq: 3,
+        type: "run.failed",
+        payload: { errorCode: "execution_failed" },
+      }).state;
+      expect(failed.notice).toBe(testCase.expected);
+      expect(failed.retryVisible).toBe(true);
+    }
+
+    const started = applyRunEvent(INITIAL_RUN_VIEW, {
+      seq: 1,
+      type: "run.started",
+      payload: {},
+    }).state;
+    const outputInvalid = applyRunEvent(started, {
+      seq: 2,
+      type: "run.failed",
+      payload: { errorCode: "output_invalid" },
+    }).state;
+    expect(outputInvalid.notice).toBe("回答の形式が崩れました");
+
+    const noDiagnostics = applyRunEvent(started, {
+      seq: 2,
+      type: "run.failed",
+      payload: { errorCode: "execution_failed" },
+    }).state;
+    expect(noDiagnostics.notice).toBe("生成に失敗しました");
+  });
+
   it("maps real V1 and V2 RunResult rows to answer parts", () => {
     // V1 historical M0/M1 row: text only, no citations.
     const v1 = runResultToAnswerParts({ version: 1, text: "legacy answer" });

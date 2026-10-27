@@ -2755,6 +2755,7 @@ export async function startServer(
             try {
               logger.warn("model.step.failed", {
                 runId: failure.runId,
+                step: failure.step,
                 ...(failure.durationMs === undefined
                   ? {}
                   : { durationMs: failure.durationMs }),
@@ -2770,6 +2771,26 @@ export async function startServer(
                 ...(failure.httpStatus === undefined
                   ? {}
                   : { httpStatus: failure.httpStatus }),
+              });
+            } catch {
+              // Best effort: observability never fails the strategy.
+            }
+          },
+          // One transient retry audit: fixed step/delay plus either the
+          // numeric HTTP status or the fixed connection cause. Never model
+          // text, bodies, headers, prompts, or reasoning.
+          onModelStepRetried: (retry): void => {
+            try {
+              logger.warn("model.step.retried", {
+                runId: retry.runId,
+                step: retry.step,
+                delayMs: retry.delayMs,
+                ...(retry.invalidResponseCause === undefined
+                  ? {}
+                  : { invalidResponseCause: retry.invalidResponseCause }),
+                ...(retry.httpStatus === undefined
+                  ? {}
+                  : { httpStatus: retry.httpStatus }),
               });
             } catch {
               // Best effort: observability never fails the strategy.

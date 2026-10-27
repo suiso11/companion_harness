@@ -104,6 +104,8 @@ export function normalizeOllamaResponse(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "response_shape_invalid" },
     );
   }
   const message = body.message;
@@ -113,6 +115,8 @@ export function normalizeOllamaResponse(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "response_shape_invalid" },
       );
     }
     text = message.content;
@@ -129,6 +133,8 @@ export function normalizeOllamaResponse(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "tool_call_shape_invalid" },
       );
     }
     // Atomic: any oversize/invalid call throws before a ChatResult is

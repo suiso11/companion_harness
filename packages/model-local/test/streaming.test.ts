@@ -670,6 +670,68 @@ describe("strict streaming errors", () => {
     expect(oversized.invalidResponseCause).toBe("response_too_large");
   });
 
+  it("reports a fixed cause for representative invalid streams", async () => {
+    const notSse = new Response(
+      JSON.stringify({ choices: [{ message: { content: "x" } }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+    const unexpected = await (async (): Promise<ModelLocalError> => {
+      const { fetchImpl } = mockFetch(notSse);
+      try {
+        await streamingGateway(fetchImpl).chat(baseRequest());
+        expect.unreachable();
+      } catch (error) {
+        return error as ModelLocalError;
+      }
+    })();
+    expect(unexpected.code).toBe("invalid_response");
+    expect(unexpected.invalidResponseCause).toBe("unexpected_content_type");
+
+    const chunk = await streamError([
+      sseChunk({ choices: "nope" }),
+      "data: [DONE]\n\n",
+    ]);
+    expect(chunk.invalidResponseCause).toBe("chunk_shape_invalid");
+
+    const usage = await streamError([
+      sseChunk({ choices: [], usage: "nope" }),
+      "data: [DONE]\n\n",
+    ]);
+    expect(usage.invalidResponseCause).toBe("usage_invalid");
+
+    const trailing = await streamError([
+      sseChunk({ choices: [{ delta: { content: "x" } }] }),
+      "data: [DONE]\n\n",
+      sseChunk({ choices: [{ delta: { content: "late" } }] }),
+    ]);
+    expect(trailing.invalidResponseCause).toBe("trailing_data");
+
+    const incomplete = await streamError([
+      sseChunk({ choices: [{ delta: { content: "x" } }] }),
+    ]);
+    expect(incomplete.invalidResponseCause).toBe("stream_incomplete");
+
+    const broken = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("fixed-read-failure"));
+      },
+    });
+    const { fetchImpl } = mockFetch(
+      new Response(broken, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    try {
+      await streamingGateway(fetchImpl).chat(baseRequest());
+      expect.unreachable();
+    } catch (error) {
+      expect((error as ModelLocalError).invalidResponseCause).toBe(
+        "sse_line_invalid",
+      );
+    }
+  });
+
   it("reports HTTP status without the provider body", async () => {
     const { fetchImpl } = mockFetch(
       new Response("provider-body-must-not-leak", { status: 502 }),

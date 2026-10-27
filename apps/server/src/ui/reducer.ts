@@ -38,6 +38,11 @@ export interface RunViewState {
   readonly stopVisible: boolean;
   /** Last visible message ("生成中", answer head, failure, "停止しました"). */
   readonly notice: string;
+  /**
+   * Fixed Japanese reason derived from the latest `model.step.failed`
+   * diagnostics (null when none was mappable). Never carries provider text.
+   */
+  readonly failureNotice: string | null;
 }
 
 export interface ReducerInputEvent {
@@ -59,6 +64,7 @@ export const INITIAL_RUN_VIEW: RunViewState = {
   retryVisible: false,
   stopVisible: true,
   notice: "生成中",
+  failureNotice: null,
 };
 
 /** Known non-final extension types: no visible change (plan §16.2). */
@@ -68,8 +74,104 @@ const SILENT_TYPES: ReadonlySet<string> = new Set([
   "reference.presented",
   "model.step.started",
   "model.step.completed",
-  "model.step.failed",
 ]);
+
+/** Fixed connection-level transport causes (model server not answering). */
+const CONNECTION_CAUSES: ReadonlySet<string> = new Set([
+  "connection_refused",
+  "connection_reset",
+  "connection_closed",
+]);
+
+/** Fixed Japanese reason strings shared by the run failure notice. */
+export const MODEL_FAILURE_NOTICES = {
+  timeout: "時間切れ（1回5分）",
+  unreachable: "モデルサーバーが応答しません（起動中の可能性）",
+  tooLarge: "返答が大きすぎます",
+  malformed: "回答の形式が崩れました",
+} as const;
+
+/** Fixed diagnostic subset from one `model.step.failed` payload. */
+export interface ModelFailureDiagnostics {
+  readonly errorCode: string | null;
+  readonly gatewayErrorCode: string | null;
+  readonly invalidResponseCause: string | null;
+  readonly httpStatus: number | null;
+}
+
+function readOptionalString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+/** Defensive read of the fixed payload fields (never throws). */
+export function readModelFailureDiagnostics(
+  payload: unknown,
+): ModelFailureDiagnostics | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const httpStatus = record.httpStatus;
+  return {
+    errorCode: readOptionalString(record, "errorCode"),
+    gatewayErrorCode: readOptionalString(record, "gatewayErrorCode"),
+    invalidResponseCause: readOptionalString(record, "invalidResponseCause"),
+    httpStatus:
+      typeof httpStatus === "number" &&
+      Number.isInteger(httpStatus) &&
+      httpStatus >= 100 &&
+      httpStatus <= 599
+        ? httpStatus
+        : null,
+  };
+}
+
+/**
+ * Map fixed diagnostics to the fixed Japanese failure reason. Only the
+ * latest `model.step.failed` payload and fixed enums/statuses are used; no
+ * model text, prompt, body, header, or raw error can reach the notice.
+ */
+export function modelFailureNotice(
+  diagnostics: ModelFailureDiagnostics | null,
+): string | null {
+  if (diagnostics === null) {
+    return null;
+  }
+  if (diagnostics.errorCode === "model_step_timeout") {
+    return MODEL_FAILURE_NOTICES.timeout;
+  }
+  if (
+    diagnostics.errorCode === "answer_invalid" ||
+    diagnostics.errorCode === "output_invalid"
+  ) {
+    return MODEL_FAILURE_NOTICES.malformed;
+  }
+  if (
+    diagnostics.gatewayErrorCode === "request_failed" &&
+    (diagnostics.httpStatus === 502 ||
+      diagnostics.httpStatus === 503 ||
+      diagnostics.httpStatus === 504)
+  ) {
+    return MODEL_FAILURE_NOTICES.unreachable;
+  }
+  if (
+    diagnostics.invalidResponseCause !== null &&
+    CONNECTION_CAUSES.has(diagnostics.invalidResponseCause)
+  ) {
+    return MODEL_FAILURE_NOTICES.unreachable;
+  }
+  if (diagnostics.invalidResponseCause === "response_too_large") {
+    return MODEL_FAILURE_NOTICES.tooLarge;
+  }
+  if (diagnostics.gatewayErrorCode === "invalid_response") {
+    return `モデルの返答形式が不正です（${diagnostics.invalidResponseCause ?? "unknown"}）`;
+  }
+  return null;
+}
 
 /** Aligned voiced texts from a `rendered` voice projection, else null. */
 function readRenderedVoice(voice: unknown, partCount: number): string[] | null {
@@ -210,6 +312,7 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: true,
           notice: "生成中",
+          failureNotice: null,
         },
         outcome: { kind: "applied" },
       };
@@ -228,11 +331,38 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: false,
           notice: "回答が届きました",
+          failureNotice: null,
+        },
+        outcome: { kind: "applied" },
+      };
+    case "model.step.failed":
+      // Fixed diagnostics only: the latest failure can explain the eventual
+      // run failure (or remain silent until `run.failed`).
+      return {
+        state: {
+          ...state,
+          cursor,
+          failureNotice: modelFailureNotice(
+            readModelFailureDiagnostics(event.payload),
+          ),
         },
         outcome: { kind: "applied" },
       };
     case "run.failed":
-    case "run.abandoned":
+    case "run.abandoned": {
+      const errorCode =
+        event.type === "run.failed" &&
+        typeof event.payload === "object" &&
+        event.payload !== null
+          ? readOptionalString(
+              event.payload as Record<string, unknown>,
+              "errorCode",
+            )
+          : null;
+      const fallback =
+        errorCode === "output_invalid" || errorCode === "answer_invalid"
+          ? MODEL_FAILURE_NOTICES.malformed
+          : null;
       return {
         state: {
           cursor,
@@ -240,10 +370,12 @@ export function applyRunEvent(
           answer: [],
           retryVisible: true,
           stopVisible: false,
-          notice: "生成に失敗しました",
+          notice: state.failureNotice ?? fallback ?? "生成に失敗しました",
+          failureNotice: state.failureNotice ?? fallback,
         },
         outcome: { kind: "applied" },
       };
+    }
     case "run.cancel_requested":
       // Non-terminal (§11.5): the Run stays active until `run.cancelled`
       // settles. Keep the active view (stream open, submit disabled, stop
@@ -270,6 +402,7 @@ export function applyRunEvent(
           retryVisible: false,
           stopVisible: false,
           notice: "停止しました",
+          failureNotice: null,
         },
         outcome: { kind: "applied" },
       };

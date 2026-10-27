@@ -437,6 +437,8 @@ export function assertToolArgumentsByteLength(byteLength: number): void {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "tool_call_arguments_too_large" },
     );
   }
 }
@@ -505,6 +507,8 @@ export function assertToolArgumentsByteLengthForTool(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "tool_call_arguments_too_large" },
     );
   }
 }
@@ -543,6 +547,8 @@ function nativeToolCallOversizeError(): ModelLocalError {
   return new ModelLocalError(
     "invalid_response",
     "model returned an invalid response",
+    undefined,
+    { invalidResponseCause: "tool_call_shape_invalid" },
   );
 }
 
@@ -561,6 +567,8 @@ export function assertAssistantTextWithinBound(text: string): void {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "content_too_long" },
     );
   }
 }
@@ -1164,10 +1172,13 @@ export async function postJsonNoRedirect(options: {
             undefined,
             { invalidResponseCause: "response_too_large" },
           ),
-        failed: () =>
+        failed: (error) =>
+          connectionFailureError(error) ??
           new ModelLocalError(
             "invalid_response",
             "model returned an invalid response",
+            undefined,
+            { invalidResponseCause: "response_shape_invalid" },
           ),
       },
     );
@@ -1288,7 +1299,7 @@ async function readBoundedBodyText(
   limit: number,
   failures: {
     tooLarge: () => ModelLocalError;
-    failed: () => ModelLocalError;
+    failed: (error: unknown) => ModelLocalError;
   },
 ): Promise<string> {
   if (isAborted(externalSignal)) {
@@ -1319,14 +1330,14 @@ async function readBoundedBodyText(
       let next: { done: boolean; value?: Uint8Array | undefined };
       try {
         next = await reader.read();
-      } catch {
+      } catch (error) {
         if (isAborted(externalSignal)) {
           throw toAbortRejection(externalSignal as AbortSignal);
         }
         if (controller.signal.aborted) {
           throw new ModelLocalError("timeout", "model request timed out");
         }
-        throw failures.failed();
+        throw failures.failed(error);
       }
       if (next.done) {
         // A timeout or external abort can surface as `done=true` (reader
@@ -1392,6 +1403,8 @@ async function readBoundedBodyText(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "encoding_invalid" },
       );
     }
   } finally {
@@ -1421,6 +1434,74 @@ function toAbortRejection(signal: AbortSignal): unknown {
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
+/** Collect error codes/messages through the bounded `cause` chain. */
+function errorSignalText(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (
+    let depth = 0;
+    depth < 4 && current !== undefined && current !== null;
+    depth += 1
+  ) {
+    if (typeof current === "object") {
+      const record = current as {
+        code?: unknown;
+        message?: unknown;
+        cause?: unknown;
+      };
+      try {
+        if (typeof record.code === "string") {
+          parts.push(record.code.toLowerCase());
+        }
+        if (typeof record.message === "string") {
+          parts.push(record.message.toLowerCase());
+        }
+        current = record.cause;
+      } catch {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Fixed connection-level transport cause for ECONNREFUSED/ECONNRESET/
+ * socket-closed failures (never carries the raw error text). Returns null
+ * for non-connection failures.
+ */
+export function connectionFailureError(error: unknown): ModelLocalError | null {
+  const text = errorSignalText(error);
+  let cause:
+    | "connection_refused"
+    | "connection_reset"
+    | "connection_closed"
+    | null = null;
+  if (text.includes("econnrefused")) {
+    cause = "connection_refused";
+  } else if (text.includes("econnreset") || text.includes("socket hang up")) {
+    cause = "connection_reset";
+  } else if (
+    text.includes("econnclosed") ||
+    text.includes("other side closed") ||
+    text.includes("socket closed") ||
+    text.includes("connection closed")
+  ) {
+    cause = "connection_closed";
+  }
+  if (cause === null) {
+    return null;
+  }
+  return new ModelLocalError(
+    "transport_error",
+    "model transport failed",
+    undefined,
+    { invalidResponseCause: cause },
+  );
+}
+
 /** Map fetch rejections to redacted codes (redirects are never followed). */
 function mapFetchRejection(error: unknown): ModelLocalError {
   if (error instanceof ModelLocalError) {
@@ -1438,6 +1519,10 @@ function mapFetchRejection(error: unknown): ModelLocalError {
     // timeout guard, so an abort here means the step timed out (fixed
     // safe code, no raw detail echoed).
     return new ModelLocalError("timeout", "model request timed out");
+  }
+  const connection = connectionFailureError(error);
+  if (connection !== null) {
+    return connection;
   }
   return new ModelLocalError("transport_error", "model transport failed");
 }
@@ -1537,6 +1622,8 @@ export function validateChatResult(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "result_shape_invalid" },
     );
   }
   const source = result as object;
@@ -1553,18 +1640,24 @@ export function validateChatResult(
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "result_shape_invalid" },
       );
     }
     if (descriptor === undefined) {
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "result_shape_invalid" },
       );
     }
     if (descriptor.get !== undefined || descriptor.set !== undefined) {
       throw new ModelLocalError(
         "invalid_response",
         "model returned an invalid response",
+        undefined,
+        { invalidResponseCause: "result_shape_invalid" },
       );
     }
     return descriptor.value;
@@ -1576,6 +1669,8 @@ export function validateChatResult(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "result_shape_invalid" },
     );
   }
   // Text bound first so an oversize batch containing a malformed
@@ -1589,12 +1684,16 @@ export function validateChatResult(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "result_shape_invalid" },
     );
   }
   if (!Array.isArray(toolCallsValue)) {
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "result_shape_invalid" },
     );
   }
   const toolCalls = toolCallsValue as unknown[];
@@ -1875,6 +1974,8 @@ export function extractModelUsage(
     throw new ModelLocalError(
       "invalid_response",
       "model returned an invalid response",
+      undefined,
+      { invalidResponseCause: "usage_invalid" },
     );
   }
   return {

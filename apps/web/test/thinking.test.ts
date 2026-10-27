@@ -216,6 +216,95 @@ describe("phase derivation (durable counters only)", () => {
   });
 });
 
+describe("model failure reasons (fixed diagnostics)", () => {
+  test("maps the latest model.step.failed payload to fixed Japanese text", () => {
+    const cases: Array<{
+      payload: Record<string, unknown>;
+      expected: string;
+    }> = [
+      {
+        payload: { step: 1, errorCode: "model_step_timeout" },
+        expected: "時間切れ（1回5分）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "request_failed",
+          httpStatus: 502,
+        },
+        expected: "モデルサーバーが応答しません（起動中の可能性）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "transport_error",
+          invalidResponseCause: "connection_reset",
+        },
+        expected: "モデルサーバーが応答しません（起動中の可能性）",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "invalid_response",
+          invalidResponseCause: "response_too_large",
+        },
+        expected: "返答が大きすぎます",
+      },
+      {
+        payload: {
+          step: 1,
+          errorCode: "model_unavailable",
+          gatewayErrorCode: "invalid_response",
+          invalidResponseCause: "stream_incomplete",
+        },
+        expected: "モデルの返答形式が不正です（stream_incomplete）",
+      },
+      {
+        payload: { step: 1, errorCode: "answer_invalid" },
+        expected: "回答の形式が崩れました",
+      },
+    ];
+    for (const testCase of cases) {
+      const view = stateAt([
+        { seq: 1, type: "run.started", payload: {} },
+        {
+          seq: 2,
+          type: "model.step.failed",
+          payload: testCase.payload,
+        },
+        {
+          seq: 3,
+          type: "run.failed",
+          payload: { errorCode: "execution_failed" },
+        },
+      ]);
+      expect(view.notice).toBe(testCase.expected);
+      expect(view.failureNotice).toBe(testCase.expected);
+      expect(view.retryVisible).toBe(true);
+    }
+  });
+
+  test("falls back to the generic failure and maps output_invalid", () => {
+    const generic = stateAt([
+      { seq: 1, type: "run.started", payload: {} },
+      {
+        seq: 2,
+        type: "run.failed",
+        payload: { errorCode: "execution_failed" },
+      },
+    ]);
+    expect(generic.notice).toBe("生成に失敗しました");
+    const invalid = stateAt([
+      { seq: 1, type: "run.started", payload: {} },
+      { seq: 2, type: "run.failed", payload: { errorCode: "output_invalid" } },
+    ]);
+    expect(invalid.notice).toBe("回答の形式が崩れました");
+  });
+});
+
 describe("cancellation run views (PR #82 review)", () => {
   test("run.cancel_requested stays generating with the stop notice", () => {
     // PR #82 review (4312961764): the run stays "generating" (non-terminal,
