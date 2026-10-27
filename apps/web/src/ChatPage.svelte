@@ -3476,6 +3476,9 @@ function evidenceForTurn(turn: Turn): {
         {#if card.quote !== ""}
           <p data-proposal-quote="true">引用: {card.quote}</p>
         {/if}
+        {#each card.detailLines as line, index (index)}
+          <p data-proposal-detail="true">{line}</p>
+        {/each}
         {#if card.source === "conversation"}
           <button
             type="button"

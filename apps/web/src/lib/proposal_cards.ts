@@ -7,6 +7,7 @@
 // dedicated Proposals/Trials pages remain the full review surface. This
 // module never fetches or mutates anything, so it can be unit-tested
 // without a DOM.
+import { type TrialProposalInput, trialProposalModel } from "./reducer.js";
 
 export type ChatProposalSource = "conversation" | "trial";
 
@@ -26,6 +27,22 @@ export interface TrialProposalItem {
   readonly id: string;
   readonly status: string;
   readonly objective?: string | null;
+  /** Frozen permission snapshot from the trial list API. Absent/malformed
+   * fields fail closed: no approval without a reviewable snapshot. */
+  readonly acceptance?: readonly string[];
+  readonly literalPatchPaths?: readonly string[];
+  readonly operation?: string;
+  readonly readOnlyMode?: boolean;
+  readonly expiry?: string;
+  readonly timeoutMs?: number;
+  readonly maxOutputBytes?: number;
+  readonly requiredChecks?: readonly string[];
+  readonly workspaceAlias?: string | null;
+  readonly profile?: {
+    readonly configFingerprint: string;
+    readonly sourceRevision: string;
+  } | null;
+  readonly possibleExternalDataConsent?: boolean;
 }
 
 export interface ChatProposalCardView {
@@ -45,6 +62,9 @@ export interface ChatProposalCardView {
   readonly canReject: boolean;
   readonly canApprove: boolean;
   readonly canExpire: boolean;
+  /** Frozen trial permission lines shown before approval (empty for
+   * conversation proposals / incomplete snapshots). */
+  readonly detailLines: readonly string[];
 }
 
 export const CONVERSATION_PROPOSAL_ACTIONS = {
@@ -95,6 +115,7 @@ export function conversationProposalCards(
       canReject: item.status === "pending",
       canApprove: false,
       canExpire: false,
+      detailLines: [],
     });
   }
   return cards;
@@ -111,6 +132,8 @@ export function trialProposalCards(
   const cards: ChatProposalCardView[] = [];
   for (const item of items) {
     if (item.status !== "staged") continue;
+    const input = trialProposalInput(item);
+    const model = input === null ? null : trialProposalModel(input, true);
     cards.push({
       key: `trial:${item.id}`,
       source: "trial",
@@ -122,11 +145,67 @@ export function trialProposalCards(
       version: 0,
       canAccept: false,
       canReject: false,
-      canApprove: true,
+      // Approval requires the full frozen permission snapshot, so the
+      // operator always sees mode/paths/workspace/consent first (review).
+      canApprove: model?.decisionVisible ?? false,
       canExpire: true,
+      detailLines: model?.detailLines ?? [],
     });
   }
   return cards;
+}
+
+/** Total parse of the list item into the shared trial review input. */
+function trialProposalInput(
+  item: TrialProposalItem,
+): TrialProposalInput | null {
+  if (
+    item.status !== "staged" ||
+    typeof item.objective !== "string" ||
+    !Array.isArray(item.acceptance) ||
+    !Array.isArray(item.literalPatchPaths) ||
+    typeof item.operation !== "string" ||
+    typeof item.readOnlyMode !== "boolean" ||
+    typeof item.expiry !== "string" ||
+    typeof item.timeoutMs !== "number" ||
+    typeof item.maxOutputBytes !== "number" ||
+    !Array.isArray(item.requiredChecks) ||
+    typeof item.possibleExternalDataConsent !== "boolean" ||
+    !(item.workspaceAlias === null || typeof item.workspaceAlias === "string")
+  ) {
+    return null;
+  }
+  const profile = item.profile;
+  if (
+    profile !== null &&
+    (typeof profile !== "object" ||
+      profile === undefined ||
+      typeof profile.configFingerprint !== "string" ||
+      typeof profile.sourceRevision !== "string")
+  ) {
+    return null;
+  }
+  return {
+    status: "staged",
+    objective: item.objective,
+    acceptance: item.acceptance.filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    literalPatchPaths: item.literalPatchPaths.filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    operation: item.operation,
+    readOnlyMode: item.readOnlyMode,
+    expiry: item.expiry,
+    timeoutMs: item.timeoutMs,
+    maxOutputBytes: item.maxOutputBytes,
+    requiredChecks: item.requiredChecks.filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    workspaceAlias: item.workspaceAlias,
+    profile: profile ?? null,
+    possibleExternalDataConsent: item.possibleExternalDataConsent,
+  };
 }
 
 /**

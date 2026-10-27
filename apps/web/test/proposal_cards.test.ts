@@ -79,11 +79,59 @@ describe("trialProposalCards", () => {
       source: "trial",
       kindLabel: "試行",
       heading: "テストを追加する",
-      canApprove: true,
+      // A bare list row has no frozen permission snapshot: no approval.
+      canApprove: false,
       canExpire: true,
       canAccept: false,
       canReject: false,
+      detailLines: [],
     });
+  });
+
+  it("shows the frozen trial permissions before approval", () => {
+    const cards = trialProposalCards([
+      {
+        id: "t1",
+        status: "staged",
+        objective: "テストを追加する",
+        acceptance: ["テストが通る"],
+        literalPatchPaths: ["apps/web/src"],
+        operation: "implement",
+        readOnlyMode: false,
+        expiry: "2026-11-01T00:00:00.000Z",
+        timeoutMs: 60_000,
+        maxOutputBytes: 1_000_000,
+        requiredChecks: ["vitest"],
+        workspaceAlias: "ws-main",
+        profile: {
+          configFingerprint: "a".repeat(64),
+          sourceRevision: "b".repeat(40),
+        },
+        possibleExternalDataConsent: true,
+      },
+    ]);
+    expect(cards[0]?.canApprove).toBe(true);
+    expect(cards[0]?.detailLines).toEqual(
+      expect.arrayContaining([
+        "操作: implement",
+        "対象パス: apps/web/src",
+        "作業場所: ws-main",
+        "外部データの同意: あり",
+      ]),
+    );
+  });
+
+  it("fails closed when the permission snapshot is incomplete", () => {
+    const cards = trialProposalCards([
+      {
+        id: "t1",
+        status: "staged",
+        objective: "テストを追加する",
+        workspaceAlias: null,
+      },
+    ]);
+    expect(cards[0]?.canApprove).toBe(false);
+    expect(cards[0]?.detailLines).toEqual([]);
   });
 });
 
