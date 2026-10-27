@@ -4,7 +4,7 @@
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   assertDbPathHasNoSymlink,
   defaultDbPath,
@@ -300,6 +300,83 @@ describe("markdown roots config", () => {
       relativeMessage = (error as Error).message;
     }
     expect(relativeMessage).not.toContain("not-json");
+  });
+});
+
+describe("legacy trial config deploy compatibility (#167)", () => {
+  function legacyTrial(extra: Record<string, unknown> = {}) {
+    return {
+      available: true,
+      enabled: true,
+      mandatoryChecks: ["lint"],
+      configFingerprint: "b".repeat(64),
+      sourceRevision: "a".repeat(40),
+      currentModel: "test-model",
+      disclosedWholeRepoRead: true,
+      timeoutMs: 60_000,
+      maxOutputBytes: 1_000_000,
+      workspaceAlias: "companion-harness",
+      runner: {
+        nodeRealpath: "/usr/bin/node",
+        bridgeScriptPath: "/opt/bridge.mjs",
+        bridgeConfigTemplatePath: "/opt/bridge.template.json",
+        systemctlRealpath: "/usr/bin/systemctl",
+        xdgRuntimeDir: "/run/user/1000",
+        relay: {
+          maxRequestBytes: 1_048_576,
+          maxModelCalls: 8,
+          maxOutputTokens: 256,
+          maxResponseBytes: 1_048_576,
+          perCallTimeoutMs: 60_000,
+          maxConcurrent: 1,
+        },
+        observe: {
+          activeTimeoutMs: 5000,
+          goneTimeoutMs: 5000,
+          pollIntervalMs: 50,
+        },
+        pollMs: 500,
+      },
+      ...extra,
+    };
+  }
+
+  it("old-format enabled config is rejected by the strict parser", () => {
+    expect(() => parseTrialConfig(JSON.stringify(legacyTrial()))).toThrow(
+      "trial config allowed paths are invalid",
+    );
+  });
+
+  it("starts with trials disabled instead of crashing the server", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const config = loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AUTONOMY_JSON: JSON.stringify(legacyTrial()),
+      });
+      expect(config.trial).toBeNull();
+      expect(config.autodispatch).toBeNull();
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringContaining("legacy trial config"),
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("the disabled deploy fallback (still old-format) also starts disabled", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const config = loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AUTONOMY_JSON: JSON.stringify(
+          legacyTrial({ enabled: false }),
+        ),
+      });
+      expect(config.trial).toBeNull();
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 
@@ -874,6 +951,8 @@ describe("autodispatch caps defaults fit the trial runner", () => {
       timeoutMs: 60_000,
       maxOutputBytes: 1_000_000,
       workspaceAlias: "companion-harness",
+      allowedPaths: ["apps", "packages"],
+      modelRoute: "local",
       runner: {
         nodeRealpath: "/usr/bin/node",
         bridgeScriptPath: "/opt/bridge.mjs",

@@ -102,6 +102,23 @@ export class RepositoryValidationError extends KernelStorageError {
   }
 }
 
+/** Dedicated stage-time rejection against the frozen operator profile. */
+export type TrialStageErrorCode =
+  | "trial_path_outside_profile"
+  | "trial_external_consent_unavailable"
+  | "purpose_not_confirmed";
+
+/** Frozen-profile stage rejection; extends RepositoryValidationError so
+ * existing callers still narrow it, but carries a dedicated safe API code. */
+export class TrialStageError extends RepositoryValidationError {
+  override readonly code: TrialStageErrorCode;
+
+  constructor(code: TrialStageErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 /** Session / turn / run (or scoped ownership) not found (404 `not_found`). */
 export class RepositoryNotFoundError extends KernelStorageError {
   constructor(message: string, options?: ErrorOptions) {

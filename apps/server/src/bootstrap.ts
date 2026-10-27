@@ -2673,6 +2673,8 @@ export async function startServer(
                 disclosedWholeRepoRead: config.trial.disclosedWholeRepoRead,
                 timeoutMs: config.trial.timeoutMs,
                 maxOutputBytes: config.trial.maxOutputBytes,
+                allowedPaths: [...config.trial.allowedPaths],
+                modelRoute: config.trial.modelRoute,
               },
               workspaceAlias: config.trial.workspaceAlias,
               now,
@@ -3021,6 +3023,8 @@ export async function startServer(
         disclosedWholeRepoRead: adTrial.disclosedWholeRepoRead,
         timeoutMs: adTrial.timeoutMs,
         maxOutputBytes: adTrial.maxOutputBytes,
+        allowedPaths: [...adTrial.allowedPaths],
+        modelRoute: adTrial.modelRoute,
       };
       autodispatch = createAutodispatchService({
         repo,
@@ -3107,6 +3111,8 @@ export async function startServer(
         disclosedWholeRepoRead: trialConfig.disclosedWholeRepoRead,
         timeoutMs: trialConfig.timeoutMs,
         maxOutputBytes: trialConfig.maxOutputBytes,
+        allowedPaths: [...trialConfig.allowedPaths],
+        modelRoute: trialConfig.modelRoute,
       };
       const runnerEngine = engine;
       const autodispatchConfig = config.autodispatch;

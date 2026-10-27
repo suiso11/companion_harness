@@ -24,6 +24,8 @@ function profile(extra: Record<string, unknown> = {}) {
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
+    allowedPaths: ["src", "src2", "apps", "packages"],
+    modelRoute: "external" as const,
     ...extra,
   };
 }
@@ -80,6 +82,144 @@ function stageInput(taskId: string, extra: Record<string, unknown> = {}) {
     ...extra,
   };
 }
+
+describe("stage-time frozen profile validation", () => {
+  function stageCode(fn: () => unknown): string | null {
+    try {
+      fn();
+      return null;
+    } catch (error) {
+      return (error as { code?: string }).code ?? null;
+    }
+  }
+
+  it("requires allowedPaths/modelRoute in the staged profile (no silent skip)", async () => {
+    const { repo, sessionId } = await makeRepo();
+    const { task } = goalTask(repo, sessionId);
+    const { allowedPaths, modelRoute, ...legacy } = profile();
+    void allowedPaths;
+    void modelRoute;
+    expect(() =>
+      repo.stageTrial(
+        sessionId,
+        stageInput(task.id, { possibleExternalDataConsent: false }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: legacy as never,
+          workspaceAlias: "ws",
+        },
+      ),
+    ).toThrow();
+  });
+
+  it("uses path-segment boundaries for allowedPaths", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const frozen = profile({
+        allowedPaths: ["apps", "packages"],
+        modelRoute: "local",
+      });
+      expect(
+        stageCode(() =>
+          repo.stageTrial(
+            sessionId,
+            stageInput(task.id, {
+              literalPatchPaths: ["appsx/a.ts"],
+              possibleExternalDataConsent: false,
+            }),
+            {
+              key: randomUUID(),
+              now: NOW + 4,
+              profile: frozen,
+              workspaceAlias: "ws",
+            },
+          ),
+        ),
+      ).toBe("trial_path_outside_profile");
+      expect(
+        stageCode(() =>
+          repo.stageTrial(
+            sessionId,
+            stageInput(task.id, {
+              literalPatchPaths: ["docs/operations.md"],
+              possibleExternalDataConsent: false,
+            }),
+            {
+              key: randomUUID(),
+              now: NOW + 4,
+              profile: frozen,
+              workspaceAlias: "ws",
+            },
+          ),
+        ),
+      ).toBe("trial_path_outside_profile");
+      const ok = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: ["apps/a.ts", "packages/b.ts"],
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: frozen,
+          workspaceAlias: "ws",
+        },
+      );
+      expect(ok.status).toBe(201);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("rejects external consent when the frozen route is local", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const frozen = profile({ allowedPaths: ["apps"], modelRoute: "local" });
+      expect(
+        stageCode(() =>
+          repo.stageTrial(
+            sessionId,
+            stageInput(task.id, {
+              literalPatchPaths: ["apps/a.ts"],
+              possibleExternalDataConsent: true,
+            }),
+            {
+              key: randomUUID(),
+              now: NOW + 4,
+              profile: frozen,
+              workspaceAlias: "ws",
+            },
+          ),
+        ),
+      ).toBe("trial_external_consent_unavailable");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("maps a non-explicit goal to purpose_not_confirmed", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "s1", "user", false);
+      expect(
+        stageCode(() =>
+          repo.stageTrial(sessionId, stageInput(task.id), {
+            key: randomUUID(),
+            now: NOW + 4,
+            profile: profile(),
+            workspaceAlias: "ws",
+          }),
+        ),
+      ).toBe("purpose_not_confirmed");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
 
 describe("trial authority", () => {
   it("stages/approves/claims with one-use grant; claim replay returns replay", async () => {

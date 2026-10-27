@@ -146,11 +146,13 @@ function trialOutcomeLines(
 
 /** Bounded sealed-trial report attached to the trial detail GET. Guest text
  * (summary/findings/unresolved) is UNATTESTED presentation data; checks and
- * artifact are host-checked. Malformed bodies render as absent. */
+ * artifact are host-checked; bridge stderr diagnostics are host-observed.
+ * Malformed bodies render as absent. */
 interface TrialReport {
   readonly summary: string;
   readonly findings: readonly string[];
   readonly unresolved: readonly string[];
+  readonly hostDiagnostics: readonly string[];
   readonly checks: readonly {
     readonly name: string;
     readonly outcome: string;
@@ -165,6 +167,7 @@ interface TrialReport {
 
 const GUEST_PROVENANCE = "guest-reported-unattested";
 const HOST_PROVENANCE = "host-checked";
+const HOST_OBSERVED_PROVENANCE = "host-observed";
 
 function reportStrings(value: unknown, max: number): string[] {
   if (!Array.isArray(value)) return [];
@@ -187,7 +190,8 @@ function readTrialReport(value: unknown): TrialReport | null {
   if (
     prov.findings !== GUEST_PROVENANCE ||
     prov.checks !== HOST_PROVENANCE ||
-    prov.artifact !== HOST_PROVENANCE
+    prov.artifact !== HOST_PROVENANCE ||
+    prov.hostDiagnostics !== HOST_OBSERVED_PROVENANCE
   ) {
     return null;
   }
@@ -232,6 +236,9 @@ function readTrialReport(value: unknown): TrialReport | null {
     unresolved: reportStrings(record.unresolved, 8).map((line) =>
       line.slice(0, 1024),
     ),
+    hostDiagnostics: reportStrings(record.hostDiagnostics, 4).map((line) =>
+      line.slice(0, 512),
+    ),
     checks,
     artifact,
     verified: record.verified,
@@ -242,6 +249,8 @@ function readTrialReport(value: unknown): TrialReport | null {
 interface TrialProfileFacts {
   readonly workspaceAlias: string;
   readonly mandatoryChecks: readonly string[];
+  readonly allowedPaths: readonly string[];
+  readonly modelRoute: "local" | "synthetic-local" | "external";
   readonly ceilings: {
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
@@ -286,6 +295,22 @@ function isTrialProfileFacts(value: unknown): value is TrialProfileFacts {
       (check) =>
         typeof check === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(check),
     )
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(item.allowedPaths) ||
+    item.allowedPaths.length < 1 ||
+    !item.allowedPaths.every(
+      (path) => typeof path === "string" && path.length > 0,
+    )
+  ) {
+    return false;
+  }
+  if (
+    item.modelRoute !== "local" &&
+    item.modelRoute !== "synthetic-local" &&
+    item.modelRoute !== "external"
   ) {
     return false;
   }
@@ -683,6 +708,9 @@ $effect(() => {
       }}
     >
       <h3>新しい試行を提案</h3>
+      <p id="trial-allowed-paths">
+        許可パス（この範囲のみ変更できます）: {profile.allowedPaths.join(", ")}
+      </p>
       <p id="trial-profile-summary">
         作業領域: {profile.workspaceAlias}・必須チェック:
         {profile.mandatoryChecks.join(", ")}
@@ -764,14 +792,20 @@ $effect(() => {
           bind:value={maxOutputBytesValue}
         />
       </label>
-      <label>
-        外部データの取り込みに同意する
-        <input
-          id="trial-consent"
-          type="checkbox"
-          bind:checked={consent}
-        />
-      </label>
+      {#if profile.modelRoute === "external"}
+        <label>
+          外部データの取り込みに同意する
+          <input
+            id="trial-consent"
+            type="checkbox"
+            bind:checked={consent}
+          />
+        </label>
+      {:else}
+        <p id="trial-consent-unavailable">
+          ローカル経路のため外部データの同意は不要です
+        </p>
+      {/if}
       <p id="trial-required-checks">
         必須チェック（固定）: {profile.mandatoryChecks.join(", ")}
       </p>
@@ -834,6 +868,15 @@ $effect(() => {
             <li>{item}</li>
           {/each}
         </ul>
+        {#if report.hostDiagnostics.length > 0}
+          <h3>ホスト診断</h3>
+          <p id="trial-report-host-provenance">ホスト観測（未改変の生出力ではありません）</p>
+          <ul id="trial-report-host-diagnostics">
+            {#each report.hostDiagnostics as item, index (index)}
+              <li>{item}</li>
+            {/each}
+          </ul>
+        {/if}
       </section>
     {/if}
     <button

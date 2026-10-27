@@ -1468,6 +1468,11 @@ export function parseMemoryConfig(
  * wire rule (`/^[a-z0-9_-]{1,64}$/`).
  *
  * - Env `COMPANION_AUTONOMY_JSON` is strict JSON only; unset means null.
+ * - Deploy migration (#167): a config written by the OLD operator builder
+ *   lacks `allowedPaths`/`modelRoute`. `loadServerConfig` recognizes that
+ *   legacy shape, logs a fixed error, and starts with trials FAIL-CLOSED
+ *   (trial null, autodispatch null) instead of crashing startup. The deploy
+ *   script's disabled fallback is then accepted by the strict parser.
  * - Must be an exact object with only the ten snapshot/alias fields below;
  *   any unknown key fails closed (a request body can never smuggle a
  *   `profile`/`workspaceAlias` override through this config either).
@@ -1521,6 +1526,10 @@ export interface TrialConfig {
   readonly maxOutputBytes: number;
   /** Frozen workspace alias under which proposals stage/approve. */
   readonly workspaceAlias: string;
+  /** Frozen profile write scopes (canonical repo-relative path prefixes). */
+  readonly allowedPaths: readonly string[];
+  /** Frozen profile model route; non-external rejects external consent. */
+  readonly modelRoute: "local" | "synthetic-local" | "external";
   /** Required root-side runner host config (no defaults, absolute paths). */
   readonly runner: TrialRunnerHostConfig;
 }
@@ -2302,6 +2311,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
       key !== "timeoutMs" &&
       key !== "maxOutputBytes" &&
       key !== "workspaceAlias" &&
+      key !== "allowedPaths" &&
+      key !== "modelRoute" &&
       key !== "runner"
     ) {
       throw configError("trial config has an unknown key");
@@ -2318,6 +2329,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     timeoutMs?: unknown;
     maxOutputBytes?: unknown;
     workspaceAlias?: unknown;
+    allowedPaths?: unknown;
+    modelRoute?: unknown;
     runner?: unknown;
   };
   if (typeof record.available !== "boolean") {
@@ -2395,6 +2408,46 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
   ) {
     throw configError("trial config workspace alias is invalid");
   }
+  if (
+    !Array.isArray(record.allowedPaths) ||
+    record.allowedPaths.length < 1 ||
+    record.allowedPaths.length > 64
+  ) {
+    throw configError("trial config allowed paths are invalid");
+  }
+  const allowedPaths: string[] = [];
+  const seenPath = new Set<string>();
+  for (const entry of record.allowedPaths) {
+    if (
+      typeof entry !== "string" ||
+      entry.length < 1 ||
+      entry.length > 512 ||
+      entry.includes("\0") ||
+      entry.includes("\\") ||
+      entry.startsWith("/") ||
+      (entry.length > 1 && entry.endsWith("/"))
+    ) {
+      throw configError("trial config allowed paths are invalid");
+    }
+    const segments = entry.split("/");
+    for (const segment of segments) {
+      if (segment.length === 0 || segment === "." || segment === "..") {
+        throw configError("trial config allowed paths are invalid");
+      }
+    }
+    if (seenPath.has(entry)) {
+      throw configError("trial config allowed paths are invalid");
+    }
+    seenPath.add(entry);
+    allowedPaths.push(entry);
+  }
+  if (
+    record.modelRoute !== "local" &&
+    record.modelRoute !== "synthetic-local" &&
+    record.modelRoute !== "external"
+  ) {
+    throw configError("trial config model route is invalid");
+  }
   if (record.runner === undefined) {
     throw configError("trial config runner is required");
   }
@@ -2410,8 +2463,27 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     timeoutMs: record.timeoutMs,
     maxOutputBytes: record.maxOutputBytes,
     workspaceAlias: record.workspaceAlias,
+    allowedPaths: Object.freeze(allowedPaths),
+    modelRoute: record.modelRoute,
     runner,
   });
+}
+
+/** Old-builder autonomy.env shape: a JSON object missing either required
+ * scope field. Used ONLY to degrade startup to trials-disabled (#167). */
+function isLegacyTrialConfig(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      return false;
+    const record = parsed as Record<string, unknown>;
+    return (
+      !Array.isArray(record.allowedPaths) || record.modelRoute === undefined
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2480,14 +2552,36 @@ export function loadServerConfig(
       "remote mode requires a password file (set one with the set-password command)",
     );
   }
-  const trial = parseTrialConfig(env.COMPANION_AUTONOMY_JSON);
+  // Fail-closed migration window (#167): the old builder's autonomy.env has
+  // no allowedPaths/modelRoute, which the now-required snapshot schema
+  // rejects. Recognize that legacy shape and start with trials disabled
+  // instead of crash-looping: the deploy health gate would otherwise roll
+  // back every new revision forever. Any other invalid trial config still
+  // fails startup exactly like before (parseTrialConfig throws).
+  let trial: TrialConfig | null;
+  let legacyTrialConfig = false;
+  try {
+    trial = parseTrialConfig(env.COMPANION_AUTONOMY_JSON);
+  } catch (error) {
+    if (!isLegacyTrialConfig(env.COMPANION_AUTONOMY_JSON)) throw error;
+    legacyTrialConfig = true;
+    trial = null;
+    // Fixed message only: never echo config values.
+    console.error(
+      "companion: legacy trial config lacks allowedPaths/modelRoute; trials disabled (fail closed)",
+    );
+  }
   if (trial !== null && model === null) {
     throw configError("trial config requires model config");
   }
-  const autodispatch = parseAutodispatchConfig(
-    env.COMPANION_AUTODISPATCH_JSON,
-    trial,
-  );
+  const autodispatch = legacyTrialConfig
+    ? null
+    : parseAutodispatchConfig(env.COMPANION_AUTODISPATCH_JSON, trial);
+  if (legacyTrialConfig && env.COMPANION_AUTODISPATCH_JSON !== undefined) {
+    console.error(
+      "companion: autodispatch disabled because the trial config is legacy",
+    );
+  }
   if (autodispatch !== null && trial === null) {
     throw configError("autodispatch config requires trial config");
   }

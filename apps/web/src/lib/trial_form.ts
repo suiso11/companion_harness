@@ -246,6 +246,15 @@ function errorCodeOf(body: unknown): string | null {
 export function trialStageErrorText(status: number, body: unknown): string {
   const code = errorCodeOf(body);
   if (code === "trials_disabled") return "試行の提案は無効です";
+  if (code === "trial_path_outside_profile") {
+    return "対象パスが許可された範囲の外にあります。表示されている許可パスを確認してください";
+  }
+  if (code === "trial_external_consent_unavailable") {
+    return "この環境はローカル経路のため、外部データの取り込みに同意できません";
+  }
+  if (code === "purpose_not_confirmed") {
+    return "対象の作業の目的が明示的に確認されていません。目的を確認してから提案してください";
+  }
   if (code === "idempotency_key_reused") {
     return "同じ操作がすでに送信されています。一覧を確認してください";
   }

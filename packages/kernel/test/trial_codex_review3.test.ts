@@ -40,6 +40,8 @@ function profile(extra: Record<string, unknown> = {}) {
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
+    allowedPaths: ["src", "apps", "packages"],
+    modelRoute: "external" as const,
     ...extra,
   };
 }
