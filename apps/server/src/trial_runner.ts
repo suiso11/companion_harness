@@ -1790,6 +1790,7 @@ type ParsedBridgeResult =
         summary: string;
         findings: string[];
         unresolved: string[];
+        hostDiagnostics: string[];
         checks: {
           name: string;
           outcome: "passed" | "failed";
@@ -1826,11 +1827,14 @@ function parseWireCheckEntry(
   return { id: item.id as string, ok };
 }
 
-/** Redact + bound a bridge stderr head into unresolved diagnostics lines. */
+/** Redact + bound a bridge stderr head into HOST-OBSERVED diagnostics.
+ * Never guest unresolved text: the kernel stores this in its own
+ * host_diagnostics_json column with "host-observed" provenance. */
 function bridgeFailureReport(chunks: readonly Buffer[]): {
   summary: string;
   findings: string[];
   unresolved: string[];
+  hostDiagnostics: string[];
   checks: { name: string; outcome: "passed" | "failed"; exit: number | null }[];
   artifact: null;
   verified: boolean;
@@ -1844,13 +1848,14 @@ function bridgeFailureReport(chunks: readonly Buffer[]): {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .slice(0, 8)
-    .map((line) => `bridge: ${line}`);
+    .slice(0, 4)
+    .map((line) => truncateReportText(`bridge: ${line}`, 512));
   if (lines.length === 0) return null;
   return {
     summary: "bridge exited before writing a journal report",
     findings: [],
-    unresolved: lines,
+    unresolved: [],
+    hostDiagnostics: lines,
     checks: [],
     artifact: null,
     verified: false,
@@ -1941,6 +1946,8 @@ function parseReportSurface(record: Record<string, unknown>) {
     findings: report === null ? [] : reportStrings(report.findings, 16, 1024),
     unresolved:
       report === null ? [] : reportStrings(report.unresolved, 8, 1024),
+    hostDiagnostics:
+      report === null ? [] : reportStrings(report.hostDiagnostics, 4, 512),
     checks,
     artifact,
     verified: record.verified === true,

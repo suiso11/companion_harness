@@ -31,6 +31,8 @@ function profile(extra: Record<string, unknown> = {}) {
     disclosedWholeRepoRead: true,
     timeoutMs: 1_000_000,
     maxOutputBytes: 1_000_000,
+    allowedPaths: ["src", "apps", "packages"],
+    modelRoute: "external" as const,
     ...extra,
   };
 }

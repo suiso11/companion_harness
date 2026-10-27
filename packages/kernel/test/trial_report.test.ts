@@ -28,6 +28,8 @@ const PROFILE = {
   disclosedWholeRepoRead: true,
   timeoutMs: 60000,
   maxOutputBytes: 1000000,
+  allowedPaths: ["src"],
+  modelRoute: "external" as const,
 };
 
 describe("normalizeWorkerReport", () => {
@@ -66,6 +68,7 @@ describe("normalizeWorkerReport", () => {
       summary: 42,
       findings: ["ok", 7, null],
       unresolved: "nope",
+      hostDiagnostics: ["bridge: boom", 7],
       checks: [
         { name: "bad name!", outcome: "passed", exit: 0 },
         { name: "ok", outcome: "weird", exit: 0 },
@@ -78,6 +81,7 @@ describe("normalizeWorkerReport", () => {
       summary: "",
       findings: ["ok", "", ""],
       unresolved: [],
+      hostDiagnostics: ["bridge: boom", ""],
       checks: [{ name: "lint", outcome: "failed", exit: 1 }],
       artifact: null,
       verified: false,
@@ -116,6 +120,7 @@ describe("readWorkerReport", () => {
         summary: "完了",
         findings: ["guest answer (unattested): 42"],
         unresolved: [],
+        hostDiagnostics: [],
         checks: [{ name: "lint", outcome: "passed", exit: 0 }],
         artifact: { sha256: "b".repeat(64), entryCount: 2 },
         verified: true,
@@ -123,6 +128,7 @@ describe("readWorkerReport", () => {
           findings: "guest-reported-unattested",
           checks: "host-checked",
           artifact: "host-checked",
+          hostDiagnostics: "host-observed",
         },
       });
       expect(readWorkerReport(handle.raw, randomUUID(), EXEC)).toBeNull();

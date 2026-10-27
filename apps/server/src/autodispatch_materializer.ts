@@ -1570,6 +1570,8 @@ export function createAutodispatchMaterializer(
         disclosedWholeRepoRead: true,
         timeoutMs: appliedTimeoutMs,
         maxOutputBytes: appliedMaxOutputBytes,
+        allowedPaths: [...scopes],
+        modelRoute: material.modelRoute,
       });
       const base = {
         schemaVersion: SCHEMA_VERSION as typeof SCHEMA_VERSION,

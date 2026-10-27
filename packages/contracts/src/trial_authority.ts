@@ -223,12 +223,12 @@ export const TrialProfileSnapshotSchema = z.strictObject({
    * valid wire request and must stay unavailable for new grants. */
   timeoutMs: z.number().int().min(1000).max(3600000),
   maxOutputBytes: z.number().int().min(1024).max(268435456),
-  /** Frozen write scopes from the operator profile (optional for internal
-   * callers that predate the profile scope fields; the server always injects
-   * them when trials are enabled). */
-  allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64).optional(),
-  /** Frozen model route from the operator profile. */
-  modelRoute: z.enum(["local", "synthetic-local", "external"]).optional(),
+  /** Frozen write scopes from the operator profile. REQUIRED: staging must
+   * never silently skip the scope check when a caller omits them. */
+  allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
+  /** Frozen model route from the operator profile. REQUIRED: the external
+   * data-consent check must never be skipped. */
+  modelRoute: z.enum(["local", "synthetic-local", "external"]),
 });
 export type TrialProfileSnapshot = z.infer<typeof TrialProfileSnapshotSchema>;
 

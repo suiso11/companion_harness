@@ -195,6 +195,60 @@ describe("disableTrialEnv", () => {
     ).toBe("");
   });
 
+  it("old-format fallback reaches the new strict parser but starts disabled (#167)", () => {
+    const line = disableTrialEnv(`COMPANION_AUTONOMY_JSON='${json}'\n`, {
+      env,
+    });
+    // The old shape lacks the now-required scope fields...
+    expect(() => parseTrialConfig(JSON.stringify(parse(line)))).toThrow(
+      /trial config/,
+    );
+    // ...so the server's legacy guard fails closed (see config.test.ts).
+    // A NEW-format config disabled by the same helper parses strictly.
+    const newFormat = {
+      available: true,
+      enabled: true,
+      mandatoryChecks: ["lint"],
+      configFingerprint: "0".repeat(64),
+      sourceRevision: "0".repeat(40),
+      currentModel: "local-chat",
+      disclosedWholeRepoRead: true,
+      timeoutMs: 60_000,
+      maxOutputBytes: 1_000_000,
+      workspaceAlias: "companion-harness",
+      allowedPaths: ["apps"],
+      modelRoute: "local",
+      runner: {
+        nodeRealpath: "/usr/bin/node",
+        bridgeScriptPath: "/opt/bridge.mjs",
+        bridgeConfigTemplatePath: "/opt/bridge.template.json",
+        systemctlRealpath: "/usr/bin/systemctl",
+        xdgRuntimeDir: "/run/user/1000",
+        relay: {
+          maxRequestBytes: 1_048_576,
+          maxModelCalls: 8,
+          maxOutputTokens: 256,
+          maxResponseBytes: 1_048_576,
+          perCallTimeoutMs: 60_000,
+          maxConcurrent: 1,
+        },
+        observe: {
+          activeTimeoutMs: 5000,
+          goneTimeoutMs: 5000,
+          pollIntervalMs: 50,
+        },
+        pollMs: 500,
+      },
+    };
+    const newLine = disableTrialEnv(
+      `COMPANION_AUTONOMY_JSON='${JSON.stringify(newFormat)}'\n`,
+      { env },
+    );
+    expect(parseTrialConfig(JSON.stringify(parse(newLine)))).toMatchObject({
+      enabled: false,
+    });
+  });
+
   it("returns nothing when no usable line exists", () => {
     expect(disableTrialEnv("")).toBe("");
     expect(disableTrialEnv("OTHER=1\n")).toBe("");

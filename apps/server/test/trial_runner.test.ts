@@ -186,6 +186,8 @@ function profile() {
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
+    allowedPaths: ["src", "apps", "packages"],
+    modelRoute: "external" as const,
   };
 }
 
@@ -1783,14 +1785,13 @@ describe("trial_runner", () => {
       const report = repo.readTrialWorkerReport(sessionId, executionId);
       expect(report).not.toBeNull();
       expect(report?.summary).toContain("bridge exited");
-      const joined = (report?.unresolved ?? []).join("\n");
+      expect(report?.unresolved).toEqual([]);
+      const joined = (report?.hostDiagnostics ?? []).join("\n");
       expect(joined).toContain("bridge: invalid request");
       expect(joined).toContain("[redacted]");
       expect(joined).not.toContain("sk-secret123");
       expect(joined).not.toContain("Bearer abc.def");
-      expect(Buffer.byteLength(joined, "utf8")).toBeLessThanOrEqual(
-        2048 + 1024,
-      );
+      expect(Buffer.byteLength(joined, "utf8")).toBeLessThanOrEqual(4 * 512);
     } finally {
       closeKernelDatabase(handle);
     }

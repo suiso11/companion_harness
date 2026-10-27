@@ -559,7 +559,7 @@ describe("trial HTTP proposal lifecycle", () => {
       };
       rawDb
         .prepare(
-          "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           executionId,
@@ -569,6 +569,7 @@ describe("trial HTTP proposal lifecycle", () => {
             "guest answer (unattested): <img src=x onerror=alert(1)>",
           ]),
           JSON.stringify(["blocked: needs review"]),
+          JSON.stringify(["bridge: invalid request"]),
           JSON.stringify([{ name: "lint", outcome: "passed", exit: 0 }]),
           JSON.stringify({ sha256: "c".repeat(64), entryCount: 3 }),
           1,
@@ -580,6 +581,7 @@ describe("trial HTTP proposal lifecycle", () => {
         summary: "sealed trial completed",
         findings: ["guest answer (unattested): <img src=x onerror=alert(1)>"],
         unresolved: ["blocked: needs review"],
+        hostDiagnostics: ["bridge: invalid request"],
         checks: [{ name: "lint", outcome: "passed", exit: 0 }],
         artifact: { sha256: "c".repeat(64), entryCount: 3 },
         verified: true,
@@ -587,6 +589,7 @@ describe("trial HTTP proposal lifecycle", () => {
           findings: "guest-reported-unattested",
           checks: "host-checked",
           artifact: "host-checked",
+          hostDiagnostics: "host-observed",
         },
       });
       const listedWithReport = await get(app, base);
@@ -620,6 +623,8 @@ describe("trial HTTP proposal lifecycle", () => {
         disclosedWholeRepoRead: true,
         timeoutMs: 60000,
         maxOutputBytes: 1000000,
+        allowedPaths: ["src", "apps", "packages"],
+        modelRoute: "external" as const,
       };
       const t0 = Date.now();
       const first = repo.stageTrial(sessionId, stageBody(taskId), {
@@ -683,6 +688,8 @@ describe("trial HTTP proposal lifecycle", () => {
             disclosedWholeRepoRead: true,
             timeoutMs: 1000,
             maxOutputBytes: 1024,
+            allowedPaths: ["src", "apps", "packages"],
+            modelRoute: "external" as const,
           },
         }),
         randomUUID(),

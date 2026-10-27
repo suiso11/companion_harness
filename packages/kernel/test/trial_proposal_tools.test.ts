@@ -43,6 +43,8 @@ const PROFILE = {
   disclosedWholeRepoRead: true,
   timeoutMs: 60_000,
   maxOutputBytes: 1_000_000,
+  allowedPaths: ["src", "apps", "packages"],
+  modelRoute: "external" as const,
 };
 const ALIAS = "ws";
 

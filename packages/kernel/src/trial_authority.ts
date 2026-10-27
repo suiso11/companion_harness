@@ -714,21 +714,17 @@ export function stageTrialProposal(
           );
       }
     }
+    // The profile snapshot schema makes both fields REQUIRED, so these
+    // checks never silently skip for a partial internal caller.
     const allowedPaths = profile.allowedPaths;
-    if (allowedPaths !== undefined) {
-      for (const path of normPaths) {
-        if (!pathWithinAllowedScope(path, allowedPaths))
-          throw new TrialStageError(
-            "trial_path_outside_profile",
-            "literalPatchPath is outside the frozen profile",
-          );
-      }
+    for (const path of normPaths) {
+      if (!pathWithinAllowedScope(path, allowedPaths))
+        throw new TrialStageError(
+          "trial_path_outside_profile",
+          "literalPatchPath is outside the frozen profile",
+        );
     }
-    if (
-      input.possibleExternalDataConsent &&
-      profile.modelRoute !== undefined &&
-      profile.modelRoute !== "external"
-    )
+    if (input.possibleExternalDataConsent && profile.modelRoute !== "external")
       throw new TrialStageError(
         "trial_external_consent_unavailable",
         "external model consent is unavailable for the frozen route",
@@ -2473,11 +2469,14 @@ export const TRIAL_REPORT_SUMMARY_MAX_BYTES = 2048;
 export const TRIAL_REPORT_FINDING_MAX_BYTES = 1024;
 export const TRIAL_REPORT_MAX_FINDINGS = 16;
 export const TRIAL_REPORT_MAX_UNRESOLVED = 8;
+export const TRIAL_REPORT_MAX_HOST_DIAGNOSTICS = 4;
+export const TRIAL_REPORT_HOST_DIAGNOSTIC_MAX_BYTES = 512;
 export const TRIAL_REPORT_MAX_CHECKS = 16;
 /** Serialized-column budgets; MUST mirror the length() CHECKs in
  * migrations/0033_trial_worker_reports.sql. */
 export const TRIAL_REPORT_FINDINGS_JSON_MAX_CHARS = 32768;
 export const TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS = 16384;
+export const TRIAL_REPORT_HOST_DIAGNOSTICS_JSON_MAX_CHARS = 4096;
 
 export interface TrialWorkerCheckView {
   name: string;
@@ -2489,6 +2488,9 @@ export interface TrialWorkerReportInput {
   summary: string;
   findings: string[];
   unresolved: string[];
+  /** Host-observed bridge stderr head (bounded, redacted by the runner).
+   * NEVER guest-reported: stored in its own column and provenance. */
+  hostDiagnostics: string[];
   checks: TrialWorkerCheckView[];
   artifact: { sha256: string; entryCount: number } | null;
   verified: boolean;
@@ -2499,6 +2501,7 @@ export interface TrialWorkerReportView extends TrialWorkerReportInput {
     findings: "guest-reported-unattested";
     checks: "host-checked";
     artifact: "host-checked";
+    hostDiagnostics: "host-observed";
   };
 }
 
@@ -2506,6 +2509,7 @@ const REPORT_PROVENANCE = {
   findings: "guest-reported-unattested",
   checks: "host-checked",
   artifact: "host-checked",
+  hostDiagnostics: "host-observed",
 } as const;
 
 function truncateUtf8Bytes(text: string, maxBytes: number): string {
@@ -2535,6 +2539,9 @@ export function normalizeWorkerReport(
   const findingsRaw = Array.isArray(record.findings) ? record.findings : [];
   const unresolvedRaw = Array.isArray(record.unresolved)
     ? record.unresolved
+    : [];
+  const hostDiagnosticsRaw = Array.isArray(record.hostDiagnostics)
+    ? record.hostDiagnostics
     : [];
   const checksRaw = Array.isArray(record.checks) ? record.checks : [];
   const checks: TrialWorkerCheckView[] = [];
@@ -2581,6 +2588,11 @@ export function normalizeWorkerReport(
     unresolved: unresolvedRaw
       .slice(0, TRIAL_REPORT_MAX_UNRESOLVED)
       .map((entry) => boundedReportText(entry, TRIAL_REPORT_FINDING_MAX_BYTES)),
+    hostDiagnostics: hostDiagnosticsRaw
+      .slice(0, TRIAL_REPORT_MAX_HOST_DIAGNOSTICS)
+      .map((entry) =>
+        boundedReportText(entry, TRIAL_REPORT_HOST_DIAGNOSTIC_MAX_BYTES),
+      ),
     checks,
     artifact,
     verified: record.verified === true,
@@ -2634,7 +2646,7 @@ function insertWorkerReport(
   now: number,
 ): void {
   db.prepare(
-    "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+    "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
   ).run(
     executionId,
     sessionId,
@@ -2646,6 +2658,10 @@ function insertWorkerReport(
     serializeBoundedJsonArray(
       report.unresolved,
       TRIAL_REPORT_UNRESOLVED_JSON_MAX_CHARS,
+    ),
+    serializeBoundedJsonArray(
+      report.hostDiagnostics,
+      TRIAL_REPORT_HOST_DIAGNOSTICS_JSON_MAX_CHARS,
     ),
     JSON.stringify(report.checks),
     report.artifact === null ? null : JSON.stringify(report.artifact),
@@ -2668,13 +2684,14 @@ export function readWorkerReport(
   if (!g || g.session_id !== session) return null;
   const row = db
     .prepare(
-      "SELECT summary, findings_json, unresolved_json, checks_json, artifact_json, verified FROM trial_worker_reports WHERE execution_id=?",
+      "SELECT summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified FROM trial_worker_reports WHERE execution_id=?",
     )
     .get(exec) as
     | {
         summary: string;
         findings_json: string;
         unresolved_json: string;
+        host_diagnostics_json: string;
         checks_json: string;
         artifact_json: string | null;
         verified: number;
@@ -2693,6 +2710,7 @@ export function readWorkerReport(
     summary: row.summary,
     findings: parseArray(row.findings_json),
     unresolved: parseArray(row.unresolved_json),
+    hostDiagnostics: parseArray(row.host_diagnostics_json),
     checks: parseArray(row.checks_json),
     artifact: row.artifact_json === null ? null : JSON.parse(row.artifact_json),
     verified: row.verified === 1,

@@ -24,6 +24,8 @@ function profile(extra: Record<string, unknown> = {}) {
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
+    allowedPaths: ["src", "src2", "apps", "packages"],
+    modelRoute: "external" as const,
     ...extra,
   };
 }
@@ -90,6 +92,26 @@ describe("stage-time frozen profile validation", () => {
       return (error as { code?: string }).code ?? null;
     }
   }
+
+  it("requires allowedPaths/modelRoute in the staged profile (no silent skip)", async () => {
+    const { repo, sessionId } = await makeRepo();
+    const { task } = goalTask(repo, sessionId);
+    const { allowedPaths, modelRoute, ...legacy } = profile();
+    void allowedPaths;
+    void modelRoute;
+    expect(() =>
+      repo.stageTrial(
+        sessionId,
+        stageInput(task.id, { possibleExternalDataConsent: false }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: legacy as never,
+          workspaceAlias: "ws",
+        },
+      ),
+    ).toThrow();
+  });
 
   it("uses path-segment boundaries for allowedPaths", async () => {
     const { handle, repo, sessionId } = await makeRepo();

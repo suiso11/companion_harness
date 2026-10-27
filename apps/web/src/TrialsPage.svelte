@@ -146,11 +146,13 @@ function trialOutcomeLines(
 
 /** Bounded sealed-trial report attached to the trial detail GET. Guest text
  * (summary/findings/unresolved) is UNATTESTED presentation data; checks and
- * artifact are host-checked. Malformed bodies render as absent. */
+ * artifact are host-checked; bridge stderr diagnostics are host-observed.
+ * Malformed bodies render as absent. */
 interface TrialReport {
   readonly summary: string;
   readonly findings: readonly string[];
   readonly unresolved: readonly string[];
+  readonly hostDiagnostics: readonly string[];
   readonly checks: readonly {
     readonly name: string;
     readonly outcome: string;
@@ -165,6 +167,7 @@ interface TrialReport {
 
 const GUEST_PROVENANCE = "guest-reported-unattested";
 const HOST_PROVENANCE = "host-checked";
+const HOST_OBSERVED_PROVENANCE = "host-observed";
 
 function reportStrings(value: unknown, max: number): string[] {
   if (!Array.isArray(value)) return [];
@@ -187,7 +190,8 @@ function readTrialReport(value: unknown): TrialReport | null {
   if (
     prov.findings !== GUEST_PROVENANCE ||
     prov.checks !== HOST_PROVENANCE ||
-    prov.artifact !== HOST_PROVENANCE
+    prov.artifact !== HOST_PROVENANCE ||
+    prov.hostDiagnostics !== HOST_OBSERVED_PROVENANCE
   ) {
     return null;
   }
@@ -231,6 +235,9 @@ function readTrialReport(value: unknown): TrialReport | null {
     ),
     unresolved: reportStrings(record.unresolved, 8).map((line) =>
       line.slice(0, 1024),
+    ),
+    hostDiagnostics: reportStrings(record.hostDiagnostics, 4).map((line) =>
+      line.slice(0, 512),
     ),
     checks,
     artifact,
@@ -861,6 +868,15 @@ $effect(() => {
             <li>{item}</li>
           {/each}
         </ul>
+        {#if report.hostDiagnostics.length > 0}
+          <h3>ホスト診断</h3>
+          <p id="trial-report-host-provenance">ホスト観測（未改変の生出力ではありません）</p>
+          <ul id="trial-report-host-diagnostics">
+            {#each report.hostDiagnostics as item, index (index)}
+              <li>{item}</li>
+            {/each}
+          </ul>
+        {/if}
       </section>
     {/if}
     <button

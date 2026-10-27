@@ -613,6 +613,8 @@ describe("autodispatch HTTP + existing trial boundary", () => {
             disclosedWholeRepoRead: true,
             timeoutMs: ad.caps.timeoutMs,
             maxOutputBytes: ad.caps.maxOutputBytes,
+            allowedPaths: ["src", "apps", "packages"],
+            modelRoute: "external" as const,
           },
           // No injected materializer: the service constructs the REAL
           // per-execution sealed-profile materializer from fx.config.
@@ -728,6 +730,8 @@ describe("trial grant outcome projection through the actual API", () => {
         disclosedWholeRepoRead: true,
         timeoutMs: 60000,
         maxOutputBytes: 1000000,
+        allowedPaths: ["src", "apps", "packages"],
+        modelRoute: "external" as const,
       };
       const staged = repo.stageTrial(
         sessionId,
