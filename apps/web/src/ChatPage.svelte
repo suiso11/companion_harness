@@ -2374,20 +2374,11 @@ async function decideConversationProposalCard(
     { expectedVersion: card.version },
     randomUuid(),
   );
-  let result: { status: number };
-  try {
-    result = await postJson(
-      `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals/${encodeURIComponent(card.proposalId)}/${action}`,
-      pendingCardDecision.body,
-      pendingCardDecision.key,
-    );
-  } catch {
-    if (sessionId === sid) {
-      proposalDeciding = null;
-      proposalNotice = proposalCardErrorText(0);
-    }
-    return;
-  }
+  const result = await postJson(
+    `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals/${encodeURIComponent(card.proposalId)}/${action}`,
+    pendingCardDecision.body,
+    pendingCardDecision.key,
+  );
   if (sessionId !== sid) return;
   proposalDeciding = null;
   if (result.status === 0 || result.status >= 500) {
@@ -2427,20 +2418,12 @@ async function decideTrialProposalCard(
         )
       : null;
   if (decision !== null) pendingCardDecision = decision;
-  let result: { status: number };
-  try {
-    result = await postJson(
-      `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
-      decision?.body ?? {},
-      decision?.key ?? null,
-    );
-  } catch {
-    if (sessionId === sid) {
-      proposalDeciding = null;
-      proposalNotice = proposalCardErrorText(0);
-    }
-    return;
-  }
+  // postJson/readJson never throw: a transport failure is status 0.
+  const result = await postJson(
+    `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
+    decision?.body ?? {},
+    decision?.key ?? null,
+  );
   if (sessionId !== sid) return;
   proposalDeciding = null;
   if (decision !== null && (result.status === 0 || result.status >= 500)) {
