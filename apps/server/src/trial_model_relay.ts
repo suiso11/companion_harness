@@ -213,6 +213,12 @@ export type RelayRequestReason =
   | "model_call_cap_exceeded"
   | "bad_json"
   | "invalid_request"
+  | "invalid_messages"
+  | "invalid_message"
+  | "invalid_content"
+  | "invalid_tool_call"
+  | "invalid_tool_result"
+  | "invalid_tool_definition"
   | "model_mismatch"
   | "unsupported_tool_choice"
   | "unsupported_option"
@@ -786,7 +792,7 @@ export class TrialModelRelay {
     }
     const rawMessages = body.messages;
     if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
-      throw new TranslationError("invalid_request");
+      throw new TranslationError("invalid_messages");
     }
     // Map assistant tool_call ids -> gateway tool names for tool replies.
     const idToGateway = new Map<string, string>();
@@ -817,7 +823,8 @@ export class TrialModelRelay {
       );
       const seen = new Set<string>();
       for (const tool of translatedTools) {
-        if (seen.has(tool.name)) throw new TranslationError("invalid_request");
+        if (seen.has(tool.name))
+          throw new TranslationError("invalid_tool_definition");
         seen.add(tool.name);
       }
       gatewayTools = translatedTools.map((tool) => ({
@@ -944,22 +951,22 @@ export class TrialModelRelay {
       return (content as unknown[])
         .map((part) => {
           if (typeof part === "string") return part;
-          if (!isRecord(part)) throw new TranslationError("invalid_request");
+          if (!isRecord(part)) throw new TranslationError("invalid_content");
           if (part.type === "text" && typeof part.text === "string") {
             return part.text as string;
           }
-          throw new TranslationError("invalid_request");
+          throw new TranslationError("invalid_content");
         })
         .join("");
     }
-    throw new TranslationError("invalid_request");
+    throw new TranslationError("invalid_content");
   }
 
   private translateMessage(
     entry: unknown,
     idToGateway: Map<string, string>,
   ): ChatMessage {
-    if (!isRecord(entry)) throw new TranslationError("invalid_request");
+    if (!isRecord(entry)) throw new TranslationError("invalid_message");
     const role = entry.role;
     if (
       role !== "system" &&
@@ -967,7 +974,7 @@ export class TrialModelRelay {
       role !== "assistant" &&
       role !== "tool"
     ) {
-      throw new TranslationError("invalid_request");
+      throw new TranslationError("invalid_message");
     }
     // Null content is valid (assistant tool-call-only turns carry content
     // null); text-part arrays join without separator.
@@ -975,7 +982,7 @@ export class TrialModelRelay {
     if (role === "tool") {
       const toolCallId = entry.tool_call_id;
       if (typeof toolCallId !== "string" || toolCallId.length === 0) {
-        throw new TranslationError("invalid_request");
+        throw new TranslationError("invalid_tool_result");
       }
       const toolName = idToGateway.get(toolCallId);
       if (toolName === undefined)
@@ -990,13 +997,13 @@ export class TrialModelRelay {
     ) {
       const rawCalls = entry.tool_calls;
       if (!Array.isArray(rawCalls))
-        throw new TranslationError("invalid_request");
+        throw new TranslationError("invalid_tool_call");
       message.toolCalls = rawCalls.map((call, index) => {
-        if (!isRecord(call)) throw new TranslationError("invalid_request");
+        if (!isRecord(call)) throw new TranslationError("invalid_tool_call");
         if (call.type !== "function")
-          throw new TranslationError("invalid_request");
+          throw new TranslationError("invalid_tool_call");
         const fn = call.function;
-        if (!isRecord(fn)) throw new TranslationError("invalid_request");
+        if (!isRecord(fn)) throw new TranslationError("invalid_tool_call");
         if (!isGuestToolName(fn.name))
           throw new TranslationError("unknown_tool");
         const id =
@@ -1012,20 +1019,20 @@ export class TrialModelRelay {
               try {
                 args = JSON.parse(fn.arguments);
               } catch {
-                throw new TranslationError("invalid_request");
+                throw new TranslationError("invalid_tool_call");
               }
               if (
                 typeof args !== "object" ||
                 args === null ||
                 Array.isArray(args)
               ) {
-                throw new TranslationError("invalid_request");
+                throw new TranslationError("invalid_tool_call");
               }
             }
           } else if (isRecord(fn.arguments)) {
             args = fn.arguments;
           } else {
-            throw new TranslationError("invalid_request");
+            throw new TranslationError("invalid_tool_call");
           }
         }
         return { id, name: toGatewayToolName(fn.name), arguments: args };
@@ -1040,11 +1047,11 @@ export class TrialModelRelay {
     fullDescription: string;
     parameters?: Record<string, unknown>;
   } {
-    if (!isRecord(entry)) throw new TranslationError("invalid_request");
+    if (!isRecord(entry)) throw new TranslationError("invalid_tool_definition");
     if (entry.type !== "function")
-      throw new TranslationError("invalid_request");
+      throw new TranslationError("invalid_tool_definition");
     const fn = entry.function;
-    if (!isRecord(fn)) throw new TranslationError("invalid_request");
+    if (!isRecord(fn)) throw new TranslationError("invalid_tool_definition");
     if (!isGuestToolName(fn.name)) throw new TranslationError("unknown_tool");
     const fullDescription =
       typeof fn.description === "string" && fn.description.length > 0
@@ -1061,7 +1068,7 @@ export class TrialModelRelay {
     let parameters: Record<string, unknown> | undefined;
     if (fn.parameters !== undefined && fn.parameters !== null) {
       if (!isRecord(fn.parameters))
-        throw new TranslationError("invalid_request");
+        throw new TranslationError("invalid_tool_definition");
       parameters = fn.parameters;
     }
     return {
@@ -1187,6 +1194,12 @@ const RELAY_REASONS: ReadonlySet<string> = new Set([
   "model_call_cap_exceeded",
   "bad_json",
   "invalid_request",
+  "invalid_messages",
+  "invalid_message",
+  "invalid_content",
+  "invalid_tool_call",
+  "invalid_tool_result",
+  "invalid_tool_definition",
   "model_mismatch",
   "unsupported_tool_choice",
   "unsupported_option",

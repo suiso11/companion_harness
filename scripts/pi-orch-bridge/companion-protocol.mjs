@@ -447,12 +447,25 @@ export function validateWireResult(raw, requiredChecks) {
       key !== "status" &&
       key !== "verified" &&
       key !== "report" &&
-      key !== "evidence"
+      key !== "evidence" &&
+      key !== "exitCode"
     ) {
       fail(`result carries an unsupported key: ${key}`);
     }
   }
   if (raw.version !== 1) fail("field version must be 1");
+  let exitCode;
+  if (raw.exitCode !== undefined) {
+    if (
+      typeof raw.exitCode !== "number" ||
+      !Number.isSafeInteger(raw.exitCode) ||
+      raw.exitCode < 0 ||
+      raw.exitCode > 255
+    ) {
+      fail("field exitCode must be an integer 0..255");
+    }
+    exitCode = raw.exitCode;
+  }
   if (typeof raw.executionId !== "string" || !UUID_RE.test(raw.executionId))
     fail("field executionId must be a UUID");
   if (typeof raw.taskHash !== "string" || !HEX64_RE.test(raw.taskHash))
@@ -581,6 +594,7 @@ export function validateWireResult(raw, requiredChecks) {
     taskHash: raw.taskHash,
     status: raw.status,
     verified: raw.verified,
+    ...(exitCode !== undefined ? { exitCode } : {}),
     report,
     evidence: {
       workerIds,

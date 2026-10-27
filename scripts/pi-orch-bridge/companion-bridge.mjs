@@ -207,7 +207,7 @@ function executorFailureDiagnostics(workRoot, run) {
         : "none";
     diagnostics.push(
       boundedDiagnostic(
-        `diagnostic: guest observation engine=${observation.engine} executorKind=${observation.executorKind} ompExitCode=${observation.ompExitCode ?? "unknown"} timedOut=${observation.timedOut === true} toolCount=${observedTools.length} toolErrors=${toolErrors} error=${errorKind}`,
+        `diagnostic: guest observation engine=${observation.engine} executorKind=${observation.executorKind} ompExitCode=${observation.ompExitCode ?? "unknown"} timedOut=${observation.timedOut === true} signal=${typeof observation.signal === "string" ? observation.signal : "none"} toolCount=${observedTools.length} toolErrors=${toolErrors} error=${errorKind}`,
       ),
     );
   }
@@ -853,7 +853,14 @@ async function main() {
   let outcome;
 
   const finalize = (raw, storedExit, artifactBytes) => {
-    const fitted = fitResultLineBudget(raw, request, config);
+    // Carry the journal's stored exit code on the wire. Without it the host
+    // had to synthesize 1 for every error status and lost the faithful
+    // classification (e.g. executor failure 10 vs internal 1).
+    const fitted = fitResultLineBudget(
+      { ...raw, exitCode: storedExit },
+      request,
+      config,
+    );
     const validated = validateWireResult(fitted, request.requiredChecks);
     const line = serializeResult(validated);
     if (Buffer.byteLength(line, "utf8") > resultLineCap(request, config))

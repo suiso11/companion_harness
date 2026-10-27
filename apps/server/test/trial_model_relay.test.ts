@@ -985,6 +985,110 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
     }
   });
 
+  it("accepts the OMP post-write request shape (tool result arrays, empty assistant content)", async () => {
+    const gw = fakeGateway({
+      result: { text: "done", toolCalls: [], stopReason: "stop" },
+    });
+    const { relay, sock } = await startRelay(testCaps(), gw);
+    try {
+      relay.setPermitted(true);
+      // Shape captured from the pinned OMP (openai-completions) after a
+      // successful write: system string, user text-part array, assistant
+      // content "" plus tool_calls with a JSON-string arguments payload, and
+      // a tool message whose content is a plain string.
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            { role: "system", content: "system prompt" },
+            {
+              role: "user",
+              content: [{ type: "text", text: "add a comment" }],
+            },
+            {
+              role: "assistant",
+              content: "",
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "write",
+                    arguments: JSON.stringify({
+                      path: "apps/server/src/config.ts",
+                      content: "x",
+                      i: "Writing file",
+                    }),
+                  },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              tool_call_id: "call_1",
+              content: "[src/config.ts#5BF9] Successfully wrote 1 bytes",
+            },
+          ],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "write",
+                description: "write",
+                parameters: { type: "object" },
+              },
+            },
+          ],
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(gw.calls.length).toBe(1);
+      const fwd = gw.calls[0] as ChatRequest;
+      expect(fwd.messages.at(-1)).toMatchObject({
+        role: "tool",
+        toolName: "capsule.write",
+      });
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("logs a specific fixed translation code instead of a bare invalid_request", async () => {
+    const gw = fakeGateway();
+    const { logger, records } = createCollectingLogger("debug");
+    const dir = mkdtempSync(join(tmpdir(), "trial-relay-"));
+    const sock = join(dir, "relay", "model.sock");
+    const relay = new TrialModelRelay({
+      sockPath: sock,
+      gateway: gw,
+      fixedModel: FIXED_MODEL,
+      caps: testCaps(),
+      logger,
+    });
+    await relay.start();
+    try {
+      relay.setPermitted(true);
+      const res = await postUds(
+        sock,
+        chatBody({
+          messages: [
+            {
+              role: "tool",
+              tool_call_id: "call_1",
+              content: [{ type: "image", image_url: "data:image/png" }],
+            },
+          ],
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.text).error.message).toBe("invalid_content");
+      const trace = records.filter((r) => r.code === "trial.relay_request");
+      expect(trace.at(-1)?.reason).toBe("invalid_content");
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("every rejection path logs trial.relay_request rejected with a closed-vocabulary reason", async () => {
     const gw = fakeGateway();
     const { logger, records } = createCollectingLogger("debug");

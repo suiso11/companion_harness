@@ -28,6 +28,7 @@ import {
   companionScopeUnit,
   computeTaskHash,
   type TrialWireRequest,
+  validateWireResult,
 } from "../../../scripts/pi-orch-bridge/companion-protocol.mjs";
 import {
   buildCheckCommand,
@@ -361,6 +362,8 @@ function resultOf(run: BridgeRun): TrialWireResultShape {
 }
 
 interface TrialWireResultShape {
+  /** Optional v2 journal exit code; absent on legacy bridge lines. */
+  exitCode?: number;
   status: "done" | "error" | "cancelled" | "unknown";
   verified: boolean;
   executionId: string;
@@ -716,6 +719,43 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
 }
 
 describe("sealed pi-orch bridge portable protocol/command contract", () => {
+  it("validates the optional wire exitCode and rejects out-of-range values", () => {
+    const base = {
+      version: 1,
+      executionId: randomUUID(),
+      taskHash: "a".repeat(64),
+      status: "error",
+      verified: false,
+      report: { summary: "x", files: [], findings: [], unresolved: [] },
+      evidence: {
+        workerIds: [],
+        workspaceTrial: true,
+        productionApplied: false,
+        checks: [],
+      },
+    };
+    // A legacy line without exitCode still validates and stays exitCode-free.
+    const legacy = validateWireResult(base, []) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect("exitCode" in legacy).toBe(false);
+    // Any integer 0..255 round-trips unchanged.
+    for (const exitCode of [0, 1, 10, 137, 143, 255]) {
+      const out = validateWireResult(
+        { ...base, exitCode },
+        [],
+      ) as unknown as Record<string, unknown>;
+      expect(out.exitCode).toBe(exitCode);
+    }
+    // Anything else is a parse error, not a silent synthesis.
+    for (const exitCode of [-1, 256, 1.5, 0.1, "1", null, Number.NaN]) {
+      expect(() => validateWireResult({ ...base, exitCode }, [])).toThrow(
+        /exitCode must be an integer 0\.\.255/,
+      );
+    }
+  });
+
   it("ships the frozen guest executor as an executable file", () => {
     // The confined bridge ro-binds this exact path into bwrap and execs it
     // directly. A non-executable checkout (for example mode 0644) makes every
@@ -749,7 +789,7 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     () => {
       const cases: ["read_only" | "write", string][] = [
         ["read_only", "read,grep,glob"],
-        ["write", "read,grep,glob,write"],
+        ["write", "read,grep,glob,edit,write"],
       ];
       for (const [mode, expected] of cases) {
         const run = runRealPiGuestJob(mode);
@@ -957,6 +997,9 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(run.status).toBe(0);
     const result = resultOf(run);
     expect(result.status).toBe("error");
+    // The wire result carries the journal's stored exit code instead of a
+    // host-synthesized 1 for every error status.
+    expect(result.exitCode).toBe(10);
     expect(result.report.summary).toBe("companion bridge: executor failed");
     const joined = result.report.unresolved.join("\n");
     expect(joined).toContain(
