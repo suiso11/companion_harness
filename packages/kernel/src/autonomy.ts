@@ -1828,6 +1828,97 @@ export function achievePurpose(
   );
 }
 
+/**
+ * Human-only confirmation of a goal that was adopted from a chat proposal.
+ *
+ * Adopted goals are stored `explicit=false, source_kind='self'` and can
+ * NEVER authorize a trial on their own; only this route (no model tool, no
+ * autonomy path) may promote one. The record is updated IN PLACE (id, scope
+ * and dependents are preserved) to the exact trusted shape of a manually
+ * created user goal (`is_explicit=1, source_kind='user'`) plus a recorded
+ * provenance pair (`confirmed_from='conversation_proposal'`, `confirmed_at`).
+ * Already-explicit goals replay as a 200 no-op (no version bump, no event);
+ * CAS mismatch and terminal goals are 409.
+ */
+export function confirmPurpose(
+  db: Database.Database,
+  sessionId: string,
+  purposeId: string,
+  expectedVersion: number,
+  options: AutonomyKeyOptions,
+): {
+  status: number;
+  body: ReturnType<typeof toPurposeView>;
+  replayed: boolean;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const purpose = requireId(purposeId, "purposeId");
+  const key = requireKey(options.key);
+  const now = nowMs(options.now);
+  const scope = `purpose:${purpose}:confirm`;
+  const hash = requestHash(
+    IDEMPOTENCY_OPERATIONS.confirmPurpose.operation,
+    IDEMPOTENCY_OPERATIONS.confirmPurpose.schemaVersion,
+    { sessionId: session, purposeId: purpose, expectedVersion },
+  );
+  return withImmediate(db, () => {
+    // Ownership-first: foreign ids are 404 before any idempotency-cache read.
+    const row = assertOwnedPurpose(db, session, purpose);
+    const existing = toStoredResponse(db, scope, key);
+    if (existing !== null) {
+      if (existing.requestHash !== hash) {
+        throw new IdempotencyConflictError(scope);
+      }
+      const stored = parseOrValidation(
+        () => PurposeViewSchema.parse(existing.responseBody),
+        "stored purpose body",
+      );
+      return { status: existing.responseStatus, body: stored, replayed: true };
+    }
+    if (row.version !== expectedVersion) {
+      throw new AutonomyVersionConflictError(expectedVersion, row.version);
+    }
+    // Terminal goals are refused even when they were already explicit
+    // (a retired goal can never regain trial authority by confirmation).
+    if (row.status !== "active") {
+      throw new AutonomyStateConflictError(
+        `purpose ${row.id} is ${row.status} and cannot be confirmed`,
+      );
+    }
+    if (row.is_explicit !== 1 || row.source_kind !== "user") {
+      const moved = db
+        .prepare(
+          "UPDATE autonomy_purposes SET is_explicit = 1, source_kind = 'user', confirmed_from = 'conversation_proposal', confirmed_at = ?, version = ?, updated_at = ? WHERE id = ? AND status = 'active' AND is_explicit = 0 AND version = ?",
+        )
+        .run(now, row.version + 1, now, row.id, row.version);
+      if (moved.changes !== 1) {
+        throw new AutonomyVersionConflictError(expectedVersion, row.version);
+      }
+      // Same append-only transition trail as every other goal change. The
+      // closed event vocabulary has no 'confirmed' member, so the
+      // confirmation is recorded as an in-place correction and the
+      // provenance lives in the dedicated columns above.
+      appendPurposeEventInTx(
+        db,
+        row.id,
+        session,
+        "corrected",
+        "active",
+        "active",
+        row.statement,
+        now,
+      );
+    }
+    const current = readPurpose(db, row.id);
+    if (current === null) {
+      throw new RepositoryNotFoundError(`purpose ${row.id} not found`);
+    }
+    const body = toPurposeView(current);
+    storeIdempotentResponse(db, scope, key, hash, 200, body, now);
+    return { status: 200, body, replayed: false };
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Tasks                                                                */
 /* ------------------------------------------------------------------ */

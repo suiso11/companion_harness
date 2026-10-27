@@ -3819,6 +3819,54 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     },
   );
 
+  // Human-only promotion of a goal adopted from a chat proposal. There is
+  // deliberately NO model tool and no autonomy path for this route: an
+  // adopted goal stays non-explicit (and thus cannot authorize a trial)
+  // until a person presses the confirmation button here.
+  app.post("/api/sessions/:sessionId/goals/:goalId/confirm", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const goal = requireUuid(c, c.req.param("goalId"), "goalId");
+    if ("response" in goal) {
+      return goal.response;
+    }
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) {
+      return keyed.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    if (PurposeTransitionRequestSchema.safeParse(raw.value).success !== true) {
+      return validationError(c);
+    }
+    if (draining) {
+      return shuttingDown(c);
+    }
+    try {
+      const out = repo.confirmAutonomyPurpose(session.id, goal.id, raw.value, {
+        key: keyed.key,
+        now: now(),
+      });
+      logger.info("http.autonomy.goals.confirm", {
+        sessionId: session.id,
+        status: out.status,
+        durationMs: Math.max(now() - started, 0),
+      });
+      wakeShadow();
+      return c.json(out.body, out.status as 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
   app.get("/api/sessions/:sessionId/purpose-conflicts", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
     if ("response" in session) {

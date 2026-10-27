@@ -251,6 +251,7 @@ export {
   applyAutonomyRestartFence,
   cancelTask,
   completeTask,
+  confirmPurpose,
   correctPurpose,
   createAutonomyQueryPort,
   createPurpose,
