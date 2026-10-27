@@ -234,11 +234,13 @@ export function normalizeOpenAIResponse(
     text,
     toolCalls,
     stopReason:
-      toolCalls.length > 0 || finishReason === "tool_calls"
-        ? "tool_calls"
-        : finishReason === "stop" || finishReason === ""
-          ? "stop"
-          : "unknown",
+      finishReason === "length"
+        ? "length"
+        : toolCalls.length > 0 || finishReason === "tool_calls"
+          ? "tool_calls"
+          : finishReason === "stop" || finishReason === ""
+            ? "stop"
+            : "unknown",
     ...(usage === undefined ? {} : { usage }),
   };
 }

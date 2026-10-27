@@ -98,7 +98,12 @@ export interface NormalizedToolCall {
 export interface ChatResult {
   text: string;
   toolCalls: NormalizedToolCall[];
-  stopReason: "stop" | "tool_calls" | "unknown";
+  /**
+   * Provider-normalized stop reason. `length` means the provider stopped at
+   * an output-token cap (`finish_reason`/`done_reason` "length"); callers
+   * must not treat a truncated step as an answer.
+   */
+  stopReason: "stop" | "tool_calls" | "length" | "unknown";
   /** Optional token counts only; absent when the provider omits them. */
   usage?: ModelUsage | null;
 }

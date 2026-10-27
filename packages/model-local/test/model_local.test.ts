@@ -283,6 +283,22 @@ describe("ollama adapter", () => {
     expect(sent.model).toBe("test-model");
   });
 
+  it("maps done_reason length to stopReason length", async () => {
+    const { fetchImpl } = mockFetch(
+      jsonResponse({
+        message: { role: "assistant", content: "truncated" },
+        done: true,
+        done_reason: "length",
+      }),
+    );
+    const gateway = createOllamaGateway({
+      baseUrl: "http://127.0.0.1:11434",
+      fetchImpl,
+    });
+    const result = await gateway.chat(baseRequest());
+    expect(result.stopReason).toBe("length");
+  });
+
   it("normalizes native tool_calls without parsing content", async () => {
     const { fetchImpl } = mockFetch(
       jsonResponse({
@@ -427,6 +443,24 @@ describe("openai-compatible adapter", () => {
       unknown
     >;
     expect(sent.stream).toBe(false);
+  });
+
+  it("maps finish_reason length to stopReason length", async () => {
+    const { fetchImpl } = mockFetch(
+      jsonResponse({
+        choices: [
+          {
+            message: { role: "assistant", content: "truncated" },
+            finish_reason: "length",
+          },
+        ],
+      }),
+    );
+    const result = await createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl,
+    }).chat(baseRequest());
+    expect(result.stopReason).toBe("length");
   });
 
   it("avoids doubling a /v1 base path", () => {

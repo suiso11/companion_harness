@@ -89,6 +89,7 @@ export const MODEL_FAILURE_NOTICES = {
   unreachable: "モデルサーバーが応答しません（起動中の可能性）",
   tooLarge: "返答が大きすぎます",
   malformed: "回答の形式が崩れました",
+  outputTruncated: "出力が上限で途中で切れました",
 } as const;
 
 /** Fixed diagnostic subset from one `model.step.failed` payload. */
@@ -97,6 +98,7 @@ export interface ModelFailureDiagnostics {
   readonly gatewayErrorCode: string | null;
   readonly invalidResponseCause: string | null;
   readonly httpStatus: number | null;
+  readonly reason: string | null;
 }
 
 function readOptionalString(
@@ -127,6 +129,7 @@ export function readModelFailureDiagnostics(
       httpStatus <= 599
         ? httpStatus
         : null,
+    reason: readOptionalString(record, "reason"),
   };
 }
 
@@ -143,6 +146,9 @@ export function modelFailureNotice(
   }
   if (diagnostics.errorCode === "model_step_timeout") {
     return MODEL_FAILURE_NOTICES.timeout;
+  }
+  if (diagnostics.reason === "output_truncated") {
+    return MODEL_FAILURE_NOTICES.outputTruncated;
   }
   if (
     diagnostics.errorCode === "answer_invalid" ||

@@ -63,11 +63,15 @@ function answerCall(
   return toolCall("answer.submit", { version: 1, parts }, "answer-1");
 }
 
-function chatResult(toolCalls: NormalizedToolCall[], text = ""): ChatResult {
+function chatResult(
+  toolCalls: NormalizedToolCall[],
+  text = "",
+  stopReason?: ChatResult["stopReason"],
+): ChatResult {
   return {
     text,
     toolCalls,
-    stopReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+    stopReason: stopReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
   };
 }
 
@@ -574,6 +578,124 @@ describe("terminal protocol: answer.submit bypasses ToolBroker", () => {
       closeKernelDatabase(handle);
     }
   });
+  it("sends the explicit 8192 output cap on every foreground step", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        chatResult([], "prose"),
+        chatResult([answerCall([{ text: "ok", citations: [] }])]),
+      ]);
+      const strategy = makeStrategy(handle, repo, broker, gateway);
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(
+        strategy(strategyCtx(repo, sessionId, runId)),
+      ).resolves.toEqual({
+        version: 2,
+        text: "ok",
+        answer: { version: 1, parts: [{ text: "ok", citations: [] }] },
+      });
+      expect(calls.map((call) => call.maxOutputTokens)).toEqual([8192, 8192]);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("repairs a length-truncated step with the length hint and then succeeds", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        chatResult([], "cut off mid thought", "length"),
+        chatResult([answerCall([{ text: "short", citations: [] }])]),
+      ]);
+      const strategy = makeStrategy(handle, repo, broker, gateway);
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(
+        strategy(strategyCtx(repo, sessionId, runId)),
+      ).resolves.toEqual({
+        version: 2,
+        text: "short",
+        answer: { version: 1, parts: [{ text: "short", citations: [] }] },
+      });
+      expect(calls).toHaveLength(2);
+      expect(JSON.stringify(calls[1])).toContain(
+        "出力が上限で途中で切れました",
+      );
+      const failed = repo
+        .getEvents(sessionId, runId, {})
+        .events.filter((event) => event.type === "model.step.failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.payload).toMatchObject({
+        step: 1,
+        errorCode: "answer_invalid",
+        reason: "output_truncated",
+      });
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("fails with output_truncated when the repair is also length-truncated", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        chatResult([], "first cut", "length"),
+        chatResult([], "second cut", "length"),
+      ]);
+      const strategy = makeStrategy(handle, repo, broker, gateway);
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(
+        strategy(strategyCtx(repo, sessionId, runId)),
+      ).rejects.toMatchObject({
+        name: "StrategyError",
+        errorCode: "output_invalid",
+      });
+      expect(calls).toHaveLength(2);
+      const failed = repo
+        .getEvents(sessionId, runId, {})
+        .events.filter((event) => event.type === "model.step.failed");
+      expect(failed.at(-1)?.payload).toMatchObject({
+        step: 2,
+        errorCode: "answer_invalid",
+        reason: "output_truncated",
+      });
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("accepts a valid answer.submit even when the step is length-truncated", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { gateway, calls } = scriptGateway([
+        chatResult(
+          [answerCall([{ text: "accepted", citations: [] }])],
+          "",
+          "length",
+        ),
+      ]);
+      const strategy = makeStrategy(handle, repo, broker, gateway);
+      const { sessionId, runId } = newRunningTurn(repo, T0);
+      await expect(
+        strategy(strategyCtx(repo, sessionId, runId)),
+      ).resolves.toEqual({
+        version: 2,
+        text: "accepted",
+        answer: { version: 1, parts: [{ text: "accepted", citations: [] }] },
+      });
+      expect(calls).toHaveLength(1);
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("repairs a structurally invalid answer payload once", async () => {
     const { handle, repo } = await setup();
     try {
