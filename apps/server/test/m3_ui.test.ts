@@ -481,6 +481,14 @@ describe("M3 client reducer contract", () => {
         payload: { step: 1, errorCode: "answer_invalid" },
         expected: "回答の形式が崩れました",
       },
+      {
+        payload: {
+          step: 1,
+          errorCode: "answer_invalid",
+          reason: "output_truncated",
+        },
+        expected: "出力が上限で途中で切れました",
+      },
     ];
     for (const testCase of cases) {
       const started = applyRunEvent(INITIAL_RUN_VIEW, {

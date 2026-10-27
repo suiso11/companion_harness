@@ -141,6 +141,23 @@ describe("streaming request shape", () => {
     ]);
   });
 
+  it("maps a streamed finish_reason length to stopReason length", async () => {
+    const { fetchImpl } = mockFetch(
+      sseResponseFromChunks([
+        sseChunk({
+          choices: [{ delta: { content: "partial" }, finish_reason: null }],
+        }),
+        sseChunk({
+          choices: [{ delta: {}, finish_reason: "length" }],
+        }),
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const result = await streamingGateway(fetchImpl).chat(baseRequest());
+    expect(result.text).toBe("partial");
+    expect(result.stopReason).toBe("length");
+  });
+
   it("stays additive/default-off without the flag", async () => {
     const { fetchImpl, calls } = mockFetch(
       new Response(

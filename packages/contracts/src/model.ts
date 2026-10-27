@@ -61,6 +61,7 @@ export const ANSWER_INVALID_REASON_CODES = [
   "reserved_namespace",
   "free_text",
   "citation_not_granted",
+  "output_truncated",
   "other",
 ] as const;
 export type AnswerInvalidReasonCode =

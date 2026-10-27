@@ -1679,6 +1679,7 @@ export function validateChatResult(
   if (
     stopReason !== "stop" &&
     stopReason !== "tool_calls" &&
+    stopReason !== "length" &&
     stopReason !== "unknown"
   ) {
     throw new ModelLocalError(

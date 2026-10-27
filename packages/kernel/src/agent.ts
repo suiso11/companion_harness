@@ -99,6 +99,15 @@ import {
 
 /** Max model steps per Run, repair included (never a ninth call). */
 export const AGENT_MAX_STEPS = MAX_MODEL_STEPS_PER_RUN;
+/**
+ * Explicit output-token cap for every foreground model step, repair
+ * included. It covers the server-side 2048-token thinking budget plus a
+ * normal answer, and at the production ~60 tok/s it costs at most ~136s,
+ * comfortably inside the 300s step budget and the 65536-token production
+ * context. The gateway only serializes an explicit cap, so without this a
+ * runaway step is bounded only by the 300s step timeout.
+ */
+export const AGENT_MAX_OUTPUT_TOKENS = 8192;
 /** Per-step model timeout in ms (agreed 300s / 5 min per model step). */
 export const AGENT_STEP_TIMEOUT_MS = 300_000;
 /** Whole-Run wall budget in ms for all generateTurn calls (agreed 600s). */
@@ -300,6 +309,8 @@ export const AGENT_REPAIR_HINTS = {
   reserved_namespace:
     "Your previous step called a reserved answer.* tool, which is invalid. " +
     "Only answer.submit is valid, submitted alone; ordinary tools use their own names.",
+  length:
+    "出力が上限で途中で切れました。考えを短くし、簡潔な answer.submit で回答してください。",
 } as const;
 
 export type AgentRepairReason = keyof typeof AGENT_REPAIR_HINTS;
@@ -3167,6 +3178,7 @@ export function createAgentStrategy(
           }
           throw new StrategyError("execution_failed");
         }
+        const truncated = outcome.result.stopReason === "length";
         const classification = classifyStep(outcome.result.toolCalls);
         // Provider-correct multi-step replay: preserve the native assistant
         // toolCalls message before any tool results / repair hint. Raw text
@@ -3178,7 +3190,11 @@ export function createAgentStrategy(
             toolCalls: outcome.result.toolCalls.map((call) => ({ ...call })),
           });
         }
-        if (classification.kind === "ordinary") {
+        // A length-truncated step is never an ordinary-tool step: its calls
+        // (and any bundled answer) may be cut off mid-payload, so tools are
+        // not executed. It is classified below into the one repair slot
+        // unless it already yielded a valid lone answer.submit.
+        if (classification.kind === "ordinary" && !truncated) {
           // Valid ordinary-tool-only steps audit completed (tool results never
           // flip the model-step verdict). Exactly one row + one terminal event.
           const audited = finalizeDeliveredStep({
@@ -3230,15 +3246,29 @@ export function createAgentStrategy(
         // reserved / free-text) never reach the broker. Validation runs first;
         // the single audit row/event below reflects its outcome, so an invalid
         // step never records a contradictory completed+failed pair.
-        const terminal = await handleAnswerClass({
-          db,
-          repo,
-          runId,
-          sessionId,
-          classification,
-          repairUsed,
-          signal: ctx.signal,
-        });
+        const terminal = truncated
+          ? await handleTruncatedClass({
+              db,
+              repo,
+              runId,
+              sessionId,
+              classification,
+              repairUsed,
+              signal: ctx.signal,
+            })
+          : await handleAnswerClass({
+              db,
+              repo,
+              runId,
+              sessionId,
+              // Non-truncated ordinary steps already continued above.
+              classification: classification as Exclude<
+                StepClassification,
+                { kind: "ordinary" }
+              >,
+              repairUsed,
+              signal: ctx.signal,
+            });
         const terminalErrorCode: M2ModelErrorCode | null =
           terminal.kind === "succeeded"
             ? null
@@ -3900,6 +3930,7 @@ async function runModelStep(args: {
     model,
     messages: messages.map((message) => ({ ...message })),
     tools: [...toolDefinitions],
+    maxOutputTokens: AGENT_MAX_OUTPUT_TOKENS,
     ...(reasoningBudgetTokens === undefined ? {} : { reasoningBudgetTokens }),
   };
   // The private record is written BEFORE the network call. A failed write is
@@ -5068,6 +5099,7 @@ const AGENT_REPAIR_REASON_CODES: Record<
   answer_invalid: "other",
   citation_invalid: "citation_not_granted",
   reserved_namespace: "reserved_namespace",
+  length: "output_truncated",
 };
 
 const ANSWER_INVALID_PARSE_ISSUE_ALLOWLIST: ReadonlySet<string> = new Set(
@@ -5330,6 +5362,71 @@ async function renderAnswerVoice(args: {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Handle a step whose provider stop reason was `length`. A valid lone
+ * answer.submit is accepted even when the provider flagged truncation.
+ * Anything else (ordinary tool calls, invalid/mixed answers, free text) did
+ * not produce a valid answer, so it consumes the same single repair slot
+ * with the length-specific hint; a second truncated step fails with the
+ * existing answer error code and the fixed `output_truncated` reason.
+ * Truncated ordinary tool calls are never executed.
+ */
+async function handleTruncatedClass(args: {
+  db: Database.Database;
+  repo: KernelRepository;
+  runId: string;
+  sessionId: string;
+  classification: StepClassification;
+  repairUsed: boolean;
+  signal: AbortSignal;
+}): Promise<AnswerHandling> {
+  const { classification, repairUsed } = args;
+  if (classification.kind === "single_answer") {
+    const terminal = await handleAnswerClass({
+      ...args,
+      classification,
+    });
+    if (terminal.kind === "succeeded") {
+      return terminal;
+    }
+    if (!repairUsed) {
+      return {
+        kind: "repaired",
+        reason: "length",
+        answerReason: "output_truncated",
+      };
+    }
+    if (terminal.kind === "failed") {
+      return {
+        kind: "failed",
+        strategyError: terminal.strategyError,
+        errorCode: terminal.errorCode,
+        answerReason: "output_truncated",
+      };
+    }
+    // Defensive: repairUsed was true, so handleAnswerClass cannot repair.
+    return {
+      kind: "failed",
+      strategyError: new StrategyError("output_invalid"),
+      errorCode: "answer_invalid",
+      answerReason: "output_truncated",
+    };
+  }
+  if (!repairUsed) {
+    return {
+      kind: "repaired",
+      reason: "length",
+      answerReason: "output_truncated",
+    };
+  }
+  return {
+    kind: "failed",
+    strategyError: new StrategyError("output_invalid"),
+    errorCode: "answer_invalid",
+    answerReason: "output_truncated",
+  };
 }
 
 /**

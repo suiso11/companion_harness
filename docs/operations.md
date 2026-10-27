@@ -307,14 +307,32 @@ connector instance owns **all** configured roots.
   `reasoningBudgetTokens` unset (no app-level thinking cap); the local
   llama-server for the main model enforces a 2048-token server-side
   `--reasoning-budget` (2026-10-26), so runaway thinking cannot consume the
-  4096-token output limit and 300s step budget. An already-exported
-  `COMPANION_MODEL_JSON` wins and may add the field itself when a
-  per-request cap is desired. Timeouts, answer limits, retries, and model
-  choice are unchanged. Production evidence without the server budget: chat
-  thinking never terminated, every request reached 4096 output tokens at
+  output budget and 300s step budget. Every foreground agent step (repair
+  included) additionally sends an explicit `maxOutputTokens` of
+  `AGENT_MAX_OUTPUT_TOKENS` = 8192 (`max_tokens` for OpenAI-compatible,
+  `num_predict` for Ollama). 8192 covers the 2048-token thinking budget plus
+  a normal answer and costs at most ~136s at the production ~60 tok/s,
+  inside the 300s step budget and the 65536-token production context. An
+  already-exported `COMPANION_MODEL_JSON` wins for the gateway target and
+  may add `reasoningBudgetTokens`; the output cap is fixed by the agent.
+  Timeouts, answer limits, retries, and model choice are unchanged.
+  Production evidence without the server budget: chat thinking never
+  terminated, requests were observed/reported at 4096 output tokens at
   ~20 tok/s (two concurrent duplicates), and the chat turn timed out at
-  300.22s. Normal reasoning measured <=1251 chars, so 2048 only cuts runaway
-  thinking.
+  300.22s. That 4096 was not configured in `compose.yaml` or
+  `litellm_config.yaml` (llama.cpp's `n_predict` default is -1 and the
+  LiteLLM openai provider sends no `max_tokens` when omitted), so its exact
+  source is inferred (LiteLLM's global `DEFAULT_MAX_TOKENS` accounting
+  default), not confirmed; the agent now sends 8192 explicitly. Normal
+  reasoning measured <=1251 chars, so 2048 only cuts runaway thinking.
+- Truncated steps: model-local maps OpenAI-compatible `finish_reason`
+  "length" (non-stream and stream) and Ollama `done_reason` "length" to
+  `stopReason: "length"`. A valid lone `answer.submit` is still accepted; a
+  truncated step without one consumes the single repair slot with a
+  length-specific hint (truncated ordinary calls are never executed). If
+  the repair is also truncated the Run fails with the existing answer error
+  code and `model.step.failed.reason = "output_truncated"`; the UI shows
+  「出力が上限で途中で切れました」.
 - Fixed safe failure diagnostics: `model.step.failed` may include
   `gatewayErrorCode` (model-local closed code such as `request_failed`,
   `timeout`, `invalid_response`), `invalidResponseCause` (`response_too_large`

@@ -170,7 +170,12 @@ export function normalizeOllamaResponse(
   return {
     text,
     toolCalls,
-    stopReason: toolCalls.length > 0 ? "tool_calls" : mapStopReason(doneReason),
+    stopReason:
+      doneReason === "length"
+        ? "length"
+        : toolCalls.length > 0
+          ? "tool_calls"
+          : mapStopReason(doneReason),
     ...(usage === undefined ? {} : { usage }),
   };
 }
@@ -248,6 +253,9 @@ export function toOllamaMessage(message: ChatMessage): Record<string, unknown> {
 }
 
 function mapStopReason(doneReason: string): ChatResult["stopReason"] {
+  if (doneReason === "length") {
+    return "length";
+  }
   if (doneReason === "stop" || doneReason === "") {
     return "stop";
   }
