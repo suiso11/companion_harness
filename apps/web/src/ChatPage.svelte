@@ -2414,23 +2414,41 @@ async function decideTrialProposalCard(
   const sid = sessionId;
   proposalDeciding = card.key;
   proposalNotice = "";
+  // Same freeze as conversation decisions: an uncertain approve reply must
+  // retry with the exact same Idempotency-Key, not a fresh one (review #154).
+  // Expire stays keyless (state-idempotent) and never disturbs a frozen key.
+  const decision =
+    action === "approve"
+      ? frozenProposalDecision(
+          pendingCardDecision,
+          card.key + action,
+          {},
+          randomUuid(),
+        )
+      : null;
+  if (decision !== null) pendingCardDecision = decision;
   let result: { status: number };
   try {
     result = await postJson(
       `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
-      {},
-      // approve is keyed; expire is deliberately keyless (state-idempotent).
-      action === "approve" ? randomUuid() : null,
+      decision?.body ?? {},
+      decision?.key ?? null,
     );
   } catch {
     if (sessionId === sid) {
       proposalDeciding = null;
-      proposalNotice = "操作に失敗しました。もう一度お試しください";
+      proposalNotice = proposalCardErrorText(0);
     }
     return;
   }
   if (sessionId !== sid) return;
   proposalDeciding = null;
+  if (decision !== null && (result.status === 0 || result.status >= 500)) {
+    // Uncertain outcome: keep the frozen key + card for a retry.
+    proposalNotice = proposalCardErrorText(0);
+    return;
+  }
+  if (decision !== null) pendingCardDecision = null;
   const ok =
     action === "approve" ? result.status === 201 : result.status === 200;
   proposalNotice = ok

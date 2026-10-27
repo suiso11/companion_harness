@@ -303,4 +303,32 @@ describe("frozenProposalDecision", () => {
     );
     expect(other.key).toBe("key-3");
   });
+
+  it("freezes a trial approve key across an uncertain reply", () => {
+    // Trial cards freeze on card key + action, exactly like conversation
+    // cards, so a status-0/5xx approve retry reuses the same key + body.
+    const first = frozenProposalDecision<Record<string, never>>(
+      null,
+      "trial:t1approve",
+      {},
+      "key-trial-1",
+    );
+    const retry = frozenProposalDecision<Record<string, never>>(
+      first,
+      "trial:t1approve",
+      {},
+      "key-trial-2",
+    );
+    expect(retry).toBe(first);
+    expect(retry.key).toBe("key-trial-1");
+    // Expire uses no frozen command, so it cannot re-key the approve.
+    expect(first.key).toBe("key-trial-1");
+    const approveAgain = frozenProposalDecision<Record<string, never>>(
+      first,
+      "trial:t1approve",
+      {},
+      "key-trial-3",
+    );
+    expect(approveAgain.key).toBe("key-trial-1");
+  });
 });
