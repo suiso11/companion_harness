@@ -19,6 +19,7 @@ import Markdown from "./lib/Markdown.svelte";
 import {
   type ChatProposalCardView,
   conversationProposalCards,
+  createProposalSyncGuard,
   proposalCardErrorText,
   trialProposalCards,
 } from "./lib/proposal_cards.js";
@@ -236,6 +237,8 @@ let cards: CardState[] = $state([]);
 let proposalCards: ChatProposalCardView[] = $state([]);
 let proposalDeciding = $state<string | null>(null);
 let proposalNotice = $state("");
+// Generation guard: only the latest syncProposals() may apply its result.
+const proposalSync = createProposalSyncGuard();
 let authExpired = $state(false);
 let loginPassword = $state("");
 let loginError = $state("");
@@ -452,6 +455,12 @@ function resetChatState(): void {
   for (const timer of pendingExpiryTimers.values()) window.clearTimeout(timer);
   pendingExpiryTimers = new Map();
   cards = [];
+  // Proposal cards are session-scoped too, and an in-flight sync/decision
+  // from the previous session must not leak into the new one (review #154).
+  proposalSync.invalidate();
+  proposalCards = [];
+  proposalDeciding = null;
+  proposalNotice = "";
   actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
@@ -2247,6 +2256,7 @@ function isTrialProposalItem(
 async function syncProposals(): Promise<void> {
   if (sessionId === null) return;
   const sid = sessionId;
+  const seq = proposalSync.next();
   let listed: [
     { status: number; body: unknown },
     { status: number; body: unknown },
@@ -2261,7 +2271,7 @@ async function syncProposals(): Promise<void> {
   } catch {
     return;
   }
-  if (sessionId !== sid) return;
+  if (sessionId !== sid || !proposalSync.isCurrent(seq)) return;
   const [conversation, trials] = listed;
   const runIds = knownRunIds();
   const conversationItems =
@@ -3021,6 +3031,8 @@ $effect(() => {
     runView.notice,
     runView.visible,
     cards.length,
+    proposalCards.length,
+    proposalNotice,
     showThinking,
     thinkingCollapsed,
     booted,

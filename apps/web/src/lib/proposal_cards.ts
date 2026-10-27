@@ -139,3 +139,27 @@ export function proposalCardErrorText(status: number): string {
   if (status === 404) return "対象が見つかりません。再読み込みしてください";
   return "操作に失敗しました。もう一度お試しください";
 }
+
+/**
+ * Latest-request guard for async proposal list refreshes. A run-completion
+ * refresh can overlap a card decision's refresh; only the newest call may
+ * apply its (older) list. `invalidate()` drops everything in flight, e.g.
+ * when the chat session is switched.
+ */
+export function createProposalSyncGuard(): {
+  next: () => number;
+  isCurrent: (seq: number) => boolean;
+  invalidate: () => void;
+} {
+  let current = 0;
+  return {
+    next: () => {
+      current += 1;
+      return current;
+    },
+    isCurrent: (seq: number) => seq === current,
+    invalidate: () => {
+      current += 1;
+    },
+  };
+}

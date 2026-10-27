@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   conversationProposalCards,
+  createProposalSyncGuard,
   proposalCardErrorText,
   trialProposalCards,
 } from "../src/lib/proposal_cards.js";
@@ -100,5 +101,23 @@ describe("proposalCardErrorText", () => {
     expect(proposalCardErrorText(404)).toBe(
       "対象が見つかりません。再読み込みしてください",
     );
+  });
+});
+
+describe("createProposalSyncGuard", () => {
+  it("accepts only the latest request", () => {
+    const guard = createProposalSyncGuard();
+    const first = guard.next();
+    const second = guard.next();
+    expect(guard.isCurrent(first)).toBe(false);
+    expect(guard.isCurrent(second)).toBe(true);
+  });
+
+  it("drops everything in flight when invalidated", () => {
+    const guard = createProposalSyncGuard();
+    const seq = guard.next();
+    guard.invalidate();
+    expect(guard.isCurrent(seq)).toBe(false);
+    expect(guard.isCurrent(guard.next())).toBe(true);
   });
 });
