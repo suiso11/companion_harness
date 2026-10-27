@@ -1679,7 +1679,6 @@ export class TrialRunner {
             checks: proof.checks,
             outputMatched: proof.outputMatched && !stdoutTruncated,
             noTimeout: proof.noTimeout,
-            report: proof.report,
           }
         : {
             taskHash: request.taskHash,
@@ -1690,8 +1689,10 @@ export class TrialRunner {
             })),
             outputMatched: false as const,
             noTimeout: false as const,
-            report: null,
           };
+    // Presentation-only report rides alongside `result` (the kernel persists
+    // only the top-level input.report; it never feeds authorization).
+    const report = proof.kind === "valid" ? proof.report : null;
     const goneObservation: TrustedRuntimeObservation = {
       scopeState: "gone",
       frontendSettled: true,
@@ -1710,7 +1711,7 @@ export class TrialRunner {
       const recorded = this.repo.recordTrialWorkerResult(
         sessionId,
         executionId,
-        { detail, observation: goneObservation, result },
+        { detail, observation: goneObservation, result, report },
         this.clock(),
       );
       authorized = recorded.authorized === true;

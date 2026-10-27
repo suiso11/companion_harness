@@ -652,6 +652,25 @@ describe("trial_runner", () => {
       };
       expect(stored.authorized).toBe(1);
       expect(stored.detail).toContain("bridge-exit:0");
+      // The parsed wire report must persist as unattested presentation data
+      // (regression: it was previously nested in `result` and dropped).
+      const report = repo.readTrialWorkerReport(
+        sessionId,
+        out.executionId as string,
+      );
+      expect(report).not.toBeNull();
+      expect(report).toMatchObject({
+        summary: "fixed",
+        findings: ["EDIT_APPLIED"],
+        unresolved: [],
+        verified: true,
+        provenance: {
+          findings: "guest-reported-unattested",
+          checks: "host-checked",
+          artifact: "host-checked",
+        },
+      });
+      expect(report?.checks.length).toBeGreaterThan(0);
       const taskView = repo.getAutonomyTask(sessionId, taskId);
       expect(taskView.status).not.toBe("completed");
     } finally {
