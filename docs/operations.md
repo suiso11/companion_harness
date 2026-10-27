@@ -5755,7 +5755,11 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   from `~/companion_master` as it exists BEFORE the switch to the new target,
   so the first deploy that introduces new deploy/build logic applies that logic
   only from the NEXT deploy. After such a deploy, run the manual rebuild below
-  once so the published profile comes from the intended revision.
+  once so the published profile comes from the intended revision, then
+  `systemctl --user restart companion.service`: the builder only publishes
+  `operator.json`/`autonomy.env`, while the running server keeps the profile
+  captured at startup (a different fingerprint is rejected), so without the
+  restart trials stay on the old/disabled profile.
 - Run manually from the checkout root (the path must be absolute or
   `$PWD`-anchored: `exec` resolves relative paths inside `apps/server`, so a
   bare `scripts/deploy/...` argument fails with `ERR_MODULE_NOT_FOUND`):
