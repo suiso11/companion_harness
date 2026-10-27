@@ -5751,5 +5751,18 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   `EnvironmentFile=-%h/.config/companion/autonomy.env` after the main env file
   (later files win). Hosts installed from an older unit also need the
   equivalent drop-in `~/.config/systemd/user/companion.service.d/autonomy.conf`.
-- Run manually with:
-  `pnpm --filter @companion/server exec tsx scripts/deploy/build-trial-operator.mts`.
+- Deploy runs the checkout's PRE-SWITCH script: `companion-deploy.sh` is read
+  from `~/companion_master` as it exists BEFORE the switch to the new target,
+  so the first deploy that introduces new deploy/build logic applies that logic
+  only from the NEXT deploy. After such a deploy, run the manual rebuild below
+  once so the published profile comes from the intended revision.
+- Run manually from the checkout root (the path must be absolute or
+  `$PWD`-anchored: `exec` resolves relative paths inside `apps/server`, so a
+  bare `scripts/deploy/...` argument fails with `ERR_MODULE_NOT_FOUND`):
+  `pnpm --filter @companion/server exec tsx "$PWD/scripts/deploy/build-trial-operator.mts"`.
+  This is the same invocation `companion-deploy.sh` uses
+  (`tsx "$SCRIPT_DIR/build-trial-operator.mts"`).
+- Trial results and findings live in the frozen bridge journal at
+  `state/jobs/<job>/bridge-state/companion-journal.db` (under the trial
+  `stateRoot`). They are NOT exposed through the trial API yet, so inspect that
+  SQLite file directly for outcomes.
