@@ -56,8 +56,8 @@ export const TRIAL_STDOUT_FRAMING_ALLOWANCE = 4096;
 /** Keyset page size for one pick. NOT a starve cutoff: pages continue until
  * the pick's snapshot boundary, so an 11th/50th valid grant stays reachable. */
 const TRIAL_QUEUE_SCAN_PAGE = 50;
-/** Fixed stderr drain cap (diagnostics only, never forwarded). */
-export const TRIAL_STDERR_CAP_BYTES = 65536;
+/** Bounded stderr head kept for exit diagnostics (never forwarded/raw). */
+export const TRIAL_STDERR_CAP_BYTES = 2048;
 /** Fixed reason codes (never free text into the kernel fence/detail). */
 export const TRIAL_REASON_INVALID_RESULT = "bridge-result-invalid";
 export const TRIAL_REASON_FENCE_UNKNOWN_SCOPE = "scope-unknown-after-exit";
@@ -1168,13 +1168,23 @@ export class TrialRunner {
       stdoutChunks.push(buf);
       stdoutBytes += buf.length;
     });
-    let _stderrBytes = 0;
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
+    let stderrTruncated = false;
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      _stderrBytes += buf.length;
-      // Discard beyond the cap: keep the listener attached so stderr keeps
-      // draining and the bridge can never block on a full pipe.
-      void buf;
+      // Keep only a bounded head, but keep the listener attached and drain
+      // everything so the bridge can never block on a full pipe.
+      if (stderrTruncated) return;
+      const remaining = TRIAL_STDERR_CAP_BYTES - stderrBytes;
+      if (buf.length <= remaining) {
+        stderrChunks.push(buf);
+        stderrBytes += buf.length;
+        return;
+      }
+      if (remaining > 0) stderrChunks.push(buf.subarray(0, remaining));
+      stderrBytes = TRIAL_STDERR_CAP_BYTES;
+      stderrTruncated = true;
     });
 
     const closeFd3 = (): void => {
@@ -1692,7 +1702,12 @@ export class TrialRunner {
           };
     // Presentation-only report rides alongside `result` (the kernel persists
     // only the top-level input.report; it never feeds authorization).
-    const report = proof.kind === "valid" ? proof.report : null;
+    const report =
+      proof.kind === "valid"
+        ? proof.report
+        : !bridgeClean
+          ? bridgeFailureReport(stderrChunks)
+          : null;
     const goneObservation: TrustedRuntimeObservation = {
       scopeState: "gone",
       frontendSettled: true,
@@ -1809,6 +1824,37 @@ function parseWireCheckEntry(
     return null;
   const ok = exitCode === 0 && timedOut === false && outputMatched === true;
   return { id: item.id as string, ok };
+}
+
+/** Redact + bound a bridge stderr head into unresolved diagnostics lines. */
+function bridgeFailureReport(chunks: readonly Buffer[]): {
+  summary: string;
+  findings: string[];
+  unresolved: string[];
+  checks: { name: string; outcome: "passed" | "failed"; exit: number | null }[];
+  artifact: null;
+  verified: boolean;
+} | null {
+  const text = truncateReportText(Buffer.concat(chunks).toString("utf8"), 2048);
+  const redacted = text.replace(
+    /(sk-|Bearer\s+)[A-Za-z0-9._-]+/g,
+    "[redacted]",
+  );
+  const lines = redacted
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(0, 8)
+    .map((line) => `bridge: ${line}`);
+  if (lines.length === 0) return null;
+  return {
+    summary: "bridge exited before writing a journal report",
+    findings: [],
+    unresolved: lines,
+    checks: [],
+    artifact: null,
+    verified: false,
+  };
 }
 
 /** UTF-8-safe byte truncation for untrusted guest report text. */

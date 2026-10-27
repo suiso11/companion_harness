@@ -412,6 +412,8 @@ describe("autodispatch config shape (real parser)", () => {
       timeoutMs: 900_000,
       maxOutputBytes: 262_144,
       workspaceAlias: "companion-harness",
+      allowedPaths: ["apps", "packages"],
+      modelRoute: "local",
       runner: {
         nodeRealpath: "/usr/bin/node",
         bridgeScriptPath: bridge,
@@ -629,6 +631,15 @@ describe("companion-deploy.sh trial-operator ordering", () => {
     expect(source).toContain(
       'COMPANION_TRIAL_ROLLBACK_OPERATOR_FILE="$TRIAL_BACKUP_DIR/operator.json"',
     );
+  });
+});
+
+describe("build-trial-operator frozen profile fields", () => {
+  const source = readFileSync(join(HERE, "build-trial-operator.mts"), "utf8");
+
+  it("copies the frozen allowedPaths and modelRoute into autonomy JSON", () => {
+    expect(source).toContain("allowedPaths: [...config.profile.allowedPaths]");
+    expect(source).toContain("modelRoute: config.profile.model.route");
   });
 });
 

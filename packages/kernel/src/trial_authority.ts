@@ -34,6 +34,7 @@ import {
   KernelStorageError,
   RepositoryNotFoundError,
   RepositoryValidationError,
+  TrialStageError,
 } from "./errors.js";
 
 export type { TrialProfileSnapshot, TrustedRuntimeObservation };
@@ -142,6 +143,18 @@ export function assertCanonicalLiteralPath(p: string, what: string): string {
       );
   }
   return p;
+}
+
+/** Segment-boundary scope membership (not a string prefix). */
+export function pathWithinAllowedScope(
+  path: string,
+  allowedPaths: readonly string[],
+): boolean {
+  for (const scope of allowedPaths) {
+    if (scope === ".") return true;
+    if (path === scope || path.startsWith(`${scope}/`)) return true;
+  }
+  return false;
 }
 
 function assertWorkspaceAlias(a: string, what: string): string {
@@ -384,7 +397,8 @@ export function checkTrialAuthority(
   if (g.status !== "active" || !applicable(g, frozenNow))
     throw new RepositoryValidationError(`parent goal is not active/applicable`);
   if (g.source_kind !== "user" || g.is_explicit !== 1)
-    throw new RepositoryValidationError(
+    throw new TrialStageError(
+      "purpose_not_confirmed",
       "authority requires explicit user goal",
     );
   // self/external claims never authority even explicit=true: task speaker
@@ -700,6 +714,25 @@ export function stageTrialProposal(
           );
       }
     }
+    const allowedPaths = profile.allowedPaths;
+    if (allowedPaths !== undefined) {
+      for (const path of normPaths) {
+        if (!pathWithinAllowedScope(path, allowedPaths))
+          throw new TrialStageError(
+            "trial_path_outside_profile",
+            "literalPatchPath is outside the frozen profile",
+          );
+      }
+    }
+    if (
+      input.possibleExternalDataConsent &&
+      profile.modelRoute !== undefined &&
+      profile.modelRoute !== "external"
+    )
+      throw new TrialStageError(
+        "trial_external_consent_unavailable",
+        "external model consent is unavailable for the frozen route",
+      );
     const auth = checkTrialAuthority(
       db,
       session,

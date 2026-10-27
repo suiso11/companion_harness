@@ -242,6 +242,8 @@ function readTrialReport(value: unknown): TrialReport | null {
 interface TrialProfileFacts {
   readonly workspaceAlias: string;
   readonly mandatoryChecks: readonly string[];
+  readonly allowedPaths: readonly string[];
+  readonly modelRoute: "local" | "synthetic-local" | "external";
   readonly ceilings: {
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
@@ -286,6 +288,22 @@ function isTrialProfileFacts(value: unknown): value is TrialProfileFacts {
       (check) =>
         typeof check === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(check),
     )
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(item.allowedPaths) ||
+    item.allowedPaths.length < 1 ||
+    !item.allowedPaths.every(
+      (path) => typeof path === "string" && path.length > 0,
+    )
+  ) {
+    return false;
+  }
+  if (
+    item.modelRoute !== "local" &&
+    item.modelRoute !== "synthetic-local" &&
+    item.modelRoute !== "external"
   ) {
     return false;
   }
@@ -683,6 +701,9 @@ $effect(() => {
       }}
     >
       <h3>新しい試行を提案</h3>
+      <p id="trial-allowed-paths">
+        許可パス（この範囲のみ変更できます）: {profile.allowedPaths.join(", ")}
+      </p>
       <p id="trial-profile-summary">
         作業領域: {profile.workspaceAlias}・必須チェック:
         {profile.mandatoryChecks.join(", ")}
@@ -764,14 +785,20 @@ $effect(() => {
           bind:value={maxOutputBytesValue}
         />
       </label>
-      <label>
-        外部データの取り込みに同意する
-        <input
-          id="trial-consent"
-          type="checkbox"
-          bind:checked={consent}
-        />
-      </label>
+      {#if profile.modelRoute === "external"}
+        <label>
+          外部データの取り込みに同意する
+          <input
+            id="trial-consent"
+            type="checkbox"
+            bind:checked={consent}
+          />
+        </label>
+      {:else}
+        <p id="trial-consent-unavailable">
+          ローカル経路のため外部データの同意は不要です
+        </p>
+      {/if}
       <p id="trial-required-checks">
         必須チェック（固定）: {profile.mandatoryChecks.join(", ")}
       </p>

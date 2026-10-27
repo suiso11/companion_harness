@@ -54,6 +54,8 @@ function envConfig(): NodeJS.ProcessEnv {
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
     workspaceAlias: "companion-harness",
+    allowedPaths: ["apps", "packages"],
+    modelRoute: "local",
     runner: {
       nodeRealpath: "/usr/bin/node",
       bridgeScriptPath: "/opt/bridge.mjs",

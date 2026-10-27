@@ -424,6 +424,7 @@ export {
   DEFAULT_POLL_INTERVAL_MS,
   RunEngine,
 } from "./engine.js";
+export type { TrialStageErrorCode } from "./errors.js";
 export {
   ActionNotCancellableError,
   AgoraPayloadHashMismatchError,
@@ -450,6 +451,7 @@ export {
   RepositoryNotFoundError,
   RepositoryValidationError,
   SessionBusyError,
+  TrialStageError,
 } from "./errors.js";
 export type {
   ExecutionRecorder,

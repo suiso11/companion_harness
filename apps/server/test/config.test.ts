@@ -874,6 +874,8 @@ describe("autodispatch caps defaults fit the trial runner", () => {
       timeoutMs: 60_000,
       maxOutputBytes: 1_000_000,
       workspaceAlias: "companion-harness",
+      allowedPaths: ["apps", "packages"],
+      modelRoute: "local",
       runner: {
         nodeRealpath: "/usr/bin/node",
         bridgeScriptPath: "/opt/bridge.mjs",

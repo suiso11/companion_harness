@@ -216,6 +216,19 @@ describe("Japanese notices", () => {
     expect(
       trialStageErrorText(400, { error: { code: "validation_error" } }),
     ).toBe("入力内容を確認してください");
+    expect(
+      trialStageErrorText(400, {
+        error: { code: "trial_path_outside_profile" },
+      }),
+    ).toContain("許可された範囲");
+    expect(
+      trialStageErrorText(400, {
+        error: { code: "trial_external_consent_unavailable" },
+      }),
+    ).toContain("外部データ");
+    expect(
+      trialStageErrorText(400, { error: { code: "purpose_not_confirmed" } }),
+    ).toContain("目的");
     expect(trialStageErrorText(0, null)).toBe("提案の作成に失敗しました");
   });
 });

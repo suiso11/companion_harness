@@ -126,6 +126,7 @@ import {
   ShadowLeaseConflictError,
   ShadowStateConflictError,
   ShadowVersionConflictError,
+  TrialStageError,
 } from "@companion/kernel";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -1118,6 +1119,17 @@ function mapDomainError(c: Context, error: unknown): Response {
         },
       },
       409,
+    );
+  }
+  if (error instanceof TrialStageError) {
+    return c.json(
+      {
+        error: {
+          code: error.code,
+          message: "trial request rejected against the frozen profile",
+        },
+      },
+      400,
     );
   }
   if (
@@ -5072,6 +5084,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         disclosedWholeRepoRead: trial.disclosedWholeRepoRead,
         timeoutMs: trial.timeoutMs,
         maxOutputBytes: trial.maxOutputBytes,
+        allowedPaths: [...trial.allowedPaths],
+        modelRoute: trial.modelRoute,
       } as TrialProfileSnapshot,
       limits: {
         operations: [...ad.operations],
@@ -5101,6 +5115,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         disclosedWholeRepoRead: trial.disclosedWholeRepoRead,
         timeoutMs: trial.timeoutMs,
         maxOutputBytes: trial.maxOutputBytes,
+        allowedPaths: [...trial.allowedPaths],
+        modelRoute: trial.modelRoute,
       },
       workspaceAlias: trial.workspaceAlias,
     };
@@ -5127,6 +5143,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       {
         workspaceAlias: frozen.workspaceAlias,
         mandatoryChecks: [...frozen.profile.mandatoryChecks],
+        allowedPaths: [...(frozen.profile.allowedPaths ?? [])],
+        modelRoute: frozen.profile.modelRoute ?? "local",
         ceilings: {
           timeoutMs: frozen.profile.timeoutMs,
           maxOutputBytes: frozen.profile.maxOutputBytes,

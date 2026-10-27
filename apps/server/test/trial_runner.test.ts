@@ -1715,6 +1715,87 @@ describe("trial_runner", () => {
     }
   });
 
+  it("stores a bounded redacted stderr head when the bridge exits 2 without a report", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const exited = { current: false };
+      const identity = {
+        pid: 4319,
+        bootId: "boot-exit2",
+        processStartTicks: "559",
+      };
+      const spawnImpl = ((cmd: string, args: string[], _opts: unknown) => {
+        void cmd;
+        void args;
+        const child = new EventEmitter() as FakeChild;
+        child.pid = identity.pid;
+        const stdout = new EventEmitter();
+        const stderr = new EventEmitter();
+        const stdin = {
+          write() {
+            setTimeout(() => {
+              stderr.emit(
+                "data",
+                Buffer.from(
+                  "invalid request sk-secret123 Bearer abc.def\nsecond line\n",
+                ),
+              );
+              stderr.emit("data", Buffer.alloc(4096, "z"));
+              child.emit("exit", 2, null);
+            }, 30);
+          },
+          end() {},
+        };
+        child.stdin = stdin;
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.stdio = [stdin, stdout, stderr, { destroy() {} }];
+        child.kill = () => undefined;
+        const origEmit = child.emit.bind(child);
+        child.emit = ((event: string, ...rest: unknown[]) => {
+          if (event === "exit") exited.current = true;
+          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+        }) as FakeChild["emit"];
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer = createObserver({
+        scopeBeforeExit: "active",
+        scopeAfterExit: "gone",
+        identity,
+        exited: () => exited.current,
+      });
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out.ran).toBe(true);
+      const report = repo.readTrialWorkerReport(sessionId, executionId);
+      expect(report).not.toBeNull();
+      expect(report?.summary).toContain("bridge exited");
+      const joined = (report?.unresolved ?? []).join("\n");
+      expect(joined).toContain("bridge: invalid request");
+      expect(joined).toContain("[redacted]");
+      expect(joined).not.toContain("sk-secret123");
+      expect(joined).not.toContain("Bearer abc.def");
+      expect(Buffer.byteLength(joined, "utf8")).toBeLessThanOrEqual(
+        2048 + 1024,
+      );
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("elapsed RuntimeMax pre-permit denies without relay permit (finding 4 permit path)", async () => {
     const { handle, repo, sessionId } = await makeKernel();
     try {

@@ -587,6 +587,8 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     timeoutMs: 300_000,
     maxOutputBytes: 262_144,
     workspaceAlias: WORKSPACE_ALIAS,
+    allowedPaths: ["apps", "packages"],
+    modelRoute: "local",
     runner: {
       nodeRealpath: runtime.nodeRealpath,
       bridgeScriptPath,

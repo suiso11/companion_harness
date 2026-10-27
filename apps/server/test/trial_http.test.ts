@@ -41,6 +41,8 @@ function trialConfigJson(): string {
     timeoutMs: 60000,
     maxOutputBytes: 1000000,
     workspaceAlias: "ws",
+    allowedPaths: ["apps", "packages"],
+    modelRoute: "local",
     runner: {
       nodeRealpath: "/usr/bin/node",
       bridgeScriptPath: "/opt/bridge.mjs",
@@ -152,6 +154,7 @@ function stageAuthority(
   repo: KernelRepository,
   sessionId: string,
   scope: string,
+  explicit = true,
 ): { taskId: string } {
   const now = Date.now();
   const goal = repo.createAutonomyPurpose(
@@ -160,7 +163,7 @@ function stageAuthority(
       scope,
       statement: "ship it",
       kind: "goal",
-      explicit: true,
+      explicit,
       sourceKind: "user",
     },
     { key: randomUUID(), now },
@@ -189,11 +192,11 @@ function stageBody(taskId: string, extra: Record<string, unknown> = {}) {
     taskId,
     objective: "implement the thing",
     acceptance: ["it works"],
-    literalPatchPaths: ["src/a.ts"],
+    literalPatchPaths: ["apps/a.ts"],
     operation: "implement",
     readOnlyMode: false,
     expiry: new Date(Date.now() + 3600_000).toISOString(),
-    possibleExternalDataConsent: true,
+    possibleExternalDataConsent: false,
     objectiveResourceCaps: { timeoutMs: 5000, maxOutputBytes: 10000 },
     requiredChecks: ["lint"],
     ...extra,
@@ -294,6 +297,8 @@ describe("trial HTTP profile facts", () => {
       expect(profile.body).toEqual({
         workspaceAlias: "ws",
         mandatoryChecks: ["lint"],
+        allowedPaths: ["apps", "packages"],
+        modelRoute: "local",
         ceilings: { timeoutMs: 60000, maxOutputBytes: 1000000 },
         operations: [
           { operation: "investigate", readOnlyMode: true },
@@ -309,6 +314,91 @@ describe("trial HTTP profile facts", () => {
         `/api/sessions/${sessionId}/trial-profile?extra=1`,
       );
       expect(rejected.status).toBe(400);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects paths outside the frozen profile with a dedicated code", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "pf1");
+      const base = `/api/sessions/${sessionId}/trials`;
+      for (const path of ["docs/operations.md", "appsx/a.ts"]) {
+        const staged = await post(
+          app,
+          base,
+          stageBody(taskId, { literalPatchPaths: [path] }),
+          randomUUID(),
+        );
+        expect(staged.status).toBe(400);
+        expect((staged.body as { error: { code: string } }).error.code).toBe(
+          "trial_path_outside_profile",
+        );
+      }
+      const traversal = await post(
+        app,
+        base,
+        stageBody(taskId, { literalPatchPaths: ["apps/../x"] }),
+        randomUUID(),
+      );
+      expect(traversal.status).toBe(400);
+      for (const path of ["apps", "apps/a.ts", "packages/x/y.ts"]) {
+        const staged = await post(
+          app,
+          base,
+          stageBody(taskId, { literalPatchPaths: [path] }),
+          randomUUID(),
+        );
+        expect(staged.status).toBe(201);
+      }
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects external consent on the frozen local route", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "pf2");
+      const staged = await post(
+        app,
+        `/api/sessions/${sessionId}/trials`,
+        stageBody(taskId, { possibleExternalDataConsent: true }),
+        randomUUID(),
+      );
+      expect(staged.status).toBe(400);
+      expect((staged.body as { error: { code: string } }).error.code).toBe(
+        "trial_external_consent_unavailable",
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects an unconfirmed goal with purpose_not_confirmed", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "pf3", false);
+      const staged = await post(
+        app,
+        `/api/sessions/${sessionId}/trials`,
+        stageBody(taskId),
+        randomUUID(),
+      );
+      expect(staged.status).toBe(400);
+      expect((staged.body as { error: { code: string } }).error.code).toBe(
+        "purpose_not_confirmed",
+      );
     } finally {
       fixture.close();
     }
@@ -397,7 +487,7 @@ describe("trial HTTP proposal lifecycle", () => {
       expect(proposal.status).toBe("staged");
       expect(proposal.objective).toBe("implement the thing");
       expect(proposal.acceptance).toEqual(["it works"]);
-      expect(proposal.literalPatchPaths).toEqual(["src/a.ts"]);
+      expect(proposal.literalPatchPaths).toEqual(["apps/a.ts"]);
       expect(proposal.operation).toBe("implement");
       expect(proposal.readOnlyMode).toBe(false);
       expect(proposal.timeoutMs).toBe(5000);

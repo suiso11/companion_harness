@@ -276,6 +276,8 @@ try {
     timeoutMs: limits.timeoutMs,
     maxOutputBytes: limits.maxOutputBytes,
     workspaceAlias: input.workspaceAlias,
+    allowedPaths: ["apps", "packages"],
+    modelRoute: "local",
     runner: {
       nodeRealpath: NODE,
       bridgeScriptPath: join(
@@ -448,6 +450,8 @@ try {
     configFingerprint: fp,
     sourceRevision: rev,
     mandatoryChecks: Object.keys(eff.checks as object).sort(),
+    allowedPaths: [...config.profile.allowedPaths],
+    modelRoute: config.profile.model.route,
     timeoutMs: Math.min(
       limits.timeoutMs,
       res.materialization.profile.timeoutMs,

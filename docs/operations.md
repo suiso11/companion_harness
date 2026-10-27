@@ -4390,8 +4390,8 @@ proposals, grants, runner, or bridge spawn.
 - `COMPANION_AUTONOMY_JSON` must be one strict JSON object with exactly
   the profile block `{ available, enabled, mandatoryChecks,
   configFingerprint, sourceRevision, currentModel,
-  disclosedWholeRepoRead, timeoutMs, maxOutputBytes, workspaceAlias }`
-  plus a `runner` block `{ nodeRealpath, bridgeScriptPath,
+  disclosedWholeRepoRead, timeoutMs, maxOutputBytes, workspaceAlias,
+  allowedPaths, modelRoute }` plus a `runner` block `{ nodeRealpath, bridgeScriptPath,
   bridgeConfigTemplatePath, systemctlRealpath, xdgRuntimeDir, relay,
   observe, pollMs }`, where `relay` carries `{ maxRequestBytes,
   maxModelCalls, maxOutputTokens, maxResponseBytes, perCallTimeoutMs,
@@ -4409,10 +4409,25 @@ proposals, grants, runner, or bridge spawn.
   injected list: `read,grep,glob` for read-only jobs and
   `read,grep,glob,write` for write jobs. Coordinator delegation tools
   (`task`, `wait`, `opencode_*`) are never exposed to the sealed guest.
+- The bridge is launched with the approved write scopes and route; if it
+  exits nonzero before writing a journal report (e.g. wire validation),
+  the runner keeps a bounded (≤2048-byte) UTF-8-safe redacted stderr head
+  and stores its lines as `report.unresolved` entries prefixed `bridge: `
+  with a fixed summary, so the reason is visible instead of only
+  `bridge-exit:N`.
 - A nonzero executor remains exit 10, but the journal report now carries
   bounded (2048-byte) redacted diagnostics: guest observation fields
   (`engine`, `executorKind`, `ompExitCode`, `timedOut`, tool counts,
   `error`) when `guest.json` exists, plus stdout/stderr heads.
+- Stage-time validation mirrors the bridge's wire checks against the
+  frozen profile, so a request that the bridge would reject never
+  becomes a staged proposal. Literal patch paths must fall inside one of
+  the frozen `allowedPaths` (segment boundary: `apps` admits `apps/x`
+  but never `appsx`), and external-data consent is refused when
+  `modelRoute` is not `external`. Failures use dedicated codes
+  `trial_path_outside_profile`, `trial_external_consent_unavailable`,
+  and `purpose_not_confirmed` (non-explicit/non-user goal), rendered as
+  fixed Japanese notices by `/trials`.
 - `bridgeConfigTemplatePath` is the FROZEN approved V2 OperatorConfig
   JSON, not a legacy template. For each manual execution it is parsed
   (`parseOperatorConfig`) and recomputed (`computeEffectiveProfile`);
@@ -4435,8 +4450,9 @@ The native `/trials` page can create one DATA-only proposal without
 leaving the UI. It first reads `GET
 /api/sessions/:id/trial-profile` (pure read; fixed `trials_disabled` 404
 when unset) for the frozen form facts: `workspaceAlias`,
-`mandatoryChecks`, the `timeoutMs`/`maxOutputBytes` ceilings, and every
-allowed operation with its derived `readOnlyMode`. Nothing on that
+`mandatoryChecks`, `allowedPaths`, `modelRoute`, the
+`timeoutMs`/`maxOutputBytes` ceilings, and every allowed operation with
+its derived `readOnlyMode`. Nothing on that
 response is editable in the browser. The form then offers:
 
 - target task (only session tasks in `open`/`in_progress`; there is no

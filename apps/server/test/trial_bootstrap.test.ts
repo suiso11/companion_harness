@@ -68,6 +68,8 @@ function trialEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       timeoutMs: 60000,
       maxOutputBytes: 1000000,
       workspaceAlias: "ws",
+      allowedPaths: ["apps", "packages"],
+      modelRoute: "local",
       runner: {
         nodeRealpath: "/usr/bin/node",
         bridgeScriptPath: "/opt/bridge.mjs",

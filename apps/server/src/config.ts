@@ -1521,6 +1521,10 @@ export interface TrialConfig {
   readonly maxOutputBytes: number;
   /** Frozen workspace alias under which proposals stage/approve. */
   readonly workspaceAlias: string;
+  /** Frozen profile write scopes (canonical repo-relative path prefixes). */
+  readonly allowedPaths: readonly string[];
+  /** Frozen profile model route; non-external rejects external consent. */
+  readonly modelRoute: "local" | "synthetic-local" | "external";
   /** Required root-side runner host config (no defaults, absolute paths). */
   readonly runner: TrialRunnerHostConfig;
 }
@@ -2302,6 +2306,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
       key !== "timeoutMs" &&
       key !== "maxOutputBytes" &&
       key !== "workspaceAlias" &&
+      key !== "allowedPaths" &&
+      key !== "modelRoute" &&
       key !== "runner"
     ) {
       throw configError("trial config has an unknown key");
@@ -2318,6 +2324,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     timeoutMs?: unknown;
     maxOutputBytes?: unknown;
     workspaceAlias?: unknown;
+    allowedPaths?: unknown;
+    modelRoute?: unknown;
     runner?: unknown;
   };
   if (typeof record.available !== "boolean") {
@@ -2395,6 +2403,46 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
   ) {
     throw configError("trial config workspace alias is invalid");
   }
+  if (
+    !Array.isArray(record.allowedPaths) ||
+    record.allowedPaths.length < 1 ||
+    record.allowedPaths.length > 64
+  ) {
+    throw configError("trial config allowed paths are invalid");
+  }
+  const allowedPaths: string[] = [];
+  const seenPath = new Set<string>();
+  for (const entry of record.allowedPaths) {
+    if (
+      typeof entry !== "string" ||
+      entry.length < 1 ||
+      entry.length > 512 ||
+      entry.includes("\0") ||
+      entry.includes("\\") ||
+      entry.startsWith("/") ||
+      (entry.length > 1 && entry.endsWith("/"))
+    ) {
+      throw configError("trial config allowed paths are invalid");
+    }
+    const segments = entry.split("/");
+    for (const segment of segments) {
+      if (segment.length === 0 || segment === "." || segment === "..") {
+        throw configError("trial config allowed paths are invalid");
+      }
+    }
+    if (seenPath.has(entry)) {
+      throw configError("trial config allowed paths are invalid");
+    }
+    seenPath.add(entry);
+    allowedPaths.push(entry);
+  }
+  if (
+    record.modelRoute !== "local" &&
+    record.modelRoute !== "synthetic-local" &&
+    record.modelRoute !== "external"
+  ) {
+    throw configError("trial config model route is invalid");
+  }
   if (record.runner === undefined) {
     throw configError("trial config runner is required");
   }
@@ -2410,6 +2458,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     timeoutMs: record.timeoutMs,
     maxOutputBytes: record.maxOutputBytes,
     workspaceAlias: record.workspaceAlias,
+    allowedPaths: Object.freeze(allowedPaths),
+    modelRoute: record.modelRoute,
     runner,
   });
 }
