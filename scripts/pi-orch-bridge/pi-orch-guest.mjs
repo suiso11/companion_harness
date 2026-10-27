@@ -228,12 +228,25 @@ function formatConstraints(constraints) {
   ].join("\n");
 }
 
+// Appended to the guest's system prompt so the sealed executor is never
+// mistaken for the pi-orch coordinator. The host coordinator contract forbids
+// the parent from editing/reading directly and tells it to delegate to
+// opencode_* workers. The sealed guest is the opposite: a direct worker with
+// no delegation tools, so it must do the work itself.
+const DIRECT_WORKER_CONTRACT = [
+  "[Direct worker contract]",
+  "You are a direct worker inside a sealed workspace, not a coordinator and not a parent agent.",
+  "There are no delegation tools (no task, wait, opencode_task, opencode_spawn, opencode_wait, or opencode_tools).",
+  "Do the work yourself with the tools provided in this session: read the relevant files, then write the candidate file when the mode allows it.",
+  "Never claim that work must be delegated to another worker; if a tool is unavailable, use the tools you do have.",
+].join("\n");
+
 function buildPrompt(job) {
   const paths = job.relevantPaths.join(", ");
   if (job.mode === "read_only") {
     return [
-      "You are inspecting a sealed read-only workspace at /work.",
-      "Use only the read, grep, and glob tools. Do not write, edit, or run commands.",
+      "You are a direct worker inspecting a sealed read-only workspace at /work.",
+      "Use only the read, grep, and glob tools. Do not write, edit, or run commands, and do not delegate to other workers.",
       `Relevant paths: ${paths}.`,
       `Purpose: ${job.statement}`,
       `Objective: ${job.objective}`,
@@ -245,8 +258,8 @@ function buildPrompt(job) {
     ].join("\n");
   }
   return [
-    "You are making one minimal candidate change in a sealed workspace at /work.",
-    "Use the read, grep, glob, and write tools. Do not run commands and do not touch other paths.",
+    "You are a direct worker making one minimal candidate change in a sealed workspace at /work.",
+    "Use the read, grep, glob, and write tools yourself. Do not run commands, do not touch other paths, and do not delegate to other workers.",
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
@@ -662,10 +675,16 @@ async function main() {
     workerPathPrefix = `${realPiBin}:`;
   }
 
-  // Only the sealed read-only/write tool profile may be exposed. The pinned
-  // launcher injects coordinator delegation tools (task/wait/opencode_*) before
-  // "$@"; a later --tools wins in the pinned Pi CLI parser, so the explicit
-  // value below must stay after the launcher's injection.
+  // Only the sealed read-only/write tool profile may be exposed, and the
+  // guest must never inherit the pi-orch coordinator contract. The pinned
+  // launcher (scripts/pi_codex_orchestrator.sh) forces
+  // `--extension opencode-orchestrator/omp.ts`, whose before_agent_start hook
+  // appends "[Coordinator-only parent contract]" and whose tool_call hook
+  // blocks every non-coordinator tool (including write). That contract is for
+  // the host parent, not for this sealed direct worker, and the launcher
+  // exposes no flag/env to drop it. Invoke the pinned OMP binary directly with
+  // explicit flags instead: no launcher, no --extension, no --config overlay,
+  // and extension discovery disabled.
   const tools =
     job.mode === "read_only" ? "read,grep,glob" : "read,grep,glob,write";
   const requestedTimeout = process.env.COMPANION_GUEST_TIMEOUT_SECONDS;
@@ -679,46 +698,30 @@ async function main() {
       Math.min(900, Math.floor(seconds) - GUEST_TIMEOUT_MARGIN_SECONDS),
     );
   }
-  const args = realPi
-    ? [
-        "-p",
-        "--mode",
-        "json",
-        "--no-session",
-        "--no-skills",
-        "--no-rules",
-        "--no-lsp",
-        "--approval-mode",
-        "yolo",
-        "--auto-approve",
-        "--tools",
-        tools,
-        "--max-time",
-        String(maxTimeSeconds),
-        buildPrompt(job),
-      ]
-    : [
-        "-p",
-        "--mode",
-        "json",
-        "--no-session",
-        "--no-extensions",
-        "--no-skills",
-        "--no-rules",
-        "--no-lsp",
-        "--model",
-        MODEL_ALIAS,
-        "--thinking",
-        "off",
-        "--approval-mode",
-        "yolo",
-        "--auto-approve",
-        "--tools",
-        tools,
-        "--max-time",
-        String(maxTimeSeconds),
-        buildPrompt(job),
-      ];
+  const args = [
+    "-p",
+    "--mode",
+    "json",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--no-rules",
+    "--no-lsp",
+    "--model",
+    MODEL_ALIAS,
+    "--thinking",
+    "off",
+    "--append-system-prompt",
+    DIRECT_WORKER_CONTRACT,
+    "--approval-mode",
+    "yolo",
+    "--auto-approve",
+    "--tools",
+    tools,
+    "--max-time",
+    String(maxTimeSeconds),
+    buildPrompt(job),
+  ];
   const env = {
     PATH: `${workerPathPrefix}${dirname(NODE_BIN)}:${dirname(OMP_BIN)}:/usr/local/bin:/usr/bin:/bin`,
     HOME: home,
@@ -731,22 +734,12 @@ async function main() {
     HTTPS_PROXY: "",
     ALL_PROXY: "",
     NO_PROXY: "127.0.0.1,localhost",
-    ...(realPi
-      ? {
-          PI_ORCH_RUNTIME: "omp",
-          PI_CODEX_MODEL: MODEL_ALIAS,
-          // The installed extension's opencode_task resolves its worker
-          // backend from this env value. pi:: keeps the child a real OMP/Pi
-          // process inside the same guest instead of reaching OpenCode's
-          // provider registry (which has no synthetic endpoint).
-          PI_OPENCODE_MODEL: `pi::${MODEL_ALIAS}`,
-          PI_CODEX_THINKING: "off",
-          PI_OPENCODE_TIMEOUT_MS: String(maxTimeSeconds * 1000),
-        }
-      : {}),
   };
-  const command = realPi ? NODE_BIN : OMP_BIN;
-  const commandArgs = realPi ? [PI_ORCH_LAUNCHER, ...args] : args;
+  // Always the pinned OMP binary itself. The pinned launcher is still required
+  // and digest-checked by the profile (and provides the worker CLI closure),
+  // but it is never executed for the sealed guest.
+  const command = OMP_BIN;
+  const commandArgs = args;
   const engine = realPi ? "pi-orch-omp-json" : "omp-headless-json";
   const child = spawn(command, commandArgs, {
     cwd: WORK_ROOT,
