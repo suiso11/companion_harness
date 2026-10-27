@@ -23,6 +23,7 @@ import {
   AGENT_TOOL_CALLER,
   AGENT_TOOL_CONCURRENCY,
   AGENT_TOOL_ORIGIN,
+  type AgentCitationsDropped,
   type AgentModelStepRetry,
   answerSubmitToolDefinition,
   BUNDLED_SCHEMA_VERSION,
@@ -194,7 +195,12 @@ function makeStrategy(
   repo: KernelRepository,
   broker: ToolBroker,
   gateway: ModelGateway,
-  extra?: { stepTimeoutMs?: number; wallMs?: number; maxSteps?: number },
+  extra?: {
+    stepTimeoutMs?: number;
+    wallMs?: number;
+    maxSteps?: number;
+    onCitationsDropped?: (dropped: AgentCitationsDropped) => void;
+  },
 ): ReturnType<typeof createAgentStrategy> {
   return createAgentStrategy({
     db: handle.raw,
@@ -207,6 +213,9 @@ function makeStrategy(
       : { stepTimeoutMs: extra.stepTimeoutMs }),
     ...(extra?.wallMs === undefined ? {} : { wallMs: extra.wallMs }),
     ...(extra?.maxSteps === undefined ? {} : { maxSteps: extra.maxSteps }),
+    ...(extra?.onCitationsDropped === undefined
+      ? {}
+      : { onCitationsDropped: extra.onCitationsDropped }),
   });
 }
 
@@ -819,7 +828,7 @@ describe("ordinary tools: broker concurrency and request order", () => {
 });
 
 describe("evidence grants and structural citations", () => {
-  it("grants snippet exposure from delivered reference payloads and gates citations", async () => {
+  it("grants snippet exposure from delivered reference payloads and drops unresolved citations", async () => {
     const { handle, repo } = await setup();
     try {
       const sessionId = repo.createSession({
@@ -849,24 +858,22 @@ describe("evidence grants and structural citations", () => {
           }),
         }),
       ]);
-      const { gateway } = scriptGateway([
+      const drops: AgentCitationsDropped[] = [];
+      const { gateway, calls } = scriptGateway([
         chatResult([toolCall("test.search", {}, "c1")]),
         chatResult([
           toolCall(
             "answer.submit",
-            { version: 1, parts: [{ text: "cited", citations: ["r9"] }] },
-            "a-bad",
-          ),
-        ]),
-        chatResult([
-          toolCall(
-            "answer.submit",
-            { version: 1, parts: [{ text: "cited", citations: ["r1"] }] },
-            "a-good",
+            { version: 1, parts: [{ text: "cited", citations: ["r9", "r1"] }] },
+            "a-drop",
           ),
         ]),
       ]);
-      const strategy = makeStrategy(handle, repo, broker, gateway);
+      const strategy = makeStrategy(handle, repo, broker, gateway, {
+        onCitationsDropped: (dropped): void => {
+          drops.push(dropped);
+        },
+      });
       const run = repo.getRun(runId);
       const turn = repo.getTurn(run.turnId);
       const ctx = freezeStrategyContext(
@@ -891,6 +898,10 @@ describe("evidence grants and structural citations", () => {
         text: "cited",
         answer: { version: 1, parts: [{ text: "cited", citations: ["r1"] }] },
       });
+      expect(calls).toHaveLength(2);
+      expect(drops).toEqual([
+        { runId, step: 2, dropped: 1, reasons: ["unresolved"] },
+      ]);
       const grants = repo.listEvidenceGrants(runId);
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({
@@ -932,6 +943,223 @@ describe("evidence grants and structural citations", () => {
           now: T0 + 5,
         }),
       ).toMatchObject({ exposure: "full" });
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("answer.submit tolerant citation handling", () => {
+  function grantedRun(
+    handle: ReturnType<typeof openKernelDatabase>,
+    repo: KernelRepository,
+  ): { sessionId: string; runId: string; refId: string } {
+    const sessionId = repo.createSession({
+      key: crypto.randomUUID(),
+      now: T0,
+    }).body.sessionId;
+    const refId = insertReference(handle.raw, sessionId, 1, T0);
+    const posted = repo.postMessage(
+      sessionId,
+      { text: "q" },
+      { key: crypto.randomUUID(), now: T0 + 1 },
+    );
+    const runId = posted.body.run.id;
+    repo.startRun(runId, { now: T0 + 2 });
+    repo.upsertEvidenceGrant(sessionId, runId, refId, "snippet", {
+      now: T0 + 3,
+    });
+    return { sessionId, runId, refId };
+  }
+
+  function runWithDrops(
+    handle: ReturnType<typeof openKernelDatabase>,
+    repo: KernelRepository,
+    broker: ToolBroker,
+    gateway: ModelGateway,
+    drops: AgentCitationsDropped[],
+  ): ReturnType<typeof createAgentStrategy> {
+    return makeStrategy(handle, repo, broker, gateway, {
+      onCitationsDropped: (dropped): void => {
+        drops.push(dropped);
+      },
+    });
+  }
+
+  async function execute(
+    citations: readonly unknown[],
+    text = "answer",
+    partOverrides: Record<string, unknown> = {},
+  ): Promise<{
+    result: unknown;
+    drops: AgentCitationsDropped[];
+    rows: ModelCallRow[];
+    calls: ChatRequest[];
+    runId: string;
+  }> {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { sessionId, runId } = grantedRun(handle, repo);
+      const drops: AgentCitationsDropped[] = [];
+      const { gateway, calls } = scriptGateway([
+        chatResult([
+          toolCall(
+            "answer.submit",
+            {
+              version: 1,
+              parts: [{ text, citations, ...partOverrides }],
+            },
+            "a1",
+          ),
+        ]),
+      ]);
+      const strategy = runWithDrops(handle, repo, broker, gateway, drops);
+      const result = await strategy(strategyCtx(repo, sessionId, runId));
+      return { result, drops, rows: repo.listModelCalls(runId), calls, runId };
+    } finally {
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  }
+
+  it("drops one too-long citation and completes with the valid one", async () => {
+    const { result, drops, rows, calls } = await execute([
+      "r1",
+      "r123456789012",
+    ]);
+    expect(result).toEqual({
+      version: 2,
+      text: "answer",
+      answer: { version: 1, parts: [{ text: "answer", citations: ["r1"] }] },
+    });
+    expect(calls).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "completed", errorCode: null });
+    expect(drops).toEqual([
+      {
+        runId: expect.any(String),
+        step: 1,
+        dropped: 1,
+        reasons: ["too_long"],
+      },
+    ]);
+  });
+
+  it("drops one invalid-format citation and completes with the valid one", async () => {
+    const { result, drops, rows } = await execute(["r1", "p1"]);
+    expect(result).toEqual({
+      version: 2,
+      text: "answer",
+      answer: { version: 1, parts: [{ text: "answer", citations: ["r1"] }] },
+    });
+    expect(rows[0]).toMatchObject({ outcome: "completed", errorCode: null });
+    expect(drops).toEqual([
+      {
+        runId: expect.any(String),
+        step: 1,
+        dropped: 1,
+        reasons: ["invalid_format"],
+      },
+    ]);
+  });
+
+  it("drops an unresolved reference and accepts the answer with none", async () => {
+    const { result, drops, rows, calls } = await execute(["r999"]);
+    expect(result).toEqual({
+      version: 2,
+      text: "answer",
+      answer: { version: 1, parts: [{ text: "answer", citations: [] }] },
+    });
+    expect(calls).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "completed", errorCode: null });
+    expect(drops).toEqual([
+      {
+        runId: expect.any(String),
+        step: 1,
+        dropped: 1,
+        reasons: ["unresolved"],
+      },
+    ]);
+  });
+
+  it("accepts with no citations when every citation is invalid", async () => {
+    const { result, drops, rows } = await execute(["SECRET", "r123456789012"]);
+    expect(result).toEqual({
+      version: 2,
+      text: "answer",
+      answer: { version: 1, parts: [{ text: "answer", citations: [] }] },
+    });
+    expect(rows[0]).toMatchObject({ outcome: "completed", errorCode: null });
+    expect(drops).toEqual([
+      {
+        runId: expect.any(String),
+        step: 1,
+        dropped: 2,
+        reasons: ["too_long", "invalid_format"],
+      },
+    ]);
+    // Diagnostics carry counts/fixed codes only, never citation contents.
+    expect(JSON.stringify(drops)).not.toContain("SECRET");
+    expect(JSON.stringify(drops)).not.toContain("r123456789012");
+  });
+
+  it("keeps the first eight valid citations when a part exceeds the cap", async () => {
+    const nine = Array.from({ length: 9 }, () => "r1");
+    const { result, drops, rows } = await execute(nine);
+    expect(result).toEqual({
+      version: 2,
+      text: "answer",
+      answer: {
+        version: 1,
+        parts: [{ text: "answer", citations: nine.slice(0, 8) }],
+      },
+    });
+    expect(rows[0]).toMatchObject({ outcome: "completed", errorCode: null });
+    expect(drops).toEqual([
+      {
+        runId: expect.any(String),
+        step: 1,
+        dropped: 1,
+        reasons: ["over_limit"],
+      },
+    ]);
+  });
+
+  it("still repairs a non-citation validation failure", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo);
+      const { sessionId, runId } = grantedRun(handle, repo);
+      const drops: AgentCitationsDropped[] = [];
+      const { gateway, calls } = scriptGateway([
+        chatResult([
+          toolCall(
+            "answer.submit",
+            { version: 1, parts: [{ text: "", citations: ["p1"] }] },
+            "a-bad",
+          ),
+        ]),
+        chatResult([answerCall([{ text: "recovered", citations: [] }])]),
+      ]);
+      const strategy = runWithDrops(handle, repo, broker, gateway, drops);
+      await expect(
+        strategy(strategyCtx(repo, sessionId, runId)),
+      ).resolves.toEqual({
+        version: 2,
+        text: "recovered",
+        answer: {
+          version: 1,
+          parts: [{ text: "recovered", citations: [] }],
+        },
+      });
+      expect(calls).toHaveLength(2);
+      expect(repo.listModelCalls(runId)[0]).toMatchObject({
+        step: 1,
+        outcome: "failed",
+        errorCode: "answer_invalid",
+      });
+      expect(drops).toEqual([]);
     } finally {
       const { closeKernelDatabase } = await import("../src/index.js");
       closeKernelDatabase(handle);

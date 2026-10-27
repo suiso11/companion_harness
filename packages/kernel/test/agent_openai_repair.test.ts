@@ -362,7 +362,7 @@ describe("strict OpenAI-compatible repair replay", () => {
     }
   });
 
-  it("citation-invalid single answer.submit gets one fixed tool before repair", async () => {
+  it("citation-invalid single answer.submit is tolerated without a repair wire", async () => {
     const { handle, repo } = await setup();
     try {
       const broker: ToolBroker = createToolBroker({
@@ -375,10 +375,7 @@ describe("strict OpenAI-compatible repair replay", () => {
         { version: 1, parts: [{ text: "cited", citations: ["r9"] }] },
         "a-cite-bad",
       );
-      const { gateway, calls } = scriptGateway([
-        chatResult([badCitation]),
-        chatResult([answerCall([{ text: "clean", citations: [] }])]),
-      ]);
+      const { gateway, calls } = scriptGateway([chatResult([badCitation])]);
       const strategy = createAgentStrategy({
         db: handle.raw,
         repo,
@@ -389,10 +386,12 @@ describe("strict OpenAI-compatible repair replay", () => {
       const { runId } = newRunningTurn(repo, T0);
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
-        text: "clean",
-        answer: { version: 1, parts: [{ text: "clean", citations: [] }] },
+        text: "cited",
+        answer: { version: 1, parts: [{ text: "cited", citations: [] }] },
       });
-      expectStrictRepairWire(calls, ["a-cite-bad"], "not granted");
+      // No repair request: the unresolved entry is dropped and the answer
+      // completes on the same step.
+      expect(calls).toHaveLength(1);
     } finally {
       closeKernelDatabase(handle);
     }

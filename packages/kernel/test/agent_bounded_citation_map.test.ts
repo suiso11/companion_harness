@@ -3,9 +3,9 @@
 // validated StructuredAnswer (at most 20 parts x 8 citations before dedup)
 // via a session-scoped parameterized ordinal IN query in safe chunks. No
 // full-session session_references scan; empty citations perform no
-// reference scan. Unknown/cross-session ordinals stay citation_invalid;
-// membership alone never grants (current-run EvidenceGrant still required);
-// verification stays structural only.
+// reference scan. Unknown/cross-session ordinals are dropped from the answer
+// (tolerant citation handling), not repaired; membership alone never grants
+// (current-run EvidenceGrant still required); verification stays structural.
 import { randomUUID } from "node:crypto";
 import type {
   ChatRequest,
@@ -290,7 +290,7 @@ describe("bounded citation map (r3946377098)", () => {
     }
   });
 
-  it("unknown ordinal stays citation_invalid and repairs once", async () => {
+  it("unknown ordinal is dropped and the answer is accepted with none", async () => {
     const setup = await setupCite();
     try {
       const { handle, repo, broker } = setup;
@@ -305,7 +305,6 @@ describe("bounded citation map (r3946377098)", () => {
             "a-bad",
           ),
         ]),
-        chatResult([answerCall([{ text: "recovered", citations: [] }])]),
       ]);
       const strategy = createAgentStrategy({
         db: handle.raw,
@@ -316,16 +315,16 @@ describe("bounded citation map (r3946377098)", () => {
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
-        text: "recovered",
-        answer: { version: 1, parts: [{ text: "recovered", citations: [] }] },
+        text: "bad",
+        answer: { version: 1, parts: [{ text: "bad", citations: [] }] },
       });
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(1);
       const rows = repo.listModelCalls(runId);
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
         step: 1,
-        outcome: "failed",
-        errorCode: "citation_invalid",
+        outcome: "completed",
+        errorCode: null,
       });
       // Unit level: unknown ordinal maps to nothing (fail-closed, no grant).
       const map = loadBoundedOrdinalMap(handle.raw, sessionId, [999]);
@@ -335,7 +334,7 @@ describe("bounded citation map (r3946377098)", () => {
     }
   });
 
-  it("cross-session ordinal is invisible and stays citation_invalid", async () => {
+  it("cross-session ordinal is invisible and dropped from the answer", async () => {
     const setup = await setupCite();
     try {
       const { handle, repo, broker, connectorInstanceId } = setup;
@@ -368,7 +367,6 @@ describe("bounded citation map (r3946377098)", () => {
             "a-cross",
           ),
         ]),
-        chatResult([answerCall([{ text: "recovered", citations: [] }])]),
       ]);
       const strategy = createAgentStrategy({
         db: handle.raw,
@@ -379,19 +377,19 @@ describe("bounded citation map (r3946377098)", () => {
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
-        text: "recovered",
-        answer: { version: 1, parts: [{ text: "recovered", citations: [] }] },
+        text: "bad",
+        answer: { version: 1, parts: [{ text: "bad", citations: [] }] },
       });
       expect(repo.listModelCalls(runId)[0]).toMatchObject({
-        outcome: "failed",
-        errorCode: "citation_invalid",
+        outcome: "completed",
+        errorCode: null,
       });
     } finally {
       closeKernelDatabase(setup.handle);
     }
   });
 
-  it("duplicate citations dedup to one ordinal and mapped-but-ungranted stays invalid", async () => {
+  it("duplicate citations dedup to one ordinal and mapped-but-ungranted is dropped", async () => {
     const setup = await setupCite();
     try {
       const { handle, repo, broker, connectorInstanceId } = setup;
@@ -422,7 +420,7 @@ describe("bounded citation map (r3946377098)", () => {
       expect(dupMap.get(1)).toBe(ref1);
       expect(ordinalSql).toHaveLength(1);
       expect((ordinalSql[0]?.match(/\?/g) ?? []).length).toBe(2);
-      // Mapped but ungranted r2: open only r1, then cite r2 -> repair.
+      // Mapped but ungranted r2 is dropped; the granted r1 survives.
       const runId = freezeTurn(
         sessionId,
         [ref1],
@@ -430,17 +428,17 @@ describe("bounded citation map (r3946377098)", () => {
         repo,
         T0 + 10,
       );
-      const { gateway } = scriptGateway([
+      const { gateway, calls } = scriptGateway([
         chatResult([toolCall("reference.open", { referenceId: "r1" }, "c0")]),
         chatResult([
           toolCall(
             "answer.submit",
-            { version: 1, parts: [{ text: "bad", citations: ["r2"] }] },
+            {
+              version: 1,
+              parts: [{ text: "bad", citations: ["r2", "r1"] }],
+            },
             "a-ungranted",
           ),
-        ]),
-        chatResult([
-          answerCall([{ text: "cited", citations: ["r1", "r1"] }], "a-dup"),
         ]),
       ]);
       const strategy = createAgentStrategy({
@@ -452,17 +450,15 @@ describe("bounded citation map (r3946377098)", () => {
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
-        text: "cited",
-        answer: {
-          version: 1,
-          parts: [{ text: "cited", citations: ["r1", "r1"] }],
-        },
+        text: "bad",
+        answer: { version: 1, parts: [{ text: "bad", citations: ["r1"] }] },
       });
+      expect(calls).toHaveLength(2);
       const rows = repo.listModelCalls(runId);
       expect(rows[1]).toMatchObject({
         step: 2,
-        outcome: "failed",
-        errorCode: "citation_invalid",
+        outcome: "completed",
+        errorCode: null,
       });
     } finally {
       closeKernelDatabase(setup.handle);

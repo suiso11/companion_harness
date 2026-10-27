@@ -544,12 +544,11 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
         chatResult([
           toolCall("reference.related", { referenceId: "r1" }, "c0"),
         ]),
-        // Cite r2 immediately: title-only listing granted nothing, so this
-        // step must repair with citation_invalid (one repair consumed).
+        // Cite r2 immediately: title-only listing granted nothing, so the
+        // unresolved entry is dropped and the answer completes with none.
         chatResult([
           answerCall([{ text: "early cite", citations: ["r2"] }], "a0"),
         ]),
-        chatResult([answerCall([{ text: "recovered", citations: [] }], "a1")]),
       ]);
       const strategy = createAgentStrategy({
         db: handle.raw,
@@ -560,13 +559,12 @@ describe("dynamic rN chains (search/refresh/related -> open)", () => {
       });
       await expect(strategy(ctxFor(repo, runId))).resolves.toEqual({
         version: 2,
-        text: "recovered",
-        answer: { version: 1, parts: [{ text: "recovered", citations: [] }] },
+        text: "early cite",
+        answer: { version: 1, parts: [{ text: "early cite", citations: [] }] },
       });
-      // Repair path proves the citation was rejected: 3 gateway calls.
-      expect(calls).toHaveLength(3);
-      // Ordinary feedback (related) plus the fixed repair synthesis for the
-      // invalid answer call (answer_invalid, no tool name).
+      // The tolerant path accepts step 2 (no repair call): 2 gateway calls.
+      expect(calls).toHaveLength(2);
+      // Ordinary feedback (related) only; no repair synthesis was needed.
       const feedbacks = toolFeedbacks(calls);
       const ordinary = feedbacks.filter((f) => f.body.tool !== undefined);
       expect(ordinary).toHaveLength(1);
