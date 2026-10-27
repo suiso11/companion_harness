@@ -1,10 +1,12 @@
-// Real installed pi-orch extension acceptance regression.
+// Real installed pi-orch acceptance regression.
 //
 // This test is deliberately opt-in on the host shape it proves: it launches
-// the ACTUAL installed pi-orch launcher inside the sealed bwrap + systemd
-// user scope, and serves the parent OMP and the child Pi worker from one
-// synthetic OpenAI UDS endpoint. Nothing in the extension, worker result, or
-// worker id is mocked; the only synthetic part is the model.
+// the ACTUAL sealed guest in the real bwrap + systemd user scope, with the
+// pinned OMP binary as a DIRECT worker (read/grep/glob[,write]) inside the
+// workspace, and serves that worker from one synthetic OpenAI UDS endpoint.
+// Nothing in the guest, tool result, or artifact is mocked; the only
+// synthetic part is the model. The guest must not execute the pinned launcher
+// or delegate to a child worker.
 //
 // It requires:
 //   - /home/molmot/pi-codex-opencode-orchestrator (the installed launcher)
@@ -72,9 +74,9 @@ const SESSION_BUS =
   process.env.PI_ORCH_SESSION_BUS ?? `unix:path=${RUNTIME_DIR}/bus`;
 
 const README_TEXT =
-  "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
+  "# Synthetic Acceptance\n\nThe direct worker read this exact synthetic README.\n";
 const WRITE_README_TEXT =
-  "# Synthetic Acceptance\n\nWritten by the real child Pi write tool as a scoped candidate.\n";
+  "# Synthetic Acceptance\n\nWritten by the direct OMP worker as a scoped candidate.\n";
 const ACCEPTANCE = process.env.PI_ORCH_ACCEPTANCE === "1";
 
 type ModelScenario = "read" | "write";
@@ -139,11 +141,9 @@ function canRun(): boolean {
 }
 
 interface CapturedRequest {
-  readonly parent: boolean;
   readonly toolNames: string[];
   readonly body: Record<string, unknown>;
   readonly toolMessages: Record<string, unknown>[];
-  workerId?: string;
 }
 
 interface SyntheticModel {
@@ -267,60 +267,26 @@ async function startSyntheticModel(
     const toolNames = toolNamesOf(body);
     const messages = messagesOf(body);
     const toolMessages = messages.filter((message) => message.role === "tool");
-    const parent = toolNames.includes("opencode_task");
     const model =
       typeof body.model === "string" ? body.model : "companion-current";
-    const captured: CapturedRequest = { parent, toolNames, body, toolMessages };
-    if (parent && toolMessages.length > 0) {
-      const match = JSON.stringify(toolMessages).match(/oc-\d+/);
-      if (match) captured.workerId = match[0];
-    }
-    requests.push(captured);
+    requests.push({ toolNames, body, toolMessages });
 
     response.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
-    if (parent) {
-      if (toolMessages.length === 0) {
-        // Parent OMP advertises opencode_task -> make the real extension
-        // execute a real delegated read or write task.
-        sendToolCall(response, model, "call-parent-task", "opencode_task", {
-          name:
-            scenario === "write" ? "readme-child-write" : "readme-child-smoke",
-          mode: scenario === "write" ? "write" : "read_only",
-          objective:
-            scenario === "write"
-              ? "Replace README.md with the exact candidate text."
-              : "Inspect README.md and report its first heading.",
-          relevant_paths: ["README.md"],
-          expected_output:
-            scenario === "write"
-              ? "A structured report; the exact README candidate bytes are retained."
-              : "A structured report quoting the README heading.",
-        });
-      } else {
-        const workerId = captured.workerId ?? "missing";
-        sendText(
-          response,
-          model,
-          `Delegation complete; worker ${workerId} ${
-            scenario === "write" ? "wrote" : "read"
-          } README.md and its report was returned to the parent.`,
-        );
-      }
-    } else if (toolMessages.length === 0) {
+    if (toolMessages.length === 0) {
       if (scenario === "write") {
-        // Child Pi worker advertises write -> execute the real write tool with
+        // Direct worker advertises write -> execute the real write tool with
         // the exact tiny synthetic README candidate.
-        sendToolCall(response, model, "call-child-write", "write", {
+        sendToolCall(response, model, "call-direct-write", "write", {
           path: "README.md",
           content: WRITE_README_TEXT,
         });
       } else {
-        // Child Pi worker advertises only read -> execute the real read tool.
-        sendToolCall(response, model, "call-child-read", "read", {
+        // Direct worker advertises only read -> execute the real read tool.
+        sendToolCall(response, model, "call-direct-read", "read", {
           path: "README.md",
         });
       }
@@ -331,8 +297,8 @@ async function startSyntheticModel(
         JSON.stringify({
           summary:
             scenario === "write"
-              ? "Child worker wrote the exact README candidate in the sealed workspace."
-              : "Child worker read README.md in the sealed workspace.",
+              ? "Direct worker wrote the exact README candidate in the sealed workspace."
+              : "Direct worker read README.md in the sealed workspace.",
           files: ["README.md"],
           findings:
             scenario === "write"
@@ -542,13 +508,13 @@ function makeRequest(
     },
     objective:
       mode === "write"
-        ? "Delegate one scoped README write through the installed pi-orch extension."
-        : "Delegate one README read through the installed pi-orch extension.",
+        ? "Write one scoped README candidate directly as the sealed OMP worker."
+        : "Read README.md directly as the sealed OMP worker.",
     relevantPaths: ["README.md"],
     acceptance: [
       mode === "write"
-        ? "the delegated child writes the exact README candidate and the fixed check passes"
-        : "the delegated child reads README.md and the fixed check passes",
+        ? "the sealed worker writes the exact README candidate and the fixed check passes"
+        : "the sealed worker reads README.md and the fixed check passes",
     ],
     requiredChecks: ["readme-check"],
     constraints: [],
@@ -638,7 +604,7 @@ interface TrialWireResultShape {
 
 describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
   it.skipIf(!canRun())(
-    "delegates through the actual launcher to a real child Pi worker on a synthetic model",
+    "reads README.md directly with the pinned OMP worker on a synthetic model",
     async () => {
       const dir = tempRoot("model");
       const socketPath = join(dir, "model.sock");
@@ -675,39 +641,29 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
         },
       ]);
       expect(result.evidence.artifact).toBeDefined();
-      expect(result.report.findings.join("\n")).toContain("opencode_task");
-
-      // The synthetic model saw an actual parent OMP request that advertised
-      // opencode_task, and an actual child Pi request that advertised read.
-      const parentRequests = model.requests.filter((entry) => entry.parent);
-      const childRequests = model.requests.filter((entry) => !entry.parent);
-      expect(parentRequests.length).toBe(2);
-      expect(
-        childRequests.length,
-        JSON.stringify(parentRequests[1]?.toolMessages),
-      ).toBe(2);
-      expect(parentRequests[0]?.toolNames).toContain("opencode_task");
-      expect(childRequests[0]?.toolNames).toContain("read");
-      expect(childRequests[0]?.toolNames).not.toContain("opencode_task");
-
-      const parentToolCall = JSON.stringify(
-        parentRequests[0]?.body.messages ?? [],
-      );
-      expect(parentToolCall).toContain("opencode_task");
-      expect(parentToolCall).toContain("README.md");
-      const parentFinal = parentRequests[1];
-      expect(parentFinal?.workerId).toMatch(/^oc-\d+$/);
-      expect(JSON.stringify(parentFinal?.toolMessages ?? [])).toContain(
-        parentFinal?.workerId as string,
+      expect(result.report.findings.join("\n")).toContain(
+        "README heading: # Synthetic Acceptance",
       );
 
-      // The child read result is the actual README bytes, not a fabricated
-      // observation. This is the decisive child tool-execution evidence.
-      const childToolResult = JSON.stringify(
-        childRequests[1]?.toolMessages ?? [],
-      );
-      expect(childToolResult).toContain("# Synthetic Acceptance");
-      expect(childToolResult).toContain("read");
+      // The synthetic model saw exactly one direct worker loop: a request that
+      // advertised read (never the coordinator delegation tools) followed by
+      // the request carrying the real read tool result.
+      expect(model.requests.length).toBe(2);
+      const [first, final] = model.requests;
+      expect(first?.toolNames).toContain("read");
+      expect(first?.toolNames).not.toContain("opencode_task");
+      expect(first?.toolNames).not.toContain("task");
+      expect(first?.toolNames).not.toContain("wait");
+
+      const firstToolCall = JSON.stringify(first?.body.messages ?? []);
+      expect(firstToolCall).toContain('"name":"read"');
+      expect(firstToolCall).toContain("README.md");
+
+      // The read result is the actual README bytes, not a fabricated
+      // observation. This is the decisive direct tool-execution evidence.
+      const toolResult = JSON.stringify(final?.toolMessages ?? []);
+      expect(toolResult).toContain("# Synthetic Acceptance");
+      expect(toolResult).toContain("read");
 
       // The original synthetic source and the sealed snapshot are unchanged.
       expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(
@@ -736,7 +692,7 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
   );
 
   it.skipIf(!canRun())(
-    "writes one scoped candidate through the actual launcher and real child Pi write tool",
+    "writes one scoped candidate directly with the pinned OMP write tool",
     async () => {
       const dir = tempRoot("model-write");
       const socketPath = join(dir, "model.sock");
@@ -775,27 +731,19 @@ describe("real installed pi-orch acceptance", { timeout: 200_000 }, () => {
       expect(result.evidence.artifact).toMatchObject({ entryCount: 1 });
       expect(result.report.findings).toContain("modify README.md");
 
-      const parentRequests = model.requests.filter((entry) => entry.parent);
-      const childRequests = model.requests.filter((entry) => !entry.parent);
-      expect(parentRequests.length).toBe(2);
-      expect(
-        childRequests.length,
-        JSON.stringify(parentRequests[1]?.toolMessages),
-      ).toBe(2);
-      expect(parentRequests[0]?.toolNames).toContain("opencode_task");
-      expect(childRequests[0]?.toolNames).toContain("write");
-      expect(childRequests[0]?.toolNames).not.toContain("opencode_task");
-      expect(JSON.stringify(childRequests[0]?.body.messages ?? [])).toContain(
+      // The synthetic model saw exactly one direct worker loop: a request that
+      // advertised write (never the coordinator delegation tools) and the
+      // request carrying the real write tool result.
+      expect(model.requests.length).toBe(2);
+      const [first, final] = model.requests;
+      expect(first?.toolNames).toContain("write");
+      expect(first?.toolNames).not.toContain("opencode_task");
+      expect(first?.toolNames).not.toContain("task");
+      expect(first?.toolNames).not.toContain("wait");
+      expect(JSON.stringify(first?.body.messages ?? [])).toContain(
         "Mode: write",
       );
-      const parentFinal = parentRequests[1];
-      expect(parentFinal?.workerId).toMatch(/^oc-\d+$/);
-      expect(JSON.stringify(parentFinal?.toolMessages ?? [])).toContain(
-        parentFinal?.workerId as string,
-      );
-      expect(JSON.stringify(childRequests[1]?.toolMessages ?? [])).toContain(
-        "README.md",
-      );
+      expect(JSON.stringify(final?.toolMessages ?? [])).toContain("README.md");
 
       // The original synthetic source and the sealed snapshot are unchanged.
       expect(readFileSync(join(fixture.sourceRoot, "README.md"), "utf8")).toBe(

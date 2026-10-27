@@ -570,33 +570,33 @@ function runGuestJob(objective: string): {
   return { status: run.status, stderr: run.stderr ?? "", prompt };
 }
 
-// Runs the REAL guest in the real-pi branch with a fake pinned launcher that
-// records the argv the guest hands it. This pins the sealed tool allowlist at
-// the actual process boundary instead of asserting on source text.
+// Runs the REAL guest in the real-pi branch with a fake pinned OMP binary that
+// records the argv and rendered prompt the guest hands it. The guest must NOT
+// execute the pinned launcher (which loads the coordinator extension), so the
+// fake launcher is only present for the profile path check. This pins the
+// sealed tool allowlist and the absence of coordinator context at the actual
+// process boundary instead of asserting on source text.
 function runRealPiGuestJob(mode: "read_only" | "write"): {
   readonly status: number | null;
   readonly stderr: string;
   readonly argv: string[];
+  readonly prompt: string;
+  readonly launcherExecuted: boolean;
 } {
   const dir = tempRoot("guest-realpi");
   const workRoot = join(dir, "work");
   mkdirSync(workRoot, { recursive: true });
   const fake = join(workRoot, "fake");
-  // The guest resolves the pinned Pi CLI from dirname(dirname(launcher)),
-  // exactly like the installed launcher closure.
-  const launcherRoot = workRoot;
-  mkdirSync(
-    join(launcherRoot, "node_modules/@earendil-works/pi-coding-agent/dist"),
-    { recursive: true },
-  );
+  const launcher = join(fake, "launcher.mjs");
+  // Present only so the guest's frozen profile-path check passes; it must
+  // never be executed, because the real launcher loads the coordinator
+  // extension that appends "[Coordinator-only parent contract]". The direct
+  // worker needs no child Pi CLI/shim from the launcher closure.
   write(
-    join(
-      launcherRoot,
-      "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-    ),
-    "// fake pinned worker closure\n",
+    launcher,
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync('/work/launcher-was-executed', 'yes');\n`,
+    0o700,
   );
-  write(join(fake, "omp"), "#!/bin/sh\nexit 0\n", 0o700);
   const events = [
     {
       type: "message_end",
@@ -625,10 +625,9 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   ]
     .map((event) => JSON.stringify(event))
     .join("\n");
-  const launcher = join(fake, "launcher.mjs");
   write(
-    launcher,
-    `import { writeFileSync } from 'node:fs';\nwriteFileSync('/work/captured-argv.json', JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
+    join(fake, "omp"),
+    `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nconst argv = process.argv.slice(2);\nwriteFileSync('/work/captured-argv.json', JSON.stringify(argv));\nwriteFileSync('/work/captured-prompt.txt', argv.at(-1) ?? "");\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
     0o700,
   );
   const jobFile = join(dir, "job.json");
@@ -698,14 +697,22 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
     },
   );
   let argv: string[] = [];
+  let prompt = "";
   try {
     argv = JSON.parse(
       readFileSync(join(workRoot, "captured-argv.json"), "utf8"),
     ) as string[];
+    prompt = readFileSync(join(workRoot, "captured-prompt.txt"), "utf8");
   } catch {
-    // Rejected jobs never invoke the fake launcher.
+    // Rejected jobs never invoke the fake OMP binary.
   }
-  return { status: run.status, stderr: run.stderr ?? "", argv };
+  return {
+    status: run.status,
+    stderr: run.stderr ?? "",
+    argv,
+    prompt,
+    launcherExecuted: existsSync(join(workRoot, "launcher-was-executed")),
+  };
 }
 
 describe("sealed pi-orch bridge portable protocol/command contract", () => {
@@ -758,6 +765,57 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
           false,
         );
       }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "runs the sealed guest as a direct worker without the coordinator contract",
+    () => {
+      const run = runRealPiGuestJob("write");
+      expect(run.status, run.stderr).toBe(0);
+
+      // The coordinator extension is loaded by the pinned launcher via an
+      // explicit --extension. The guest must bypass the launcher and disable
+      // every extension/config discovery path instead.
+      expect(run.argv).toContain("--no-extensions");
+      expect(run.argv).not.toContain("--extension");
+      expect(run.argv).not.toContain("-e");
+      expect(run.argv).not.toContain("--config");
+      expect(run.argv).not.toContain("--allow-home");
+
+      // The guest must still pin the loopback synthetic model itself because
+      // the launcher used to inject --model/--thinking.
+      const modelIndex = run.argv.lastIndexOf("--model");
+      expect(modelIndex).toBeGreaterThanOrEqual(0);
+      expect(run.argv[modelIndex + 1]).toBe(
+        "companion-local/companion-current",
+      );
+      const thinkingIndex = run.argv.lastIndexOf("--thinking");
+      expect(thinkingIndex).toBeGreaterThanOrEqual(0);
+      expect(run.argv[thinkingIndex + 1]).toBe("off");
+
+      // No coordinator/delegation context reaches the model: neither in argv
+      // (the appended system prompt) nor in the rendered user prompt.
+      const argvText = run.argv.join("\n");
+      for (const forbidden of [
+        "Coordinator-only",
+        "coordinator-only parent",
+        "[Coordinator-only parent contract]",
+      ]) {
+        expect(argvText.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      }
+      const appendIndex = run.argv.lastIndexOf("--append-system-prompt");
+      expect(appendIndex).toBeGreaterThanOrEqual(0);
+      const appended = run.argv[appendIndex + 1] as string;
+      expect(appended).toContain("[Direct worker contract]");
+      expect(appended).toContain("direct worker");
+      expect(appended.toLowerCase()).toContain("no delegation tools");
+      expect(run.prompt).toContain("direct worker");
+      expect(run.prompt).not.toContain("Coordinator-only");
+
+      // The pinned launcher itself must never execute: executing it would
+      // load the coordinator extension and block the write tool.
+      expect(run.launcherExecuted).toBe(false);
     },
   );
 
