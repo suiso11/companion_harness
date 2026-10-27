@@ -10,7 +10,9 @@ import {
   AUTONOMY_BANNER_REFRESH_MS,
   type AutonomyControlSnapshot,
   autonomyBannerState,
+  type FrozenResumeCommand,
   fetchAutonomyControl,
+  frozenResumeCommand,
   postAutonomyControl,
   shouldPollBanner,
 } from "./autonomy_control.js";
@@ -19,7 +21,7 @@ let snapshot = $state<AutonomyControlSnapshot | null>(null);
 let busy = $state(false);
 let notice = $state("");
 // Frozen retry state: an uncertain outcome keeps the SAME key + version.
-let pendingKey: string | null = null;
+let pending: FrozenResumeCommand | null = null;
 
 async function refresh(): Promise<void> {
   snapshot = await fetchAutonomyControl();
@@ -29,16 +31,20 @@ async function resume(): Promise<void> {
   const current = snapshot;
   if (current === null || !current.paused || busy) return;
   busy = true;
-  const key = pendingKey ?? randomUuid();
-  pendingKey = key;
+  const command = frozenResumeCommand(pending, current.version, randomUuid());
+  pending = command;
   try {
-    const result = await postAutonomyControl(false, current.version, key);
+    const result = await postAutonomyControl(
+      false,
+      command.expectedVersion,
+      command.key,
+    );
     if (result.status === 0 || result.status >= 500) {
       notice = "通信が不確定です。もう一度「再開」を押してください";
       return;
     }
     // Definitive reply (2xx/4xx): the frozen command is done.
-    pendingKey = null;
+    pending = null;
     if (result.status === 200) {
       notice = "自律動作を再開しました";
     } else if (result.status === 409) {

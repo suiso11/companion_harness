@@ -75,3 +75,19 @@ export function autonomyBannerState(
   if (snapshot === null) return "unknown";
   return snapshot.paused ? "paused" : "running";
 }
+
+/** Frozen resume command: an uncertain retry must reuse BOTH the key and the
+ * original CAS expectedVersion, otherwise the server hashes a different body
+ * under the same key and replies with an idempotency conflict. */
+export interface FrozenResumeCommand {
+  readonly key: string;
+  readonly expectedVersion: number;
+}
+
+export function frozenResumeCommand(
+  pending: FrozenResumeCommand | null,
+  currentVersion: number,
+  newKey: string,
+): FrozenResumeCommand {
+  return pending ?? { key: newKey, expectedVersion: currentVersion };
+}

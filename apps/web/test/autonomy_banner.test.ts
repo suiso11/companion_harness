@@ -5,6 +5,7 @@ import {
   AUTONOMY_CONTROL_PATH,
   autonomyBannerState,
   buildControlBody,
+  frozenResumeCommand,
   parseAutonomyControl,
   shouldPollBanner,
 } from "../src/lib/autonomy_control.js";
@@ -37,6 +38,22 @@ describe("autonomy paused banner", () => {
     expect(parseAutonomyControl({ paused: true, version: 7 })).toEqual({
       paused: true,
       version: 7,
+    });
+  });
+
+  test("uncertain retry reuses the frozen key and expectedVersion", () => {
+    const first = frozenResumeCommand(null, 12, "key-1");
+    expect(first).toEqual({ key: "key-1", expectedVersion: 12 });
+    // A focus/poll refresh discovers version 13; the retry must still send
+    // the original CAS body under the original key.
+    const retry = frozenResumeCommand(first, 13, "key-2");
+    expect(retry).toEqual({ key: "key-1", expectedVersion: 12 });
+  });
+
+  test("a resolved command starts a fresh key and version", () => {
+    expect(frozenResumeCommand(null, 13, "key-2")).toEqual({
+      key: "key-2",
+      expectedVersion: 13,
     });
   });
 
