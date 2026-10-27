@@ -798,104 +798,117 @@ describe("trial_runner", () => {
     }
   });
 
-  it("maps the REAL observed bridge error line (empty checks) to terminal observed", async () => {
-    const { handle, repo, sessionId } = await makeKernel();
-    try {
-      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
-      const exited = { current: false };
-      const identity = {
-        pid: 4247,
-        bootId: "boot-real",
-        processStartTicks: "12347",
-      };
-      // Exact shape of the real e2e bridge final line: status error, verified
-      // false, evidence.checks [] (wholejob capsule failed before checks ran).
-      const realErrorLineForRequest = (
-        request: Record<string, unknown>,
-      ): string =>
-        JSON.stringify({
-          version: 1,
-          executionId: request.executionId,
-          taskHash: request.taskHash,
-          status: "error",
-          verified: false,
-          report: {
-            summary: "companion bridge: wholejob capsule failed",
-            files: [],
-            findings: [],
-            unresolved: [],
-          },
-          evidence: {
-            workerIds: [],
-            workspaceTrial: true,
-            productionApplied: false,
-            checks: [],
-          },
+  it.each<[string, number | undefined, string]>([
+    ["carries the journal exit code", 10, "bridge-exit:10"],
+    [
+      "legacy line without exitCode falls back to synthesis",
+      undefined,
+      "bridge-exit:1",
+    ],
+  ])(
+    "maps the REAL observed bridge error line (empty checks) to terminal observed: %s",
+    async (_label, wireExitCode, expectedDetail) => {
+      const { handle, repo, sessionId } = await makeKernel();
+      try {
+        const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+        const exited = { current: false };
+        const identity = {
+          pid: 4247,
+          bootId: "boot-real",
+          processStartTicks: "12347",
+        };
+        // Exact shape of the real e2e bridge final line: status error, verified
+        // false, evidence.checks [] (wholejob capsule failed before checks ran).
+        const realErrorLineForRequest = (
+          request: Record<string, unknown>,
+        ): string =>
+          JSON.stringify({
+            version: 1,
+            executionId: request.executionId,
+            taskHash: request.taskHash,
+            status: "error",
+            verified: false,
+            // v2 bridge wire results carry the journal exit code; it must win
+            // over the legacy status-derived synthesis (which produced 1).
+            ...(wireExitCode === undefined ? {} : { exitCode: wireExitCode }),
+            report: {
+              summary: "companion bridge: wholejob capsule failed",
+              files: [],
+              findings: [],
+              unresolved: [],
+            },
+            evidence: {
+              workerIds: [],
+              workspaceTrial: true,
+              productionApplied: false,
+              checks: [],
+            },
+          });
+        const { spawnImpl } = createFakeSpawn({
+          lineForRequest: realErrorLineForRequest,
         });
-      const { spawnImpl } = createFakeSpawn({
-        lineForRequest: realErrorLineForRequest,
-      });
-      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
-        const child = (
-          spawnImpl as unknown as (
-            c: string,
-            a: string[],
-            o: unknown,
-          ) => FakeChild
-        )(cmd, args, opts);
-        child.pid = identity.pid;
-        const origEmit = child.emit.bind(child);
-        child.emit = ((event: string, ...rest: unknown[]) => {
-          if (event === "exit") exited.current = true;
-          return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
-        }) as FakeChild["emit"];
-        return child;
-      }) as unknown as TrialRunnerSpawn;
-      const observer = createObserver({
-        scopeBeforeExit: "active",
-        scopeAfterExit: "gone",
-        identity,
-        exited: () => exited.current,
-      });
-      const { factory } = createFakeRelayFactory();
-      const { logger } = createCollectingLogger("debug");
-      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
-      const runner = new TrialRunner({
-        repo,
-        config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
-        isForegroundBusy: () => false,
-        logger,
-        observer,
-        createRelay: factory,
-        spawnImpl: spawnProxy,
-        clock: makeClock(),
-      });
-      const out = await runner.runNext();
-      expect(out).toMatchObject({
-        ran: true,
-        outcome: "observed",
-        authorized: false,
-      });
-      const stored = handle.raw
-        .prepare(
-          "SELECT authorized, quiescent, detail FROM trial_worker_outcomes WHERE execution_id=?",
-        )
-        .get(out.executionId) as {
-        authorized: number;
-        quiescent: number;
-        detail: string;
-      };
-      expect(stored.authorized).toBe(0);
-      expect(stored.quiescent).toBe(0);
-      expect(stored.detail).toContain("bridge-exit:1");
-      // Terminal: the grant leaves claimed for interrupted (never re-arms).
-      expect(
-        repo.readTrialLaunchIntent(sessionId, executionId).grant.status,
-      ).toBe("interrupted");
-    } finally {
-      closeKernelDatabase(handle);
-    }
-  });
+        const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+          const child = (
+            spawnImpl as unknown as (
+              c: string,
+              a: string[],
+              o: unknown,
+            ) => FakeChild
+          )(cmd, args, opts);
+          child.pid = identity.pid;
+          const origEmit = child.emit.bind(child);
+          child.emit = ((event: string, ...rest: unknown[]) => {
+            if (event === "exit") exited.current = true;
+            return (origEmit as (...a: unknown[]) => boolean)(event, ...rest);
+          }) as FakeChild["emit"];
+          return child;
+        }) as unknown as TrialRunnerSpawn;
+        const observer = createObserver({
+          scopeBeforeExit: "active",
+          scopeAfterExit: "gone",
+          identity,
+          exited: () => exited.current,
+        });
+        const { factory } = createFakeRelayFactory();
+        const { logger } = createCollectingLogger("debug");
+        const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+        const runner = new TrialRunner({
+          repo,
+          config: runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          isForegroundBusy: () => false,
+          logger,
+          observer,
+          createRelay: factory,
+          spawnImpl: spawnProxy,
+          clock: makeClock(),
+        });
+        const out = await runner.runNext();
+        expect(out).toMatchObject({
+          ran: true,
+          outcome: "observed",
+          authorized: false,
+        });
+        const stored = handle.raw
+          .prepare(
+            "SELECT authorized, quiescent, detail FROM trial_worker_outcomes WHERE execution_id=?",
+          )
+          .get(out.executionId) as {
+          authorized: number;
+          quiescent: number;
+          detail: string;
+        };
+        expect(stored.authorized).toBe(0);
+        expect(stored.quiescent).toBe(0);
+        expect(stored.detail).toContain(expectedDetail);
+        // Terminal: the grant leaves claimed for interrupted (never re-arms).
+        expect(
+          repo.readTrialLaunchIntent(sessionId, executionId).grant.status,
+        ).toBe("interrupted");
+      } finally {
+        closeKernelDatabase(handle);
+      }
+    },
+  );
 
   it("happy path records authorized done without completing Task/Goal", async () => {
     const { handle, repo, sessionId } = await makeKernel();

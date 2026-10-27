@@ -237,7 +237,8 @@ const DIRECT_WORKER_CONTRACT = [
   "[Direct worker contract]",
   "You are a direct worker inside a sealed workspace, not a coordinator and not a parent agent.",
   "There are no delegation tools (no task, wait, opencode_task, opencode_spawn, opencode_wait, or opencode_tools).",
-  "Do the work yourself with the tools provided in this session: read the relevant files, then write the candidate file when the mode allows it.",
+  "Do the work yourself with the tools provided in this session: read the relevant files, then make the candidate change when the mode allows it.",
+  "Modify existing files ONLY with edit (exact replacement); use write only to create new files; never rewrite an existing file with write.",
   "Never claim that work must be delegated to another worker; if a tool is unavailable, use the tools you do have.",
 ].join("\n");
 
@@ -259,13 +260,14 @@ function buildPrompt(job) {
   }
   return [
     "You are a direct worker making one minimal candidate change in a sealed workspace at /work.",
-    "Use the read, grep, glob, and write tools yourself. Do not run commands, do not touch other paths, and do not delegate to other workers.",
+    "Use the read, grep, glob, edit, and write tools yourself. Do not run commands, do not touch other paths, and do not delegate to other workers.",
+    "Modify existing files ONLY with edit (exact replacement); use write only to create new files; never rewrite an existing file with write.",
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
     ...(job.constraints.length > 0 ? [formatConstraints(job.constraints)] : []),
     formatAcceptance(job.acceptance),
-    "Write the smallest correct candidate file, then stop.",
+    "Make the smallest correct candidate change, then stop.",
   ].join("\n");
 }
 
@@ -299,6 +301,13 @@ function writeAgentConfig(agentDir, port) {
       "enabledProviders:",
       `  - ${MODEL_PROVIDER}`,
       "disabledProviders: []",
+      // A rejected relay call (HTTP 4xx) is final for this sealed run: do not
+      // burn the remaining wall clock retrying it. Unattended guests get one
+      // attempt, and the bridge records the failure immediately.
+      "retry:",
+      "  enabled: false",
+      "  maxRetries: 0",
+      "  modelFallback: false",
       "",
     ].join("\n"),
     { mode: 0o600 },
@@ -626,7 +635,7 @@ async function main() {
   // explicit flags instead: no launcher, no --extension, no --config overlay,
   // and extension discovery disabled.
   const tools =
-    job.mode === "read_only" ? "read,grep,glob" : "read,grep,glob,write";
+    job.mode === "read_only" ? "read,grep,glob" : "read,grep,glob,edit,write";
   const requestedTimeout = process.env.COMPANION_GUEST_TIMEOUT_SECONDS;
   let maxTimeSeconds = 300;
   if (requestedTimeout !== undefined) {
@@ -707,15 +716,40 @@ async function main() {
       // Already gone.
     }
   }, maxTimeSeconds * 1000);
-  const stop = () => {
+  // The bridge may stop this guest (outer deadline or cancel) before OMP
+  // exits. Evidence is still mandatory: write a bounded observation from the
+  // events received so far, synchronously, before honoring the signal, so the
+  // host records a tool/exit outcome instead of "guest observation missing".
+  const stopWithObservation = (signal) => {
     try {
       child.kill("SIGTERM");
     } catch {
       // Already gone.
     }
+    try {
+      const summary = summarizeEvents(stdout, stderr);
+      writeObservation(WORK_ROOT, {
+        schemaVersion: 1,
+        engine,
+        executorKind: EXECUTOR_KIND,
+        ...(realPi ? { launcher: PI_ORCH_LAUNCHER } : {}),
+        modelAlias: MODEL_ALIAS,
+        mode: job.mode,
+        tools,
+        ompExitCode: 143,
+        // Only the guest's own deadline makes this a timeout; an outer
+        // bridge signal is a cancellation, not a deadline.
+        timedOut,
+        signal,
+        ...summary,
+      });
+    } catch {
+      // Best effort: a signal path never retries the observation write.
+    }
+    process.exit(143);
   };
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  process.on("SIGTERM", () => stopWithObservation("SIGTERM"));
+  process.on("SIGINT", () => stopWithObservation("SIGINT"));
   const code = await new Promise((resolve) => {
     child.on("error", () => resolve(127));
     child.on("close", (exitCode, signal) =>

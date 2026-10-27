@@ -21,6 +21,8 @@ export interface TrialWireResult {
   taskHash: string;
   status: "done" | "error" | "cancelled" | "unknown";
   verified: boolean;
+  /** Stored bridge/journal exit code (0..255). Absent on legacy lines. */
+  exitCode?: number;
   report: {
     summary: string;
     files: string[];

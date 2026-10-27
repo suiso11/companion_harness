@@ -2039,12 +2039,20 @@ function parseWireBridgeResult(parsed: unknown): ParsedBridgeResult | null {
   // synthesized bridge-result-invalid.
   if (mapped.length === 0 && status === "done")
     return { kind: "invalid", exitCode: 1 };
+  // v2 bridges include the journal's stored exit code. Older lines omit it,
+  // so fall back to the historical status-derived synthesis for them.
+  const wireExit = record.exitCode;
   const exitCode =
-    status === "done" && verified === true
-      ? 0
-      : status === "cancelled"
-        ? 143
-        : 1;
+    typeof wireExit === "number" &&
+    Number.isSafeInteger(wireExit) &&
+    wireExit >= 0 &&
+    wireExit <= 255
+      ? wireExit
+      : status === "done" && verified === true
+        ? 0
+        : status === "cancelled"
+          ? 143
+          : 1;
   const outputMatched = mapped.length > 0 && mapped.every((c) => c.ok);
   const noTimeout =
     mapped.length > 0 &&
