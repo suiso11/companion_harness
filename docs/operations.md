@@ -4436,7 +4436,8 @@ proposals, grants, runner, or bridge spawn.
   persisted as `hostDiagnostics` for a `stopped-before-active` launch
   failure.
 - A pathless read-only trial (no literal patch paths) sends the frozen
-  profile's `allowedPaths` as the wire `relevantPaths`; it never invents
+  profile's `allowedPaths` as the wire `relevantPaths`, bounded to the
+  16-path wire cap (still a subset of allowed scope); it never invents
   whole-repo `.`, which a scoped profile rejects (`exit 2`). Pathless write
   trials are still refused at stage time.
 - A nonzero executor remains exit 10, but the journal report now carries

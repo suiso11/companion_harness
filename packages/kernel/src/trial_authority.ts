@@ -509,6 +509,11 @@ export function wireModeForReadOnly(readOnly: boolean): TrialWireMode {
  * (which a scoped frozen profile rejects at the bridge), carry the profile's
  * frozen allowedPaths. The wire therefore stays inside the same fail-closed
  * scope staging validated, and a profile that does allow "." still works.
+ *
+ * `TrialLaunchRequestSchema.relevantPaths` caps at 16 while a profile may
+ * declare up to 64 allowedPaths, so the synthesized list is bounded to the
+ * wire cap (a subset of allowed scope, never wider). Deterministic order:
+ * the frozen profile's declared order.
  */
 export function trialWireRelevantPaths(
   literalPatchPaths: readonly string[],
@@ -516,7 +521,7 @@ export function trialWireRelevantPaths(
 ): string[] {
   return literalPatchPaths.length > 0
     ? [...literalPatchPaths]
-    : [...allowedPaths];
+    : allowedPaths.slice(0, 16);
 }
 
 export interface StageInput {

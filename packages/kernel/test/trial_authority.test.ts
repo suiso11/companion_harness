@@ -304,6 +304,48 @@ describe("pathless read-only wire scope", () => {
     }
   });
 
+  it("bounds the profile fallback to the 16-path wire cap", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const many = Array.from({ length: 20 }, (_v, i) => `src/mod${i}`);
+      const roProfile = profile({ allowedPaths: many });
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "investigate",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: roProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      const ap = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const exec = (ap.body as { executionId: string }).executionId;
+      const c = repo.claimTrial(sessionId, exec, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const req = (c.body as { request: { relevantPaths: string[] } }).request;
+      expect(req.relevantPaths).toEqual(many.slice(0, 16));
+      expect(req.relevantPaths.length).toBeLessThanOrEqual(16);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("still rejects a pathless write request", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
