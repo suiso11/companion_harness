@@ -21,6 +21,9 @@ import {
   type ChatProposalCardView,
   conversationProposalCards,
   createProposalSyncGuard,
+  type FrozenProposalDecision,
+  frozenProposalDecision,
+  isDefinitiveProposalReply,
   type ParentPurposeSnapshot,
   proposalCardErrorText,
   trialProposalCards,
@@ -238,6 +241,9 @@ let cards: CardState[] = $state([]);
 let proposalCards: ChatProposalCardView[] = $state([]);
 let proposalDeciding = $state<string | null>(null);
 let proposalNotice = $state("");
+// Frozen retry state for the keyed card decisions: an uncertain reply keeps
+// the SAME Idempotency-Key + body until a definitive 2xx/4xx arrives.
+let pendingCardDecision: FrozenProposalDecision<unknown> | null = null;
 // Generation guard: only the latest syncProposals() may apply its result.
 const proposalSync = createProposalSyncGuard();
 let authExpired = $state(false);
@@ -462,6 +468,7 @@ function resetChatState(): void {
   proposalCards = [];
   proposalDeciding = null;
   proposalNotice = "";
+  pendingCardDecision = null;
   actionRunStops = new Map();
   degradedMemory = false;
   notice = "";
@@ -2360,23 +2367,40 @@ async function decideConversationProposalCard(
   const sid = sessionId;
   proposalDeciding = card.key;
   proposalNotice = "";
+  // Same body the Proposals panel sends: CAS on the staged version. An
+  // uncertain retry reuses this exact key + expectedVersion (review #154).
+  const decision = frozenProposalDecision(
+    pendingCardDecision,
+    card.proposalId,
+    action,
+    { expectedVersion: card.version },
+    randomUuid(),
+  );
+  pendingCardDecision = decision;
   let result: { status: number };
   try {
-    // Same body the Proposals panel sends: CAS on the staged version.
     result = await postJson(
       `/api/sessions/${encodeURIComponent(sid)}/conversation-proposals/${encodeURIComponent(card.proposalId)}/${action}`,
-      { expectedVersion: card.version },
-      randomUuid(),
+      decision.body,
+      decision.key,
     );
   } catch {
     if (sessionId === sid) {
       proposalDeciding = null;
-      proposalNotice = "操作に失敗しました。もう一度お試しください";
+      proposalNotice =
+        "通信が不確定です。もう一度「採用する」または「見送る」を押してください";
     }
     return;
   }
   if (sessionId !== sid) return;
   proposalDeciding = null;
+  if (!isDefinitiveProposalReply(result.status)) {
+    // Network / 5xx: keep the frozen command and the card for a retry.
+    proposalNotice =
+      "通信が不確定です。もう一度「採用する」または「見送る」を押してください";
+    return;
+  }
+  pendingCardDecision = null;
   proposalNotice =
     result.status === 200 || result.status === 201
       ? action === "accept"
@@ -2395,13 +2419,24 @@ async function decideTrialProposalCard(
   const sid = sessionId;
   proposalDeciding = card.key;
   proposalNotice = "";
+  // approve is keyed; expire is deliberately keyless (state-idempotent).
+  const decision =
+    action === "approve"
+      ? frozenProposalDecision(
+          pendingCardDecision,
+          card.proposalId,
+          action,
+          {},
+          randomUuid(),
+        )
+      : null;
+  if (decision !== null) pendingCardDecision = decision;
   let result: { status: number };
   try {
     result = await postJson(
       `/api/sessions/${encodeURIComponent(sid)}/trials/${encodeURIComponent(card.proposalId)}/${action}`,
       {},
-      // approve is keyed; expire is deliberately keyless (state-idempotent).
-      action === "approve" ? randomUuid() : null,
+      decision?.key ?? null,
     );
   } catch {
     if (sessionId === sid) {
@@ -2412,6 +2447,12 @@ async function decideTrialProposalCard(
   }
   if (sessionId !== sid) return;
   proposalDeciding = null;
+  if (decision !== null && !isDefinitiveProposalReply(result.status)) {
+    // Network / 5xx: keep the frozen approve command for an idempotent retry.
+    proposalNotice = "通信が不確定です。もう一度「承認する」を押してください";
+    return;
+  }
+  if (decision !== null) pendingCardDecision = null;
   const ok =
     action === "approve" ? result.status === 201 : result.status === 200;
   proposalNotice = ok

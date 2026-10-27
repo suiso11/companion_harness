@@ -305,6 +305,45 @@ export function proposalCardErrorText(status: number): string {
 }
 
 /**
+ * Frozen decision command for a proposal card. While the outcome of a POST is
+ * uncertain (network failure / 5xx), a retry MUST reuse both the
+ * Idempotency-Key and the original request body: re-keying or re-reading the
+ * staged version would let the server apply the decision twice or hash a
+ * different body under the same key.
+ */
+export interface FrozenProposalDecision<Body> {
+  readonly proposalId: string;
+  readonly action: string;
+  readonly key: string;
+  readonly body: Body;
+}
+
+/** Reuse the frozen command for the same (proposalId, action), otherwise
+ * freeze a new key + body. A different action/proposal starts a new command. */
+export function frozenProposalDecision<Body>(
+  pending: FrozenProposalDecision<Body> | null,
+  proposalId: string,
+  action: string,
+  body: Body,
+  newKey: string,
+): FrozenProposalDecision<Body> {
+  if (
+    pending !== null &&
+    pending.proposalId === proposalId &&
+    pending.action === action
+  ) {
+    return pending;
+  }
+  return { proposalId, action, key: newKey, body };
+}
+
+/** A definitive reply (2xx/4xx) ends the frozen command. Status 0 (network)
+ * and 5xx stay uncertain, so the next retry reuses the SAME key + body. */
+export function isDefinitiveProposalReply(status: number): boolean {
+  return (status >= 200 && status < 300) || (status >= 400 && status < 500);
+}
+
+/**
  * Latest-request guard for async proposal list refreshes. A run-completion
  * refresh can overlap a card decision's refresh; only the newest call may
  * apply its (older) list. `invalidate()` drops everything in flight, e.g.
