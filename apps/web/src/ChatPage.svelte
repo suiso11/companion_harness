@@ -1,5 +1,6 @@
 <script lang="ts">
 import { onMount, type Snippet, tick } from "svelte";
+import AutonomyPausedBanner from "./lib/AutonomyPausedBanner.svelte";
 import {
   errorCode,
   fetchJson,
@@ -15,6 +16,7 @@ import {
   type DraftState,
   draftDisplayText,
 } from "./lib/draft.js";
+import FeatureNav from "./lib/FeatureNav.svelte";
 import Markdown from "./lib/Markdown.svelte";
 import {
   ACTION_PROGRESS_TEXT,
@@ -34,7 +36,6 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
-import { FEATURE_ROUTES } from "./lib/router.js";
 import { setSessionId } from "./lib/session.svelte.js";
 import {
   appendThinkingText,
@@ -2889,21 +2890,7 @@ function evidenceForTurn(turn: Turn): {
 <div class="shell">
   <header class="topbar">
     <h1>会話</h1>
-    <nav class="feature-links" aria-label="機能">
-      <a
-        href="/"
-        class:active={activePath === "/"}
-        aria-current={activePath === "/" ? "page" : undefined}>チャット</a
-      >
-      {#each FEATURE_ROUTES as item (item.path)}
-        <a
-          href={item.path}
-          class:active={activePath === item.path}
-          aria-current={activePath === item.path ? "page" : undefined}
-          >{item.label}</a
-        >
-      {/each}
-    </nav>
+    <FeatureNav {activePath} />
     <div class="sessions">
       <label for="session-list">セッション</label>
       <select
@@ -2934,6 +2921,10 @@ function evidenceForTurn(turn: Turn): {
       </button>
     </div>
   </header>
+
+  {#if activePath === "/"}
+    <AutonomyPausedBanner />
+  {/if}
 
   {#if authExpired}
     <section id="login-expired" aria-label="再ログイン">
