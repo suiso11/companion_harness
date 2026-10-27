@@ -381,24 +381,39 @@ function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+interface GuestReportOverrides {
+  readonly tools?: unknown[];
+  readonly ompExitCode?: number;
+  readonly timedOut?: boolean;
+  readonly error?: string;
+}
+
 // The guest owns this file. Tests use it to model an UNTRUSTED guest report,
-// not host evidence; the bridge must never treat a reported `done` as proof.
+// not host evidence; the bridge must never treat a reported success as proof.
+// The sealed real-pi guest is a direct worker, so by default the report has one
+// observed successful tool call and no delegated workers.
 function guestReportBody(
-  delegatedWorkers: unknown[],
+  delegatedWorkers: unknown[] | undefined,
   extraBody = "",
   finalText?: string,
+  overrides: GuestReportOverrides = {},
 ): string {
+  const report: Record<string, unknown> = {
+    schemaVersion: 1,
+    engine: "pi-orch-omp-json",
+    executorKind: "real-pi",
+    mode: "read_only",
+    tools: overrides.tools ?? [
+      { name: "read", args: { path: "src/app.ts" }, result: "ok" },
+    ],
+    ompExitCode: overrides.ompExitCode ?? 0,
+    timedOut: overrides.timedOut ?? false,
+    error: overrides.error ?? "",
+    ...(delegatedWorkers === undefined ? {} : { delegatedWorkers }),
+    ...(finalText === undefined ? {} : { finalText }),
+  };
   return `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync('.companion-observation', { recursive: true });\nwriteFileSync('.companion-observation/guest.json', ${JSON.stringify(
-    JSON.stringify({
-      schemaVersion: 1,
-      engine: "pi-orch-omp-json",
-      executorKind: "real-pi",
-      mode: "read_only",
-      tools: [],
-      delegatedWorkers,
-      error: "",
-      ...(finalText === undefined ? {} : { finalText }),
-    }),
+    JSON.stringify(report),
   )});\n${extraBody}`;
 }
 
@@ -971,7 +986,100 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(artifact?.bytes.toString("utf8")).toContain(request.taskHash);
   });
 
-  it("guest-reported worker status only downgrades: done is unattested, error blocks", async () => {
+  it("accepts direct sealed-guest execution evidence without delegated workers", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("done");
+    expect(result.verified).toBe(true);
+    // Verification here is fixed host checks + revalidated artifact only; the
+    // execution line is explicitly labelled as an unattested guest report.
+    expect(result.report.findings.join("\n")).toContain(
+      "tool read src/app.ts (ok)",
+    );
+    expect(result.report.summary).toContain(
+      "guest execution guest-reported/unattested",
+    );
+    expect(result.evidence.checks).toEqual([
+      {
+        id: "synthetic-check",
+        exitCode: 0,
+        timedOut: false,
+        outputMatched: true,
+      },
+    ]);
+    expect(result.evidence.artifact).toBeDefined();
+  });
+
+  it("requires at least one observed tool call for real-pi execution", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, { tools: [] }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("unknown");
+    expect(result.verified).toBe(false);
+    expect(result.evidence.artifact).toBeUndefined();
+    expect(result.report.unresolved).toContain(
+      "blocked: guest execution evidence (guest-reported, unattested)",
+    );
+  });
+
+  it("downgrades real-pi execution whose observed tool failed", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          { name: "read", args: { path: "src/app.ts" }, result: "error" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    // The synthetic check passed, but an observed tool failure must never be
+    // promoted to verified done by the bridge.
+    expect(result.status).toBe("error");
+    expect(result.verified).toBe(false);
+    expect(result.evidence.artifact).toBeUndefined();
+    expect(result.report.unresolved).toContain(
+      "blocked: guest execution did not complete reliably (guest-reported, unattested)",
+    );
+  });
+
+  it("downgrades real-pi execution with a guest error or nonzero exit", async () => {
+    const errorFixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        error: "model or tool error",
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const errorRun = await runBridge(errorFixture, makeRequest(errorFixture));
+    expect(errorRun.status).toBe(0);
+    const errorResult = resultOf(errorRun);
+    expect(errorResult.status).toBe("error");
+    expect(errorResult.verified).toBe(false);
+
+    const exitFixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        ompExitCode: 1,
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const exitRun = await runBridge(exitFixture, makeRequest(exitFixture));
+    expect(exitRun.status).toBe(0);
+    const exitResult = resultOf(exitRun);
+    expect(exitResult.status).toBe("error");
+    expect(exitResult.verified).toBe(false);
+  });
+
+  it("keeps the legacy delegated-worker downgrade when a report is present", async () => {
     const doneFixture = await makeFixture({
       executorBody: guestReportBody([{ id: "oc-1", status: "done" }]),
       scratchPaths: [".companion-observation"],
@@ -981,13 +1089,11 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     const doneResult = resultOf(doneRun);
     expect(doneResult.status).toBe("done");
     expect(doneResult.verified).toBe(true);
-    // Verification here is fixed host checks + revalidated artifact only; the
-    // worker line is explicitly labelled as an unattested guest report.
     expect(doneResult.report.findings.join("\n")).toContain(
       "guest-reported worker oc-1 done (unattested)",
     );
     expect(doneResult.report.summary).toContain(
-      "worker status guest-reported/unattested",
+      "guest execution guest-reported/unattested",
     );
 
     const failedFixture = await makeFixture({
@@ -1002,38 +1108,11 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     );
     expect(failedRun.status).toBe(0);
     const failedResult = resultOf(failedRun);
-    // The synthetic check passed, but a real worker failure must never be
-    // promoted to verified done by the bridge.
     expect(failedResult.status).toBe("error");
     expect(failedResult.verified).toBe(false);
     expect(failedResult.evidence.artifact).toBeUndefined();
-    expect(failedResult.evidence.checks).toEqual([
-      {
-        id: "synthetic-check",
-        exitCode: 0,
-        timedOut: false,
-        outputMatched: true,
-      },
-    ]);
     expect(failedResult.report.unresolved).toContain(
-      "blocked: guest-reported worker did not complete (unattested)",
-    );
-
-    const missingFixture = await makeFixture({
-      executorBody: guestReportBody([]),
-      scratchPaths: [".companion-observation"],
-    });
-    const missingRun = await runBridge(
-      missingFixture,
-      makeRequest(missingFixture),
-    );
-    expect(missingRun.status).toBe(0);
-    const missingResult = resultOf(missingRun);
-    expect(missingResult.status).toBe("unknown");
-    expect(missingResult.verified).toBe(false);
-    expect(missingResult.evidence.artifact).toBeUndefined();
-    expect(missingResult.report.unresolved).toContain(
-      "blocked: guest-reported worker evidence (unattested)",
+      "blocked: guest execution did not complete reliably (guest-reported, unattested)",
     );
   });
 

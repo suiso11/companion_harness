@@ -5598,10 +5598,16 @@ is Linux-only.
   `ch:run-settled`, bounded active polling while the document is visible,
   and a manual refresh. Candidate trial details show required checks and
   the fixed host-check/observed outcome; the API exposes no candidate
-  artifact body, so the panel says so rather than claiming an apply. Worker
-  status is labelled guest-reported/unattested and is never treated as
-  host evidence or as permission/adoption/trust input. A 404 config hides
-  the panel.
+  artifact body, so the panel says so rather than claiming an apply. Guest
+  execution status is labelled guest-reported/unattested: the sealed real-pi
+  guest runs directly (read/grep/glob[,write]) without required
+  task/opencode delegation, so a run is only reported `done` when the guest
+  observation reports `ompExitCode` 0, no error, at least one observed tool
+  call, and every observed tool result `ok`; any delegated-worker entries, if
+  present, must still all be `done` without `isError`. A missing observation
+  or a failed/errored execution downgrades the run to unknown/error. This is
+  never host evidence and never permission/adoption/trust input. A 404 config
+  hides the panel.
 - Stop/disable: `POST /api/sessions/:id/autodispatch/stop` revokes active
   standing policies and interrupts intake; it does not resume the separate
   global autonomy control (resume explicitly on 「タスク・目的」) and does
