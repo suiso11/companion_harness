@@ -181,6 +181,96 @@ describe("goal confirmation", () => {
     }
   });
 
+  it("rejects non-goal purposes without writing", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const constraint = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "s1",
+          statement: "never deploy on fridays",
+          kind: "constraint",
+          explicit: false,
+          sourceKind: "self",
+        },
+        { key: randomUUID(), now: NOW + 2 },
+      );
+      expect(() =>
+        repo.confirmAutonomyPurpose(
+          sessionId,
+          constraint.body.id,
+          { expectedVersion: constraint.body.version },
+          { key: randomUUID(), now: NOW + 4 },
+        ),
+      ).toThrow(/purpose kind constraint cannot be confirmed as a goal/);
+      const row = handle.raw
+        .prepare(
+          "SELECT kind, is_explicit, version, confirmed_from, confirmed_at FROM autonomy_purposes WHERE id = ?",
+        )
+        .get(constraint.body.id) as {
+        kind: string;
+        is_explicit: number;
+        version: number;
+        confirmed_from: string | null;
+        confirmed_at: number | null;
+      };
+      expect(row).toEqual({
+        kind: "constraint",
+        is_explicit: 0,
+        version: constraint.body.version,
+        confirmed_from: null,
+        confirmed_at: null,
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("refuses an explicit self-sourced purpose without writing", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const forged = repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "s1",
+          statement: "ship it",
+          kind: "goal",
+          explicit: true,
+          sourceKind: "self",
+        },
+        { key: randomUUID(), now: NOW + 2 },
+      );
+      expect(() =>
+        repo.confirmAutonomyPurpose(
+          sessionId,
+          forged.body.id,
+          { expectedVersion: forged.body.version },
+          { key: randomUUID(), now: NOW + 4 },
+        ),
+      ).toThrow(/already explicit from self and cannot be confirmed/);
+      const row = handle.raw
+        .prepare(
+          "SELECT is_explicit, source_kind, version, confirmed_from, confirmed_at FROM autonomy_purposes WHERE id = ?",
+        )
+        .get(forged.body.id) as {
+        is_explicit: number;
+        source_kind: string;
+        version: number;
+        confirmed_from: string | null;
+        confirmed_at: number | null;
+      };
+      expect(row).toEqual({
+        is_explicit: 1,
+        source_kind: "self",
+        version: forged.body.version,
+        confirmed_from: null,
+        confirmed_at: null,
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("never advertises a model tool for confirmation", () => {
     const tools = buildAgentToolDefinitions([
       {

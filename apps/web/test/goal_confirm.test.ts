@@ -10,7 +10,12 @@ import {
 
 describe("goal confirmation mapping", () => {
   it("badges an adopted, still-unconfirmed goal", () => {
-    const goal = { explicit: false, status: "active", sourceKind: "self" };
+    const goal = {
+      explicit: false,
+      status: "active",
+      sourceKind: "self",
+      kind: "goal",
+    };
     expect(isConversationAdoptedGoal(goal)).toBe(true);
     expect(isUnconfirmedGoal(goal)).toBe(true);
     expect(UNCONFIRMED_GOAL_BADGE).toBe("会話から採用（未確認）");
@@ -23,6 +28,7 @@ describe("goal confirmation mapping", () => {
         explicit: true,
         status: "active",
         sourceKind: "user",
+        kind: "goal",
       }),
     ).toBe(false);
     expect(
@@ -30,6 +36,35 @@ describe("goal confirmation mapping", () => {
         explicit: false,
         status: "revoked",
         sourceKind: "self",
+        kind: "goal",
+      }),
+    ).toBe(false);
+  });
+
+  it("offers no button for non-goals or unknown statuses", () => {
+    expect(
+      isUnconfirmedGoal({
+        explicit: false,
+        status: "active",
+        sourceKind: "self",
+        kind: "constraint",
+      }),
+    ).toBe(false);
+    expect(
+      isUnconfirmedGoal({
+        explicit: false,
+        status: "held",
+        sourceKind: "self",
+        kind: "goal",
+      }),
+    ).toBe(false);
+    expect(isUnconfirmedGoal({ explicit: false })).toBe(false);
+    expect(
+      isConversationAdoptedGoal({
+        explicit: false,
+        status: "active",
+        sourceKind: "self",
+        kind: "preference",
       }),
     ).toBe(false);
   });
@@ -46,6 +81,7 @@ describe("goal confirmation mapping", () => {
         explicit: false,
         status: "active",
         sourceKind: "self",
+        kind: "goal",
       }),
     ).toContain("自分の目的として確定");
     expect(
@@ -53,6 +89,7 @@ describe("goal confirmation mapping", () => {
         explicit: true,
         status: "active",
         sourceKind: "user",
+        kind: "goal",
       }),
     ).toBeNull();
     expect(trialGoalAuthorityHint(null)).toBeNull();

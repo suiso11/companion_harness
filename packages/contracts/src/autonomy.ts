@@ -238,6 +238,9 @@ export const PurposeViewSchema = z.strictObject({
   explicit: z.boolean(),
   sourceKind: ProvenanceSourceSchema,
   sourceTurnId: UuidSchema.nullable(),
+  /** Confirmation provenance: null unless a person confirmed this purpose. */
+  confirmedFrom: z.string().nullable().default(null),
+  confirmedAt: UnixMsSchema.nullable().default(null),
   interpretation: PurposeInterpretationSchema.nullable(),
   status: PurposeStatusSchema,
   version: z.number().int().min(1),

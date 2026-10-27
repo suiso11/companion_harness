@@ -266,6 +266,8 @@ export {
   listConversationProposals,
   listPurposeEvents,
   listTaskEvents,
+  PurposeNotConfirmableError,
+  PurposeNotGoalError,
   recordPurposeConflict,
   rejectConversationProposal,
   resumeTask,

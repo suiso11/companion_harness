@@ -1002,6 +1002,8 @@ export const autonomyPurposes = sqliteTable(
     isExplicit: integer("is_explicit").notNull(),
     sourceKind: text("source_kind").notNull(),
     sourceTurnId: text("source_turn_id"),
+    confirmedFrom: text("confirmed_from"),
+    confirmedAt: integer("confirmed_at"),
     statement: text("statement").notNull(),
     interpretation: text("interpretation"),
     status: text("status").notNull(),

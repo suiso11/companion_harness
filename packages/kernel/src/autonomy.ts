@@ -127,6 +127,23 @@ export class AutonomyStateConflictError extends KernelStorageError {
   }
 }
 
+/** Only goal-kind purposes can be confirmed; every other kind is refused (409). */
+export class PurposeNotGoalError extends KernelStorageError {
+  constructor(kind: string) {
+    super(
+      "purpose_not_goal",
+      `purpose kind ${kind} cannot be confirmed as a goal`,
+    );
+  }
+}
+
+/** An already-explicit purpose not sourced from the user is not confirmable (409). */
+export class PurposeNotConfirmableError extends KernelStorageError {
+  constructor(message: string) {
+    super("purpose_not_confirmable", message);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Local strict helpers (same conventions as the M0 repository).        */
 /* ------------------------------------------------------------------ */
@@ -417,6 +434,8 @@ interface RawPurpose {
   is_explicit: number;
   source_kind: string;
   source_turn_id: string | null;
+  confirmed_from: string | null;
+  confirmed_at: number | null;
   statement: string;
   interpretation: string | null;
   status: string;
@@ -498,6 +517,8 @@ function toPurposeView(row: RawPurpose): {
   explicit: boolean;
   sourceKind: ProvenanceSource;
   sourceTurnId: string | null;
+  confirmedFrom: string | null;
+  confirmedAt: number | null;
   interpretation: string | null;
   status: "active" | "superseded" | "revoked" | "achieved";
   version: number;
@@ -519,6 +540,8 @@ function toPurposeView(row: RawPurpose): {
         explicit: row.is_explicit === 1,
         sourceKind: row.source_kind,
         sourceTurnId: row.source_turn_id,
+        confirmedFrom: row.confirmed_from,
+        confirmedAt: row.confirmed_at,
         interpretation: row.interpretation,
         status: row.status,
         version: row.version,
@@ -1864,6 +1887,11 @@ export function confirmPurpose(
   return withImmediate(db, () => {
     // Ownership-first: foreign ids are 404 before any idempotency-cache read.
     const row = assertOwnedPurpose(db, session, purpose);
+    // Confirmation is a goal-only operation: every other kind is refused
+    // before any cache replay or write (fail closed on the record kind).
+    if (row.kind !== "goal") {
+      throw new PurposeNotGoalError(row.kind);
+    }
     const existing = toStoredResponse(db, scope, key);
     if (existing !== null) {
       if (existing.requestHash !== hash) {
@@ -1885,7 +1913,16 @@ export function confirmPurpose(
         `purpose ${row.id} is ${row.status} and cannot be confirmed`,
       );
     }
-    if (row.is_explicit !== 1 || row.source_kind !== "user") {
+    if (row.is_explicit === 1) {
+      // Already explicit user-sourced goals replay as a 200 no-op below.
+      // Any other explicit provenance (self/external) can never be
+      // laundered into user consent by pressing confirm.
+      if (row.source_kind !== "user") {
+        throw new PurposeNotConfirmableError(
+          `purpose ${row.id} is already explicit from ${row.source_kind} and cannot be confirmed`,
+        );
+      }
+    } else {
       const moved = db
         .prepare(
           "UPDATE autonomy_purposes SET is_explicit = 1, source_kind = 'user', confirmed_from = 'conversation_proposal', confirmed_at = ?, version = ?, updated_at = ? WHERE id = ? AND status = 'active' AND is_explicit = 0 AND version = ?",

@@ -15,15 +15,13 @@ export interface GoalConfirmationFields {
   readonly explicit?: unknown;
   readonly status?: unknown;
   readonly sourceKind?: unknown;
+  readonly kind?: unknown;
 }
 
 /** True only for an ACTIVE goal that still lacks explicit user consent. */
 export function isUnconfirmedGoal(goal: GoalConfirmationFields): boolean {
   return (
-    goal.status !== "revoked" &&
-    goal.status !== "achieved" &&
-    goal.status !== "superseded" &&
-    goal.explicit !== true
+    goal.kind === "goal" && goal.status === "active" && goal.explicit !== true
   );
 }
 

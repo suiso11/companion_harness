@@ -116,6 +116,8 @@ import {
   NotificationProjectionResetError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
+  PurposeNotConfirmableError,
+  PurposeNotGoalError,
   ReferenceNotFoundError,
   ReferenceVersionConflictError,
   RepositoryNotFoundError,
@@ -1228,6 +1230,30 @@ function mapDomainError(c: Context, error: unknown): Response {
         error: {
           code: "autonomy_state_conflict",
           message: "autonomy state conflict",
+        },
+      },
+      409,
+    );
+  }
+  // Goal confirmation is goal-only and user-sourced-only; both refusals are
+  // fixed 409 codes outside the frozen ApiErrorCode enum.
+  if (error instanceof PurposeNotGoalError) {
+    return c.json(
+      {
+        error: {
+          code: "purpose_not_goal",
+          message: "only goal purposes can be confirmed",
+        },
+      },
+      409,
+    );
+  }
+  if (error instanceof PurposeNotConfirmableError) {
+    return c.json(
+      {
+        error: {
+          code: "purpose_not_confirmable",
+          message: "purpose is not confirmable",
         },
       },
       409,
