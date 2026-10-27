@@ -221,6 +221,190 @@ describe("stage-time frozen profile validation", () => {
   });
 });
 
+describe("pathless read-only wire scope", () => {
+  it("sends the frozen allowedPaths for a pathless read-only claim", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const roProfile = profile({ allowedPaths: ["apps", "packages"] });
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "investigate",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: roProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      expect(st.status).toBe(201);
+      expect(st.body.literalPatchPaths).toEqual([]);
+      const ap = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const exec = (ap.body as { executionId: string }).executionId;
+      const c = repo.claimTrial(sessionId, exec, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const req = (c.body as { request: { relevantPaths: string[] } }).request;
+      expect(req.relevantPaths).toEqual(["apps", "packages"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("still works when the profile allows whole-repo '.'", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const roProfile = profile({ allowedPaths: ["."] });
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "verify",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: roProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      const ap = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const exec = (ap.body as { executionId: string }).executionId;
+      const c = repo.claimTrial(sessionId, exec, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const req = (c.body as { request: { relevantPaths: string[] } }).request;
+      expect(req.relevantPaths).toEqual(["."]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("bounds the profile fallback to the 16-path wire cap", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const many = Array.from({ length: 20 }, (_v, i) => `src/mod${i}`);
+      const roProfile = profile({ allowedPaths: many });
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "investigate",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: roProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      const ap = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const exec = (ap.body as { executionId: string }).executionId;
+      const c = repo.claimTrial(sessionId, exec, {
+        key: randomUUID(),
+        now: NOW + 6,
+        profile: roProfile,
+        workspaceAlias: "ws",
+      });
+      const req = (c.body as { request: { relevantPaths: string[] } }).request;
+      expect(req.relevantPaths).toEqual(many.slice(0, 16));
+      expect(req.relevantPaths.length).toBeLessThanOrEqual(16);
+      // Bridge `needRelevantPaths` rejects overlapping scopes: nested
+      // descendants of another allowed scope are dropped.
+      const nestedProfile = profile({
+        allowedPaths: ["src", "src/lib", "docs"],
+      });
+      const st2 = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          literalPatchPaths: [],
+          operation: "investigate",
+          readOnlyMode: true,
+          possibleExternalDataConsent: false,
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 7,
+          profile: nestedProfile,
+          workspaceAlias: "ws",
+        },
+      );
+      const ap2 = repo.approveTrial(sessionId, st2.body.id, {
+        key: randomUUID(),
+        now: NOW + 8,
+        profile: nestedProfile,
+        workspaceAlias: "ws",
+      });
+      const exec2 = (ap2.body as { executionId: string }).executionId;
+      const c2 = repo.claimTrial(sessionId, exec2, {
+        key: randomUUID(),
+        now: NOW + 9,
+        profile: nestedProfile,
+        workspaceAlias: "ws",
+      });
+      expect(
+        (c2.body as { request: { relevantPaths: string[] } }).request
+          .relevantPaths,
+      ).toEqual(["src", "docs"]);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("still rejects a pathless write request", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      expect(() =>
+        repo.stageTrial(
+          sessionId,
+          stageInput(task.id, { literalPatchPaths: [] }),
+          {
+            key: randomUUID(),
+            now: NOW + 4,
+            profile: profile(),
+            workspaceAlias: "ws",
+          },
+        ),
+      ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
 describe("trial authority", () => {
   it("stages/approves/claims with one-use grant; claim replay returns replay", async () => {
     const { handle, repo, sessionId } = await makeRepo();

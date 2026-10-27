@@ -7667,6 +7667,7 @@ export function createKernelRepository(
       pid?: number | null;
       bootId?: string | null;
       reason: string;
+      report?: TrialWorkerReportInput | null;
     },
   ) {
     return recordQuiescence(db, sessionId, scope, executionId, now, opts);

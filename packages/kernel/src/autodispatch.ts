@@ -37,6 +37,7 @@ import {
 import {
   derivePolicyTrialGrant,
   type PolicyGrantInput,
+  trialWireRelevantPaths,
 } from "./trial_authority.js";
 
 const UUID_V4 =
@@ -1576,13 +1577,20 @@ export function authorizeWithinPolicy(
       now,
     });
     const writeOperation = plan.operation === "implement";
-    // Read-only grants must still carry the plan's frozen relevant paths (the
-    // operator-approved scope the materialized profile allows); falling back
-    // to whole-repo "." made the wire request fall outside that profile and
-    // the bridge rejected every investigate launch. Only an empty plan path
-    // list falls back to ".". Write grants are unchanged.
-    const paths =
-      plan.relevantPaths.length > 0 ? [...plan.relevantPaths] : ["."];
+    // Read-only grants carry exactly the wire paths the authority will send
+    // (the plan's frozen paths, or the frozen profile's allowedPaths when the
+    // plan is pathless), so the wire never invents whole-repo "." (which a
+    // scoped profile rejects). The shared helper keeps this identical to
+    // stage-time validation and CLAIM. Pathless write grants keep the legacy
+    // whole-repo fallback.
+    const paths = writeOperation
+      ? plan.relevantPaths.length > 0
+        ? [...plan.relevantPaths]
+        : ["."]
+      : trialWireRelevantPaths(
+          plan.relevantPaths,
+          options.profile.allowedPaths,
+        );
     const expiry = new Date(now + appliedTimeoutMs + 60_000).toISOString();
     const grantInput: PolicyGrantInput = {
       taskId: task.body.id,

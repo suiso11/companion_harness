@@ -503,6 +503,34 @@ export function wireModeForReadOnly(readOnly: boolean): TrialWireMode {
   return readOnly ? "read_only" : "write";
 }
 
+/**
+ * The exact `relevantPaths` sent on the CLAIM wire. A read-only grant may be
+ * staged with no literal patch paths; instead of inventing whole-repo "."
+ * (which a scoped frozen profile rejects at the bridge), carry the profile's
+ * frozen allowedPaths. The wire therefore stays inside the same fail-closed
+ * scope staging validated, and a profile that does allow "." still works.
+ *
+ * The bridge (`needRelevantPaths`) rejects duplicate and overlapping scopes
+ * and caps the list at 16, while a profile may declare up to 64 allowedPaths.
+ * The synthesized list is therefore deduped, descendants of another entry
+ * dropped, and bounded to the wire cap: always a subset of allowed scope,
+ * never wider, and accepted by the bridge. Deterministic: profile order.
+ */
+export function trialWireRelevantPaths(
+  literalPatchPaths: readonly string[],
+  allowedPaths: readonly string[],
+): string[] {
+  const source =
+    literalPatchPaths.length > 0 ? literalPatchPaths : allowedPaths;
+  const unique = [...new Set(source)];
+  if (unique.includes(".")) return ["."];
+  const scoped = unique.filter(
+    (path) =>
+      !unique.some((other) => other !== path && path.startsWith(`${other}/`)),
+  );
+  return scoped.slice(0, 16);
+}
+
 export interface StageInput {
   taskId: string;
   objective: string;
@@ -678,11 +706,11 @@ export function stageTrialProposal(
         );
     }
     if (
-      input.literalPatchPaths.length < 1 ||
-      input.literalPatchPaths.length > 16
+      input.literalPatchPaths.length > 16 ||
+      (input.literalPatchPaths.length < 1 && !input.readOnlyMode)
     )
       throw new RepositoryValidationError(
-        "literalPatchPaths must carry 1..16 entries",
+        "literalPatchPaths must carry 1..16 entries (0 allowed for read-only)",
       );
     if (input.timeoutMs < 1000 || input.timeoutMs > 3600000)
       throw new RepositoryValidationError(
@@ -717,11 +745,14 @@ export function stageTrialProposal(
     // The profile snapshot schema makes both fields REQUIRED, so these
     // checks never silently skip for a partial internal caller.
     const allowedPaths = profile.allowedPaths;
-    for (const path of normPaths) {
+    // Validate the EXACT wire paths claim will send (not just the literal
+    // list), so a pathless read-only proposal can never stage a wire the
+    // bridge rejects.
+    for (const path of trialWireRelevantPaths(normPaths, allowedPaths)) {
       if (!pathWithinAllowedScope(path, allowedPaths))
         throw new TrialStageError(
           "trial_path_outside_profile",
-          "literalPatchPath is outside the frozen profile",
+          "wire relevantPath is outside the frozen profile",
         );
     }
     if (input.possibleExternalDataConsent && profile.modelRoute !== "external")
@@ -1041,11 +1072,11 @@ export function derivePolicyTrialGrant(
         );
     }
     if (
-      input.literalPatchPaths.length < 1 ||
-      input.literalPatchPaths.length > 16
+      input.literalPatchPaths.length > 16 ||
+      (input.literalPatchPaths.length < 1 && !input.readOnlyMode)
     )
       throw new RepositoryValidationError(
-        "literalPatchPaths must carry 1..16 entries",
+        "literalPatchPaths must carry 1..16 entries (0 allowed for read-only)",
       );
     if (input.timeoutMs < 1000 || input.timeoutMs > profile.timeoutMs)
       throw new RepositoryValidationError(
@@ -1700,10 +1731,12 @@ export function claimTrialGrant(
     // wire hash over ALL other fields incl executionId. No post-consumption
     // remap/hash shim: the persisted bytes are the consumed bytes.
     // Read-only claims carry no write paths; the wire still needs >=1
-    // relevant path, so frozen patch paths (or whole-repo "." when empty)
-    // scope the read without inventing new authority.
-    const wirePaths =
-      view.literalPatchPaths.length > 0 ? view.literalPatchPaths : ["."];
+    // relevant path, so a pathless read scopes to the frozen profile's
+    // allowedPaths without inventing new authority.
+    const wirePaths = trialWireRelevantPaths(
+      view.literalPatchPaths,
+      profile.allowedPaths,
+    );
     const unhashed = {
       version: 1,
       executionId: exec,
@@ -3067,6 +3100,9 @@ export function recordQuiescence(
     pid?: number | null;
     bootId?: string | null;
     reason: string;
+    /** Host-observed report persisted alongside the known outcome (the
+     * launch-failure stderr head), never used for authorization. */
+    report?: TrialWorkerReportInput | null;
   },
 ): { fenced: number } {
   const session = requireId(sessionId, "sessionId");
@@ -3139,6 +3175,10 @@ export function recordQuiescence(
         `known-quiescence:${scope}`.slice(0, 2000),
         at,
       );
+      const report = normalizeWorkerReport(opts?.report ?? null);
+      if (report !== null && report !== undefined) {
+        insertWorkerReport(db, session, exec, report, at);
+      }
     }
     if (g.status === "claimed")
       db.prepare(

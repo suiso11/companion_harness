@@ -4428,6 +4428,18 @@ proposals, grants, runner, or bridge spawn.
   with a fixed summary, so the reason is visible instead of only
   `bridge-exit:N`; the same host-observed bridge failure reasons are
   mirrored in `report.hostDiagnostics` (bounded to 4 entries × 512 bytes).
+- The wait for the capsule scope to reach `active` is floored at 60s (or
+  the frozen trial budget, whichever is smaller), regardless of
+  `observe.activeTimeoutMs`: real sealed startup covers frozen-snapshot
+  verification plus the `systemd-run` containment preflight, so a 5s
+  `activeTimeoutMs` would cancel healthy launches. The same stderr head is
+  persisted as `hostDiagnostics` for a `stopped-before-active` launch
+  failure.
+- A pathless read-only trial (no literal patch paths) sends the frozen
+  profile's `allowedPaths` as the wire `relevantPaths`, bounded to the
+  16-path wire cap (still a subset of allowed scope); it never invents
+  whole-repo `.`, which a scoped profile rejects (`exit 2`). Pathless write
+  trials are still refused at stage time.
 - A nonzero executor remains exit 10, but the journal report now carries
   bounded (2048-byte) redacted diagnostics: guest observation fields
   (`engine`, `executorKind`, `ompExitCode`, `timedOut`, tool counts,
