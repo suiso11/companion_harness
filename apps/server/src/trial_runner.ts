@@ -1679,6 +1679,7 @@ export class TrialRunner {
             checks: proof.checks,
             outputMatched: proof.outputMatched && !stdoutTruncated,
             noTimeout: proof.noTimeout,
+            report: proof.report,
           }
         : {
             taskHash: request.taskHash,
@@ -1689,6 +1690,7 @@ export class TrialRunner {
             })),
             outputMatched: false as const,
             noTimeout: false as const,
+            report: null,
           };
     const goneObservation: TrustedRuntimeObservation = {
       scopeState: "gone",
@@ -1768,6 +1770,18 @@ type ParsedBridgeResult =
       checks: { id: string; ok: boolean }[];
       outputMatched: boolean;
       noTimeout: boolean;
+      report: {
+        summary: string;
+        findings: string[];
+        unresolved: string[];
+        checks: {
+          name: string;
+          outcome: "passed" | "failed";
+          exit: number | null;
+        }[];
+        artifact: { sha256: string; entryCount: number } | null;
+        verified: boolean;
+      } | null;
     }
   | { kind: "invalid"; exitCode: number };
 
@@ -1794,6 +1808,91 @@ function parseWireCheckEntry(
     return null;
   const ok = exitCode === 0 && timedOut === false && outputMatched === true;
   return { id: item.id as string, ok };
+}
+
+/** UTF-8-safe byte truncation for untrusted guest report text. */
+function truncateReportText(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function reportStrings(
+  value: unknown,
+  maxItems: number,
+  maxBytes: number,
+): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (out.length >= maxItems) break;
+    if (typeof entry !== "string") continue;
+    out.push(truncateReportText(entry.replaceAll("\u0000", ""), maxBytes));
+  }
+  return out;
+}
+
+/**
+ * Presentation-only extraction of the wire report/evidence. Bounds match the
+ * kernel storage limits; malformed members degrade to empty/null instead of
+ * invalidating an otherwise faithful outcome. Never used for authorization.
+ */
+function parseReportSurface(record: Record<string, unknown>) {
+  const report = asRecord(record.report);
+  const evidence = asRecord(record.evidence);
+  const checks: {
+    name: string;
+    outcome: "passed" | "failed";
+    exit: number | null;
+  }[] = [];
+  const rawChecks =
+    evidence !== null && Array.isArray(evidence.checks) ? evidence.checks : [];
+  for (const entry of rawChecks) {
+    if (checks.length >= 16) break;
+    const item = asRecord(entry);
+    if (item === null || typeof item.id !== "string") continue;
+    const exitCode = item.exitCode;
+    const exit =
+      typeof exitCode === "number" && Number.isSafeInteger(exitCode)
+        ? exitCode
+        : null;
+    checks.push({
+      name: item.id,
+      outcome: exitCode === 0 && item.timedOut === false ? "passed" : "failed",
+      exit,
+    });
+  }
+  let artifact: { sha256: string; entryCount: number } | null = null;
+  const rawArtifact = evidence === null ? undefined : evidence.artifact;
+  const a = asRecord(rawArtifact);
+  if (
+    a !== null &&
+    typeof a.sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(a.sha256) &&
+    typeof a.entryCount === "number" &&
+    Number.isSafeInteger(a.entryCount) &&
+    a.entryCount >= 0 &&
+    a.entryCount <= 1_000_000
+  ) {
+    artifact = { sha256: a.sha256, entryCount: a.entryCount };
+  }
+  return {
+    summary:
+      report === null
+        ? ""
+        : truncateReportText(
+            String(report.summary ?? "").replaceAll("\u0000", ""),
+            2048,
+          ),
+    findings: report === null ? [] : reportStrings(report.findings, 16, 1024),
+    unresolved:
+      report === null ? [] : reportStrings(report.unresolved, 8, 1024),
+    checks,
+    artifact,
+    verified: record.verified === true,
+  };
 }
 
 /** Map a real bridge wire result line to the kernel result proof. */
@@ -1865,6 +1964,7 @@ function parseWireBridgeResult(parsed: unknown): ParsedBridgeResult | null {
     checks: mapped,
     outputMatched,
     noTimeout,
+    report: parseReportSurface(record),
   };
 }
 
@@ -1933,5 +2033,6 @@ function parseBridgeResult(
     checks: mapped,
     outputMatched,
     noTimeout,
+    report: null,
   };
 }

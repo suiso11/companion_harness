@@ -3560,6 +3560,14 @@ function evidenceForTurn(turn: Turn): {
         {#each card.detailLines as line, index (index)}
           <p data-proposal-detail="true">{line}</p>
         {/each}
+        {#if card.summaryLine !== ""}
+          <p data-proposal-summary="true">{card.summaryLine}</p>
+        {/if}
+        {#if card.detailHref !== ""}
+          <a data-proposal-detail-link="true" href={card.detailHref}>
+            試行の詳細を見る
+          </a>
+        {/if}
         {#if card.source === "conversation"}
           <button
             type="button"

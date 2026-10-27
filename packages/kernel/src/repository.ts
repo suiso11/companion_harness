@@ -380,11 +380,14 @@ import {
   readTrialProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
+  readWorkerReport,
+  readWorkerReportByProposal,
   reconcileTrialExpiry,
   recordQuiescence,
   recordWorkerResult,
   registerWorkerBoot,
   stageTrialProposal,
+  type TrialWorkerReportInput,
   type TrustedObservation,
   isNeverLaunchedRevokedTrialGrant as trialGrantNeverLaunched,
 } from "./trial_authority.js";
@@ -7593,6 +7596,17 @@ export function createKernelRepository(
     return readWorkerOutcomeByProposal(db, sessionId, proposalId);
   }
 
+  function readTrialWorkerReport(sessionId: string, executionId: string) {
+    return readWorkerReport(db, sessionId, executionId);
+  }
+
+  function readTrialWorkerReportByProposal(
+    sessionId: string,
+    proposalId: string,
+  ) {
+    return readWorkerReportByProposal(db, sessionId, proposalId);
+  }
+
   function recordTrialWorkerResult(
     sessionId: string,
     executionId: string,
@@ -7606,6 +7620,7 @@ export function createKernelRepository(
         outputMatched: boolean;
         noTimeout: boolean;
       };
+      report?: TrialWorkerReportInput | null;
     },
     now?: number,
   ) {
@@ -8054,6 +8069,8 @@ export function createKernelRepository(
     readTrialLaunchPermit,
     readTrialWorkerOutcome,
     readTrialWorkerOutcomeByProposal,
+    readTrialWorkerReport,
+    readTrialWorkerReportByProposal,
     recordTrialWorkerResult,
     recordTrialQuiescence,
     clearTrialAliasFence,

@@ -58,6 +58,14 @@ export interface TrialProposalItem {
     readonly sourceRevision: string;
   } | null;
   readonly possibleExternalDataConsent?: boolean;
+  /** Fixed worker-outcome summary from the list API (terminal rows). */
+  readonly outcome?: {
+    readonly status?: unknown;
+    readonly authorized?: unknown;
+    readonly summary?: unknown;
+  } | null;
+  /** Bounded sealed-trial report summary (terminal rows). */
+  readonly reportSummary?: string | null;
 }
 
 export interface ChatProposalCardView {
@@ -87,6 +95,10 @@ export interface ChatProposalCardView {
   /** True only when the staged parent title was resolved; `canAccept` for a
    * task card is false while this is false (fail closed). */
   readonly parentResolved: boolean;
+  /** One-line terminal summary (empty for still-actionable cards). */
+  readonly summaryLine: string;
+  /** Link to the full /trials detail surface (empty for staged cards). */
+  readonly detailHref: string;
 }
 
 export const CONVERSATION_PROPOSAL_ACTIONS = {
@@ -198,6 +210,8 @@ export function conversationProposalCards(
       parentLine: parent.line,
       parentPurposeId: isTask ? stagedParentId(item) : null,
       parentResolved: parent.resolved,
+      summaryLine: "",
+      detailHref: "",
     });
   }
   return cards;
@@ -213,7 +227,49 @@ export function trialProposalCards(
 ): ChatProposalCardView[] {
   const cards: ChatProposalCardView[] = [];
   for (const item of items) {
-    if (item.status !== "staged") continue;
+    if (item.status !== "staged") {
+      // Terminal trials stay visible as a one-line card that links to the
+      // full /trials detail (report + host checks + guest report). No action
+      // is offered: only the detail surface carries the bounded report.
+      if (
+        item.status !== "granted" &&
+        item.status !== "expired" &&
+        item.status !== "invalidated"
+      ) {
+        continue;
+      }
+      const reportSummary =
+        typeof item.reportSummary === "string" ? item.reportSummary : "";
+      const outcomeSummary =
+        typeof item.outcome?.summary === "string" ? item.outcome.summary : "";
+      const summaryLine =
+        reportSummary !== ""
+          ? reportSummary
+          : outcomeSummary !== ""
+            ? outcomeSummary
+            : `結果: ${item.status}`;
+      cards.push({
+        key: `trial:${item.id}`,
+        source: "trial",
+        proposalId: item.id,
+        kindLabel: "試行",
+        heading: clean(item.objective),
+        quote: "",
+        status: item.status,
+        version: 0,
+        canAccept: false,
+        canReject: false,
+        canApprove: false,
+        canExpire: false,
+        detailLines: [],
+        parentLine: "",
+        parentPurposeId: null,
+        parentResolved: true,
+        summaryLine,
+        detailHref: "/trials",
+      });
+      continue;
+    }
     const input = trialProposalInput(item);
     const model = input === null ? null : trialProposalModel(input, true);
     cards.push({
@@ -235,6 +291,8 @@ export function trialProposalCards(
       parentLine: "",
       parentPurposeId: null,
       parentResolved: true,
+      summaryLine: "",
+      detailHref: "",
     });
   }
   return cards;

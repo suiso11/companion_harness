@@ -792,7 +792,12 @@ export {
   isCanonicalIsoInstant,
   localTimeZone,
 } from "./temporal_format.js";
-export type { TrustedObservation } from "./trial_authority.js";
+export type {
+  TrialWorkerCheckView,
+  TrialWorkerReportInput,
+  TrialWorkerReportView,
+  TrustedObservation,
+} from "./trial_authority.js";
 export {
   activeAliasFence,
   approveTrialProposal,
@@ -808,6 +813,7 @@ export {
   invalidateTrialsForScope,
   issueLaunchPermit,
   listTrialProposals,
+  normalizeWorkerReport,
   parseConstraintRule,
   pathIntersectsDenied,
   readLaunchPermit,
@@ -815,12 +821,19 @@ export {
   readTrialProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
+  readWorkerReport,
+  readWorkerReportByProposal,
   reconcileTrialExpiry,
   recordQuiescence,
   recordWorkerResult,
   registerWorkerBoot,
   revokeAllClaimedForStop,
   stageTrialProposal,
+  TRIAL_REPORT_FINDING_MAX_BYTES,
+  TRIAL_REPORT_MAX_CHECKS,
+  TRIAL_REPORT_MAX_FINDINGS,
+  TRIAL_REPORT_MAX_UNRESOLVED,
+  TRIAL_REPORT_SUMMARY_MAX_BYTES,
   wireModeForReadOnly,
 } from "./trial_authority.js";
 export type { TrialProposalToolsOptions } from "./trial_proposal_tools.js";
