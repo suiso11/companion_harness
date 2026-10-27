@@ -20,6 +20,7 @@ import {
   type ChatProposalCardView,
   conversationProposalCards,
   createProposalSyncGuard,
+  type ParentPurposeSnapshot,
   proposalCardErrorText,
   trialProposalCards,
 } from "./lib/proposal_cards.js";
@@ -2249,6 +2250,67 @@ function isTrialProposalItem(
 }
 
 /**
+ * Readonly parent-purpose snapshots for the staged `task` proposals about to
+ * be rendered, from the same endpoint the Proposals panel uses. A failed or
+ * malformed read stores null, which leaves 採用する disabled (fail closed).
+ */
+async function loadParentSnapshots(
+  sid: string,
+  items: readonly Parameters<typeof conversationProposalCards>[0][number][],
+  runIds: ReadonlySet<string>,
+): Promise<Map<string, ParentPurposeSnapshot | null>> {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (item.status !== "pending" || item.target !== "task") continue;
+    if (typeof item.sourceRunId !== "string") continue;
+    if (!runIds.has(item.sourceRunId)) continue;
+    if (
+      typeof item.parentPurposeId === "string" &&
+      item.parentPurposeId !== ""
+    ) {
+      ids.add(item.parentPurposeId);
+    }
+  }
+  const parents = new Map<string, ParentPurposeSnapshot | null>();
+  await Promise.all(
+    [...ids].map(async (parentId) => {
+      let snapshot: ParentPurposeSnapshot | null = null;
+      try {
+        const res = await fetchJson(
+          `/api/sessions/${encodeURIComponent(sid)}/purposes/${encodeURIComponent(parentId)}`,
+        );
+        if (
+          res.status === 200 &&
+          typeof res.body === "object" &&
+          res.body !== null
+        ) {
+          const body = res.body as {
+            statement?: unknown;
+            version?: unknown;
+            status?: unknown;
+          };
+          if (
+            typeof body.statement === "string" &&
+            typeof body.version === "number" &&
+            typeof body.status === "string"
+          ) {
+            snapshot = {
+              statement: body.statement,
+              version: body.version,
+              status: body.status,
+            };
+          }
+        }
+      } catch {
+        snapshot = null;
+      }
+      parents.set(parentId, snapshot);
+    }),
+  );
+  return parents;
+}
+
+/**
  * Read-only refresh of the chat proposal cards from the existing session
  * list endpoints. Called after run completion and after every card button;
  * a missing/disabled endpoint simply yields no cards.
@@ -2282,8 +2344,10 @@ async function syncProposals(): Promise<void> {
     trials.status === 200
       ? proposalListItems(trials.body).filter(isTrialProposalItem)
       : [];
+  const parents = await loadParentSnapshots(sid, conversationItems, runIds);
+  if (sessionId !== sid || !proposalSync.isCurrent(seq)) return;
   proposalCards = [
-    ...conversationProposalCards(conversationItems, runIds),
+    ...conversationProposalCards(conversationItems, runIds, parents),
     ...trialProposalCards(trialItems),
   ];
 }
@@ -3475,6 +3539,9 @@ function evidenceForTurn(turn: Turn): {
         {/if}
         {#if card.quote !== ""}
           <p data-proposal-quote="true">引用: {card.quote}</p>
+        {/if}
+        {#if card.parentLine !== ""}
+          <p data-proposal-parent="true">{card.parentLine}</p>
         {/if}
         {#each card.detailLines as line, index (index)}
           <p data-proposal-detail="true">{line}</p>

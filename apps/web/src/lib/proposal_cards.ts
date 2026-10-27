@@ -20,6 +20,21 @@ export interface ConversationProposalItem {
   readonly sourceQuote?: string | null;
   readonly interpretation?: string | null;
   readonly sourceRunId?: string | null;
+  /** Staged parent purpose for a `task` target (never auto-picked). */
+  readonly parentPurposeId?: string | null;
+  /** Frozen parent version the task draft pinned at staging time. */
+  readonly expectedParentVersion?: number | null;
+}
+
+/**
+ * Readonly snapshot of the staged parent purpose, fetched from the same
+ * purpose endpoint the Proposals panel uses. Only the fields needed to
+ * label the card and flag version/status drift are kept.
+ */
+export interface ParentPurposeSnapshot {
+  readonly statement: string;
+  readonly version: number;
+  readonly status: string;
 }
 
 /** Minimal structural shape of one trial proposal list item. */
@@ -65,6 +80,13 @@ export interface ChatProposalCardView {
   /** Frozen trial permission lines shown before approval (empty for
    * conversation proposals / incomplete snapshots). */
   readonly detailLines: readonly string[];
+  /** Parent purpose line for a task card (empty for purpose/trial cards). */
+  readonly parentLine: string;
+  /** Staged parent purpose id (null unless the target is a task). */
+  readonly parentPurposeId: string | null;
+  /** True only when the staged parent title was resolved; `canAccept` for a
+   * task card is false while this is false (fail closed). */
+  readonly parentResolved: boolean;
 }
 
 export const CONVERSATION_PROPOSAL_ACTIONS = {
@@ -87,21 +109,78 @@ function conversationKindLabel(item: ConversationProposalItem): string {
   return item.target === "task" ? "タスク" : "目的";
 }
 
+/** Exact staged parent id, or null when absent/malformed. */
+function stagedParentId(item: ConversationProposalItem): string | null {
+  return typeof item.parentPurposeId === "string" &&
+    item.parentPurposeId.length > 0
+    ? item.parentPurposeId
+    : null;
+}
+
+/**
+ * Parent line for a `task` card, mirroring the Proposals panel wording:
+ * the STAGED pinned version is shown, never the fetched current version as
+ * the referenced one, and current-version/inactive drift is flagged.
+ * `resolved` is false until a well-formed snapshot for the staged parent
+ * is available, so the accept button stays disabled (fail closed).
+ */
+export function taskParentLine(
+  item: ConversationProposalItem,
+  parents: ReadonlyMap<string, ParentPurposeSnapshot | null>,
+): { readonly line: string; readonly resolved: boolean } {
+  const parentId = stagedParentId(item);
+  if (parentId === null) {
+    return { line: "親の目的：なし（異常）", resolved: false };
+  }
+  const expected = item.expectedParentVersion;
+  if (typeof expected !== "number") {
+    return { line: "親の目的の版を確認できません", resolved: false };
+  }
+  if (!parents.has(parentId)) {
+    return { line: "親の目的を確認しています…", resolved: false };
+  }
+  const snapshot = parents.get(parentId);
+  if (snapshot === undefined || snapshot === null) {
+    return {
+      line: "親の目的を確認できません（再読み込みしてください）",
+      resolved: false,
+    };
+  }
+  let line = `親の目的（採用時に再確認・変更不可）: ${snapshot.statement}（提案時の版 ${String(expected)}／現在 ${String(snapshot.version)}）`;
+  if (snapshot.version !== expected) {
+    line += "⚠ 現在の版と一致しません（採用時に競合します）";
+  }
+  if (snapshot.status !== "active") {
+    line += `⚠ 親は現在${snapshot.status}です`;
+  }
+  return { line, resolved: true };
+}
+
 /**
  * Pending conversation proposals whose source run belongs to the current
  * session projection. Proposals from runs outside the loaded/active run set
  * are deliberately hidden: they belong to another visit of this session and
  * stay available on the Proposals page.
+ *
+ * `parents` maps a staged parent purpose id to its readonly snapshot (null
+ * when the lookup failed). A `task` card without a resolved parent keeps
+ * 採用する disabled: the user must be able to see which purpose the task
+ * would be attached to before accepting.
  */
 export function conversationProposalCards(
   items: readonly ConversationProposalItem[],
   runIds: ReadonlySet<string>,
+  parents: ReadonlyMap<string, ParentPurposeSnapshot | null> = new Map(),
 ): ChatProposalCardView[] {
   const cards: ChatProposalCardView[] = [];
   for (const item of items) {
     if (item.status !== "pending") continue;
     if (typeof item.sourceRunId !== "string") continue;
     if (!runIds.has(item.sourceRunId)) continue;
+    const isTask = item.target === "task";
+    const parent = isTask
+      ? taskParentLine(item, parents)
+      : { line: "", resolved: true };
     cards.push({
       key: `conversation:${item.id}`,
       source: "conversation",
@@ -111,11 +190,14 @@ export function conversationProposalCards(
       quote: clean(item.sourceQuote),
       status: item.status,
       version: item.version,
-      canAccept: item.status === "pending",
+      canAccept: item.status === "pending" && parent.resolved,
       canReject: item.status === "pending",
       canApprove: false,
       canExpire: false,
       detailLines: [],
+      parentLine: parent.line,
+      parentPurposeId: isTask ? stagedParentId(item) : null,
+      parentResolved: parent.resolved,
     });
   }
   return cards;
@@ -150,6 +232,9 @@ export function trialProposalCards(
       canApprove: model?.decisionVisible ?? false,
       canExpire: true,
       detailLines: model?.detailLines ?? [],
+      parentLine: "",
+      parentPurposeId: null,
+      parentResolved: true,
     });
   }
   return cards;

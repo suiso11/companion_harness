@@ -57,6 +57,96 @@ describe("conversationProposalCards", () => {
     expect(cards).toHaveLength(0);
   });
 
+  it("shows the staged parent purpose before a task proposal is accepted", () => {
+    const cards = conversationProposalCards(
+      [
+        {
+          ...base,
+          id: "p1",
+          target: "task",
+          parentPurposeId: "parent-1",
+          expectedParentVersion: 4,
+        },
+      ],
+      new Set(["run-1"]),
+      new Map([
+        [
+          "parent-1",
+          { statement: "四半期の学習計画", version: 4, status: "active" },
+        ],
+      ]),
+    );
+    expect(cards[0]?.canAccept).toBe(true);
+    expect(cards[0]?.parentResolved).toBe(true);
+    expect(cards[0]?.parentPurposeId).toBe("parent-1");
+    expect(cards[0]?.parentLine).toContain(
+      "親の目的（採用時に再確認・変更不可）: 四半期の学習計画",
+    );
+    expect(cards[0]?.parentLine).toContain("提案時の版 4／現在 4");
+  });
+
+  it("flags parent version and status drift like the Proposals panel", () => {
+    const cards = conversationProposalCards(
+      [
+        {
+          ...base,
+          id: "p1",
+          target: "task",
+          parentPurposeId: "parent-1",
+          expectedParentVersion: 2,
+        },
+      ],
+      new Set(["run-1"]),
+      new Map([
+        ["parent-1", { statement: "学習計画", version: 5, status: "revoked" }],
+      ]),
+    );
+    expect(cards[0]?.parentLine).toContain("現在の版と一致しません");
+    expect(cards[0]?.parentLine).toContain("親は現在revokedです");
+  });
+
+  it("disables accept while the task parent is unresolved", () => {
+    const task = {
+      ...base,
+      id: "p1",
+      target: "task",
+      parentPurposeId: "parent-1",
+      expectedParentVersion: 1,
+    };
+    // Not fetched yet.
+    const pending = conversationProposalCards([task], new Set(["run-1"]));
+    expect(pending[0]?.canAccept).toBe(false);
+    expect(pending[0]?.parentResolved).toBe(false);
+    expect(pending[0]?.parentLine).toContain("確認しています");
+    // Lookup failed.
+    const failed = conversationProposalCards(
+      [task],
+      new Set(["run-1"]),
+      new Map([["parent-1", null]]),
+    );
+    expect(failed[0]?.canAccept).toBe(false);
+    expect(failed[0]?.parentLine).toContain("確認できません");
+    // No staged parent id at all (anomalous).
+    const missing = conversationProposalCards(
+      [{ ...base, id: "p1", target: "task" }],
+      new Set(["run-1"]),
+    );
+    expect(missing[0]?.canAccept).toBe(false);
+    expect(missing[0]?.parentLine).toBe("親の目的：なし（異常）");
+    // The same unresolved state only blocks accept, not reject.
+    expect(missing[0]?.canReject).toBe(true);
+  });
+
+  it("does not label purpose proposals with a parent line", () => {
+    const cards = conversationProposalCards(
+      [{ ...base, id: "p1" }],
+      new Set(["run-1"]),
+    );
+    expect(cards[0]?.parentLine).toBe("");
+    expect(cards[0]?.parentPurposeId).toBeNull();
+    expect(cards[0]?.parentResolved).toBe(true);
+  });
+
   it("hides proposals without a source run id", () => {
     const cards = conversationProposalCards(
       [{ ...base, id: "p1", sourceRunId: null }],
