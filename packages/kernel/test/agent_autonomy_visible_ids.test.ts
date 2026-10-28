@@ -152,6 +152,33 @@ describe("autonomy handles visible to the model", () => {
     );
   });
 
+  it("keeps the filtered-list feedback fields through the sanitizer", () => {
+    const out = sanitize("purpose.list", {
+      items: [],
+      hasMore: false,
+      appliedFilters: { scope: "personal", status: "active" },
+      unfilteredTotal: 1,
+      availableScopes: ["default", "health"],
+    });
+    expect(out).toEqual({
+      items: [],
+      hasMore: false,
+      appliedFilters: { scope: "personal", status: "active" },
+      unfilteredTotal: 1,
+      availableScopes: ["default", "health"],
+    });
+    const taskOut = sanitize("task.list", {
+      items: [],
+      hasMore: false,
+      appliedFilters: { scope: "personal", kind: "task" },
+      unfilteredTotal: 2,
+      availableScopes: ["default"],
+    });
+    expect(taskOut.unfilteredTotal).toBe(2);
+    expect(taskOut.availableScopes).toEqual(["default"]);
+    expect(taskOut.appliedFilters).toEqual({ scope: "personal", kind: "task" });
+  });
+
   it("round-trips purpose.list -> purpose.open through real agent feedback", async () => {
     const setup = await agentSetup();
     try {
