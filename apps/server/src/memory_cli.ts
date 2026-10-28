@@ -74,6 +74,8 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "topic.pending",
   "record.search",
   "record.get",
+  // Read-only bounded listing for the memory content stats panel.
+  "record.list",
   "record.correct",
   "record.retire",
   "record.reactivate",

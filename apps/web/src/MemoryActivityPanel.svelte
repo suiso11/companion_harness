@@ -18,10 +18,14 @@ import {
   type LearningProposal,
   latestLabel,
   type MemoryMaintenanceOp,
+  type MemoryStats,
+  memoryKindBars,
+  memoryStatusCards,
   opLabel,
   parseActivityList,
   parseActivitySummary,
   parseLearningProposals,
+  parseMemoryStats,
   proposalKindLabel,
   resultLabel,
   statusLabel,
@@ -33,14 +37,19 @@ const REFRESH_MS = 30_000;
 let summary = $state<ActivitySummary | null>(null);
 let runs = $state<ActivityRun[]>([]);
 let proposals = $state<LearningProposal[]>([]);
+let stats = $state<MemoryStats | null>(null);
 let status = $state("読み込み中");
 let proposalsStatus = $state("読み込み中");
+let statsStatus = $state("");
 let loading = $state(false);
 let proposalsDisabled = $state(false);
+let statsDisabled = $state(false);
 let lastLoadedAt = $state<number | null>(null);
 let seq = 0;
 
 let cards = $derived(summary === null ? [] : summaryCards(summary));
+let statusCards = $derived(stats === null ? [] : memoryStatusCards(stats));
+let kindBars = $derived(stats === null ? [] : memoryKindBars(stats));
 let daily = $derived(
   summary === null ? [] : dailyActivity(runs, summary.generatedAt),
 );
@@ -92,6 +101,28 @@ async function loadActivity(): Promise<void> {
   }
 }
 
+async function loadStats(): Promise<void> {
+  try {
+    const res = await fetchJson("/api/memory/stats");
+    if (res.status === 404) {
+      statsDisabled = true;
+      stats = null;
+      statsStatus = "";
+      return;
+    }
+    const parsed = res.status === 200 ? parseMemoryStats(res.body) : null;
+    if (parsed === null) {
+      statsStatus = "error: 記憶の統計を取得できませんでした";
+      return;
+    }
+    statsDisabled = false;
+    stats = parsed;
+    statsStatus = "";
+  } catch {
+    statsStatus = "error: 記憶の統計を取得できませんでした";
+  }
+}
+
 async function loadProposals(): Promise<void> {
   try {
     const res = await fetchJson("/api/learning/proposals?limit=50");
@@ -122,11 +153,13 @@ function refresh(): void {
     return;
   }
   void loadActivity();
+  void loadStats();
   void loadProposals();
 }
 
 onMount(() => {
   void loadActivity();
+  void loadStats();
   void loadProposals();
   const timer = window.setInterval(refresh, REFRESH_MS);
   const onVisibility = (): void => {
@@ -154,6 +187,46 @@ onMount(() => {
   </p>
   {#if status.length > 0}
     <p class="activity-notice" role="status">{status}</p>
+  {/if}
+
+  {#if !statsDisabled}
+    <h4>記憶の内容</h4>
+    {#if statsStatus.length > 0}
+      <p class="activity-notice" role="status">{statsStatus}</p>
+    {/if}
+    {#if stats !== null}
+      <div class="memory-stats-cards">
+        {#each statusCards as card (card.key)}
+          <div class="memory-stats-card">
+            <span class="memory-stats-card-label">{card.label}</span>
+            <strong class="memory-stats-card-value">{card.value}</strong>
+          </div>
+        {/each}
+      </div>
+      <div
+        class="memory-stats-chart"
+        role="img"
+        aria-label="有効な記憶の種類別件数"
+      >
+        {#each kindBars as bar (bar.key)}
+          <div class="memory-stats-row">
+            <span class="memory-stats-label">{bar.label}</span>
+            <span class="memory-stats-track">
+              <span
+                class="memory-stats-fill"
+                style={`width: ${Math.max(bar.percent, bar.value > 0 ? 4 : 0)}%`}
+              ></span>
+            </span>
+            <span class="memory-stats-value">{bar.value}</span>
+          </div>
+        {/each}
+      </div>
+      <p class="activity-updated">
+        集計 {formatActivityTime(stats.computedAt)}{stats.truncated
+          ? "・上限まで集計（全件ではない場合があります）"
+          : ""}
+      </p>
+    {/if}
   {/if}
 
   {#if summary !== null}
@@ -322,6 +395,62 @@ onMount(() => {
     gap: 0.35rem 0.9rem;
     font-size: 0.75rem;
     color: var(--muted, #aaa);
+  }
+  .memory-stats-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+  }
+  .memory-stats-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    border: 1px solid var(--border, #333);
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.6rem;
+  }
+  .memory-stats-card-label {
+    font-size: 0.75rem;
+    color: var(--muted, #aaa);
+  }
+  .memory-stats-card-value {
+    font-size: 1.2rem;
+    line-height: 1.1;
+  }
+  .memory-stats-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
+  .memory-stats-row {
+    display: grid;
+    grid-template-columns: 6.5rem 1fr 2.5rem;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.8rem;
+  }
+  .memory-stats-label {
+    color: var(--muted, #aaa);
+    white-space: nowrap;
+  }
+  .memory-stats-track {
+    display: block;
+    height: 0.6rem;
+    border-radius: 999px;
+    background: var(--border, #333);
+    overflow: hidden;
+  }
+  .memory-stats-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent, #7aa2f7);
+  }
+  .memory-stats-value {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .activity-table-wrap {
     overflow-x: auto;

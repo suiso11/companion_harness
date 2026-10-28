@@ -4,10 +4,15 @@ import { describe, expect, it } from "vitest";
 import {
   dailyActivity,
   formatRunCounts,
+  MEMORY_KIND_LABELS,
   MEMORY_MAINTENANCE_OPS,
+  MEMORY_STATUS_LABELS,
+  memoryKindBars,
+  memoryStatusCards,
   parseActivityList,
   parseActivitySummary,
   parseLearningProposals,
+  parseMemoryStats,
   resultLabel,
   summaryCards,
 } from "../src/lib/memory_activity.js";
@@ -212,5 +217,65 @@ describe("parseLearningProposals", () => {
         items: [{ ...body.items[0], kind: "free_text_kind" }],
       }),
     ).toBeNull();
+  });
+});
+
+describe("parseMemoryStats + memory stats view", () => {
+  const statsBody = {
+    byKind: {
+      user_fact: 4,
+      model_inference: 2,
+      summary: 1,
+      correction: 1,
+    },
+    byStatus: {
+      active: 8,
+      retired: 3,
+      superseded: 2,
+      archived: 1,
+    },
+    computedAt: T0,
+    truncated: false,
+  };
+
+  it("strictly parses numeric counts and fixed status keys", () => {
+    const stats = parseMemoryStats(statsBody);
+    expect(stats).not.toBeNull();
+    expect(memoryStatusCards(stats as NonNullable<typeof stats>)).toEqual([
+      { key: "active", label: "有効", value: 8 },
+      { key: "retired", label: "退役", value: 3 },
+      { key: "superseded", label: "置換済み", value: 2 },
+      { key: "archived", label: "保管", value: 1 },
+    ]);
+    const bars = memoryKindBars(stats as NonNullable<typeof stats>);
+    expect(bars.map((bar) => bar.label)).toEqual([
+      MEMORY_KIND_LABELS.user_fact,
+      MEMORY_KIND_LABELS.model_inference,
+      MEMORY_KIND_LABELS.summary,
+      MEMORY_KIND_LABELS.correction,
+    ]);
+    expect(bars[0]).toMatchObject({ value: 4, percent: 100 });
+    expect(bars[3]).toMatchObject({ value: 1, percent: 25 });
+    expect(MEMORY_STATUS_LABELS.active).toBe("有効");
+  });
+
+  it("rejects missing/negative/float counts and non-boolean truncation", () => {
+    expect(
+      parseMemoryStats({ ...statsBody, byKind: { user_fact: 1 } }),
+    ).toBeNull();
+    expect(
+      parseMemoryStats({
+        ...statsBody,
+        byStatus: { ...statsBody.byStatus, active: -1 },
+      }),
+    ).toBeNull();
+    expect(
+      parseMemoryStats({
+        ...statsBody,
+        byKind: { ...statsBody.byKind, summary: 1.5 },
+      }),
+    ).toBeNull();
+    expect(parseMemoryStats({ ...statsBody, truncated: "no" })).toBeNull();
+    expect(parseMemoryStats(null)).toBeNull();
   });
 });

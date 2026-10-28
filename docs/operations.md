@@ -424,6 +424,24 @@ connector instance owns **all** configured roots.
   kind and states that only `[user_confirmed_feedback]` reflects what the
   user said; all other kinds are unverified model observations. The
   pending/approval flow is unchanged.
+- Memory content statistics (2026-10-28): `GET /api/memory/stats` (browser
+  read-only, same session auth as other API routes, no query parameters)
+  returns fixed numeric `{ byKind, byStatus, computedAt, truncated }`.
+  `byKind` covers ACTIVE records only (`user_fact / model_inference /
+  summary / correction`); `byStatus` covers `active / retired / superseded /
+  archived`. Remind has no aggregate stats op, so the service walks bounded
+  `record.list` pages filtered by status, newest -> oldest with the
+  exclusive `until` timestamp, and caps the walk (300 active rows, 100 rows
+  for each other status). Reaching a cap sets `truncated` (counts are lower
+  bounds); the UI labels this `上限まで集計`. The page size starts at 100 and
+  falls back through 25/10/5/1 when remind answers `LIMIT_EXCEEDED` for a
+  lower configured `limits.limitMax`. The snapshot is cached server-side
+  for five minutes with single-flight, so the panel's 30s auto-refresh does
+  not spawn a CLI child per view. Only counts cross the API boundary: the
+  `record.list` snippets are discarded server-side and never logged.
+  Importance distribution is NOT emitted: `activation.preview` only exposes
+  a retirement-score-ordered sample plus a scope-wide status summary, so a
+  faithful score histogram would need a remind aggregate op.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted

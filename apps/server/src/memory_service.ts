@@ -205,6 +205,21 @@ export const MEMORY_GRAPH_PAGE_LIMIT_DEFAULT = 50;
 /** Hard stop for a misbehaving remind cursor loop (fixed failure). */
 const MEMORY_GRAPH_PAGE_MAX = 100;
 export const MEMORY_GRAPH_LABEL_MAX_CP = 512;
+/**
+ * Memory-content statistics (read-only panel). There is no aggregate stats
+ * op in remind, so counts come from bounded `record.list` pages filtered by
+ * status. `record.list` has no cursor (only `until`), so each status walks
+ * newest -> oldest with a fixed row cap; reaching the cap sets `truncated`.
+ * The result is cached server-side for five minutes with single-flight so
+ * auto-refreshing views do not spawn a CLI child per request.
+ */
+export const MEMORY_STATS_CACHE_TTL_MS = 300_000;
+export const MEMORY_STATS_ACTIVE_ROW_CAP = 300;
+export const MEMORY_STATS_STATUS_ROW_CAP = 100;
+/** First requested page size; remind may answer LIMIT_EXCEEDED. */
+const MEMORY_STATS_PAGE_LIMIT_CANDIDATES: readonly number[] = [
+  100, 25, 10, 5, 1,
+];
 /** Closed extraction kinds (remind RECORD_KINDS subset we ever write). */
 const EXTRACT_KINDS: ReadonlySet<string> = new Set([
   "user_fact",
@@ -373,6 +388,35 @@ export interface MemoryServiceOptions {
   readonly background?: BackgroundResourceGate | null;
 }
 
+/** Closed kind counts for ACTIVE records (the only kinds extracted/written). */
+export interface MemoryStatsByKind {
+  readonly user_fact: number;
+  readonly model_inference: number;
+  readonly summary: number;
+  readonly correction: number;
+}
+
+/** Closed status counts (remind record statuses). */
+export interface MemoryStatsByStatus {
+  readonly active: number;
+  readonly retired: number;
+  readonly superseded: number;
+  readonly archived: number;
+}
+
+/**
+ * Aggregated memory-content statistics. Numbers only: no snippets, ids, or
+ * scopes ever leave the service. `truncated` is true when any status row cap
+ * was reached, so `byKind` is a lower bound for active records.
+ */
+export interface MemoryStats {
+  readonly byKind: MemoryStatsByKind;
+  readonly byStatus: MemoryStatsByStatus;
+  /** Epoch ms when this snapshot was collected. */
+  readonly computedAt: number;
+  readonly truncated: boolean;
+}
+
 export interface MemoryService {
   /** Pre-answer recall hook for the agent (fail-open: never throws). */
   readonly recallHook: {
@@ -411,6 +455,12 @@ export interface MemoryService {
     limit?: number;
     signal?: AbortSignal;
   }): Promise<MemorySearchResult>;
+  /**
+   * Read-only content statistics for the configured scope: active counts by
+   * kind, counts by status, cached for five minutes (single-flight). Never
+   * returns record bodies, ids, or scopes.
+   */
+  getMemoryStats(): Promise<MemoryStats>;
   /**
    * Confirmation detail for one bound handle: the immutable cited snapshot
    * (what the user/model saw) kept DISTINCT from the CURRENT
@@ -1229,6 +1279,12 @@ export function createMemoryService(
   let idleMaintenanceInFlight: Promise<void> | null = null;
   /** In-flight explicit staging count: stop() waits for zero (no post-stop writes). */
   let pendingStagings = 0;
+  /** Five-minute stats snapshot and single-flight collection promise. */
+  let statsCache: { readonly at: number; readonly value: MemoryStats } | null =
+    null;
+  let statsPending: Promise<MemoryStats> | null = null;
+  /** Remind's accepted `record.list` page size (downgraded on rejection). */
+  let statsPageLimitIndex = 0;
 
   function throwIfStagingCancelled(signal?: AbortSignal): void {
     if (isAborted(signal)) {
@@ -4017,6 +4073,195 @@ export function createMemoryService(
     };
   }
 
+  /** One validated `record.list` row: metadata only (snippet is discarded). */
+  interface StatsListRow {
+    readonly kind: string;
+    readonly status: string;
+    readonly createdAt: string;
+  }
+
+  function parseStatsRows(
+    data: Record<string, unknown> | null,
+  ): StatsListRow[] | null {
+    if (!isRecord(data) || !Array.isArray(data.items)) return null;
+    const rows: StatsListRow[] = [];
+    for (const raw of data.items) {
+      if (
+        !isRecord(raw) ||
+        typeof raw.kind !== "string" ||
+        typeof raw.status !== "string" ||
+        typeof raw.createdAt !== "string" ||
+        !Number.isFinite(Date.parse(raw.createdAt))
+      ) {
+        return null;
+      }
+      rows.push({
+        kind: raw.kind,
+        status: raw.status,
+        createdAt: raw.createdAt,
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * One newest-first page of `record.list`. remind has no cursor, so the
+   * caller pages backward with `until` (exclusive). A rejected page limit
+   * (config `limits.limitMax`) is retried once at each smaller candidate;
+   * the accepted size is reused for the rest of this process.
+   */
+  async function listStatsPage(
+    status: string,
+    until: string | null,
+  ): Promise<{ rows: StatsListRow[]; limit: number }> {
+    for (;;) {
+      const limit =
+        MEMORY_STATS_PAGE_LIMIT_CANDIDATES[statsPageLimitIndex] ?? 1;
+      let envelope: MemoryCliEnvelope;
+      try {
+        envelope = await cliCall(
+          address,
+          "record.list",
+          {
+            scope,
+            status,
+            limit,
+            ...(until !== null ? { until } : {}),
+          },
+          undefined,
+        );
+      } catch {
+        throw new MemoryManageError("service_unavailable");
+      }
+      if (envelope.ok) {
+        const rows = parseStatsRows(envelope.data);
+        if (rows === null) {
+          throw new MemoryManageError("service_unavailable");
+        }
+        return { rows, limit };
+      }
+      if (
+        envelope.code === "LIMIT_EXCEEDED" &&
+        statsPageLimitIndex < MEMORY_STATS_PAGE_LIMIT_CANDIDATES.length - 1
+      ) {
+        statsPageLimitIndex += 1;
+        continue;
+      }
+      throw new MemoryManageError("service_unavailable");
+    }
+  }
+
+  /** Walk one status newest -> oldest, stopping at the fixed row cap. */
+  async function walkStatsStatus(
+    status: string,
+    rowCap: number,
+  ): Promise<{ rows: StatsListRow[]; truncated: boolean }> {
+    const rows: StatsListRow[] = [];
+    let until: string | null = null;
+    for (;;) {
+      throwIfStagingCancelled();
+      const page = await listStatsPage(status, until);
+      rows.push(...page.rows);
+      if (page.rows.length < page.limit) {
+        return { rows, truncated: false };
+      }
+      if (rows.length >= rowCap) {
+        return { rows, truncated: true };
+      }
+      const oldest = page.rows[page.rows.length - 1];
+      if (oldest === undefined) {
+        return { rows, truncated: false };
+      }
+      until = new Date(Date.parse(oldest.createdAt) - 1).toISOString();
+    }
+  }
+
+  async function collectMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    const computedAt = now();
+    // Statuses are independent reads; each is bounded by its row cap.
+    const active = await walkStatsStatus("active", MEMORY_STATS_ACTIVE_ROW_CAP);
+    const retired = await walkStatsStatus(
+      "retired",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    const superseded = await walkStatsStatus(
+      "superseded",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    const archived = await walkStatsStatus(
+      "archived",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    throwIfStagingCancelled();
+    const byKind = {
+      user_fact: 0,
+      model_inference: 0,
+      summary: 0,
+      correction: 0,
+    };
+    for (const row of active.rows) {
+      if (row.status !== "active") continue;
+      if (
+        row.kind === "user_fact" ||
+        row.kind === "model_inference" ||
+        row.kind === "summary" ||
+        row.kind === "correction"
+      ) {
+        byKind[row.kind] += 1;
+      }
+    }
+    return {
+      byKind,
+      byStatus: {
+        active: active.rows.length,
+        retired: retired.rows.length,
+        superseded: superseded.rows.length,
+        archived: archived.rows.length,
+      },
+      computedAt,
+      truncated:
+        active.truncated ||
+        retired.truncated ||
+        superseded.truncated ||
+        archived.truncated,
+    };
+  }
+
+  async function collectAndCacheMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    const value = await collectMemoryStats();
+    statsCache = { at: now(), value };
+    return value;
+  }
+
+  function getMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    const at = now();
+    if (
+      statsCache !== null &&
+      at >= statsCache.at &&
+      at - statsCache.at < MEMORY_STATS_CACHE_TTL_MS
+    ) {
+      return Promise.resolve(statsCache.value);
+    }
+    if (statsPending !== null) {
+      return statsPending;
+    }
+    const pending = collectAndCacheMemoryStats();
+    statsPending = pending;
+    // Attach handlers so a rejection never becomes an unhandled rejection.
+    pending.then(
+      () => {
+        if (statsPending === pending) statsPending = null;
+      },
+      () => {
+        if (statsPending === pending) statsPending = null;
+      },
+    );
+    return pending;
+  }
+
   async function getMemoryDetail(input: {
     sessionId: string;
     searchId: string;
@@ -5252,6 +5497,7 @@ export function createMemoryService(
     stop,
     drainOnce: () => drainOnce(),
     searchMemories,
+    getMemoryStats,
     getMemoryDetail,
     getMemoryGraphGlobal,
     getMemoryGraphLocal,

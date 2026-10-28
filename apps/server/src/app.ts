@@ -50,6 +50,7 @@ import {
   MemoryRecallExposureResponseSchema,
   MemorySearchRequestSchema,
   MemorySearchResponseSchema,
+  MemoryStatsResponseSchema,
   messageScope,
   NotificationAckReceiptSchema,
   NotificationForwardQuerySchema,
@@ -260,6 +261,23 @@ export interface MemoryHttpPort {
       status: "active" | "retired";
       createdAt?: string;
     }[];
+  }>;
+  /** Read-only content counts for the configured scope (cached server-side). */
+  getMemoryStats(): Promise<{
+    byKind: {
+      user_fact: number;
+      model_inference: number;
+      summary: number;
+      correction: number;
+    };
+    byStatus: {
+      active: number;
+      retired: number;
+      superseded: number;
+      archived: number;
+    };
+    computedAt: number;
+    truncated: boolean;
   }>;
   getMemoryDetail(input: {
     sessionId: string;
@@ -3105,6 +3123,30 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return c.json(repo.memoryMaintenanceSummary(now()), 200);
     } catch (error) {
       return mapDomainError(c, error);
+    }
+  });
+
+  // Read-only memory-content counts (active by kind, all statuses). The
+  // service reads bounded `record.list` pages, caches for five minutes with
+  // single-flight, and returns numbers only: no bodies, ids, or scopes.
+  app.get("/api/memory/stats", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      const out = await memory.getMemoryStats();
+      const body = MemoryStatsResponseSchema.parse({
+        byKind: { ...out.byKind },
+        byStatus: { ...out.byStatus },
+        computedAt: out.computedAt,
+        truncated: out.truncated,
+      });
+      return c.json(body, 200);
+    } catch {
+      return memoryRouteError(c, "service_unavailable");
     }
   });
 

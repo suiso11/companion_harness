@@ -195,6 +195,24 @@ process.stdin.on("end", () => {
     ).rejects.toMatchObject({ cliCode: "cli_bad_request" });
   });
 
+  it("allows the read-only record.list op used by memory stats", async () => {
+    const dir = tempDir();
+    const entry = writeScript(dir, "ok.mjs", ENVELOPE_SCRIPT);
+    const address = addressOf(entry);
+    const envelope = await callMemoryCli(
+      address,
+      "record.list",
+      { scope: "s", status: "active", limit: 5 },
+      undefined,
+    );
+    expect(envelope).toEqual({
+      ok: true,
+      code: "OK",
+      data: { echo: "record.list" },
+      deduplicated: false,
+    });
+  });
+
   it("rejects oversize requests before spawn", async () => {
     const dir = tempDir();
     const entry = writeScript(dir, "never.mjs", `process.exit(9);`);

@@ -499,3 +499,122 @@ export function parseLearningProposals(
   }
   return items;
 }
+
+/* ---------------- memory content statistics (read-only) --------------- */
+
+export type MemoryKind =
+  | "user_fact"
+  | "model_inference"
+  | "summary"
+  | "correction";
+export type MemoryStatus = "active" | "retired" | "superseded" | "archived";
+
+export const MEMORY_KIND_ORDER: readonly MemoryKind[] = [
+  "user_fact",
+  "model_inference",
+  "summary",
+  "correction",
+];
+export const MEMORY_STATUS_ORDER: readonly MemoryStatus[] = [
+  "active",
+  "retired",
+  "superseded",
+  "archived",
+];
+
+export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
+  user_fact: "ユーザーの事実",
+  model_inference: "推測",
+  summary: "要約",
+  correction: "訂正",
+};
+
+export const MEMORY_STATUS_LABELS: Record<MemoryStatus, string> = {
+  active: "有効",
+  retired: "退役",
+  superseded: "置換済み",
+  archived: "保管",
+};
+
+export interface MemoryStats {
+  readonly byKind: Readonly<Record<MemoryKind, number>>;
+  readonly byStatus: Readonly<Record<MemoryStatus, number>>;
+  readonly computedAt: number;
+  readonly truncated: boolean;
+}
+
+export interface MemoryStatsCard {
+  readonly key: string;
+  readonly label: string;
+  readonly value: number;
+}
+
+export interface MemoryKindBar extends MemoryStatsCard {
+  readonly percent: number;
+}
+
+function parseKindCounts(value: unknown): Record<MemoryKind, number> | null {
+  if (!isRecord(value)) return null;
+  const out = {} as Record<MemoryKind, number>;
+  for (const kind of MEMORY_KIND_ORDER) {
+    const count = value[kind];
+    if (!isNonNegativeInteger(count)) return null;
+    out[kind] = count;
+  }
+  return out;
+}
+
+function parseStatusCounts(
+  value: unknown,
+): Record<MemoryStatus, number> | null {
+  if (!isRecord(value)) return null;
+  const out = {} as Record<MemoryStatus, number>;
+  for (const status of MEMORY_STATUS_ORDER) {
+    const count = value[status];
+    if (!isNonNegativeInteger(count)) return null;
+    out[status] = count;
+  }
+  return out;
+}
+
+/** Strict parse of GET /api/memory/stats (numbers only, no bodies). */
+export function parseMemoryStats(body: unknown): MemoryStats | null {
+  if (!isRecord(body)) return null;
+  const byKind = parseKindCounts(body.byKind);
+  const byStatus = parseStatusCounts(body.byStatus);
+  if (
+    byKind === null ||
+    byStatus === null ||
+    !isNonNegativeInteger(body.computedAt) ||
+    typeof body.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    byKind,
+    byStatus,
+    computedAt: body.computedAt,
+    truncated: body.truncated,
+  };
+}
+
+/** Four status cards in fixed order (active/retired/superseded/archived). */
+export function memoryStatusCards(stats: MemoryStats): MemoryStatsCard[] {
+  return MEMORY_STATUS_ORDER.map((status) => ({
+    key: status,
+    label: MEMORY_STATUS_LABELS[status],
+    value: stats.byStatus[status],
+  }));
+}
+
+/** Active-kind bars; widths are relative to the largest kind count. */
+export function memoryKindBars(stats: MemoryStats): MemoryKindBar[] {
+  const values = MEMORY_KIND_ORDER.map((kind) => stats.byKind[kind]);
+  const max = Math.max(1, ...values);
+  return MEMORY_KIND_ORDER.map((kind) => ({
+    key: kind,
+    label: MEMORY_KIND_LABELS[kind],
+    value: stats.byKind[kind],
+    percent: Math.round((stats.byKind[kind] / max) * 100),
+  }));
+}
