@@ -840,6 +840,7 @@ export {
   reconcileTrialExpiry,
   recordQuiescence,
   recordWorkerResult,
+  recoverInterruptedTrialAdoptions,
   registerWorkerBoot,
   revokeAllClaimedForStop,
   stageTrialProposal,

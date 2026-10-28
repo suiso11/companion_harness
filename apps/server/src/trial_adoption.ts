@@ -200,6 +200,18 @@ function parsePrUrl(stdout: string): string | null {
   return null;
 }
 
+/** Boot recovery helper: drop stale metadata for temp worktrees removed by
+ * the OS tmp cleanup. Best effort; failures are swallowed (never startup). */
+export async function pruneTrialAdoptionWorktrees(
+  repoPath: string,
+): Promise<void> {
+  try {
+    await git(repoPath, ["worktree", "prune"]);
+  } catch {
+    // Best effort: a missing/broken checkout never blocks startup.
+  }
+}
+
 /** Execute one adoption attempt. Throws TrialAdoptionError with a fixed code;
  * always removes the temporary worktree. Never touches the base branch. */
 export async function executeTrialAdoption(

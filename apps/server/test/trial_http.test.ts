@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +20,7 @@ import {
   openKernelDatabase,
   RunEngine,
 } from "@companion/kernel";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type CreatedServerApp, createApp } from "../src/app.js";
 import { loadServerConfig, ServerConfigError } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
@@ -1080,6 +1080,334 @@ describe("trial candidate HTTP surface", () => {
         .run(executionId);
       const missing = await get(app, `${base}/${proposalId}/candidate`);
       expect(missing.status).toBe(404);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
+describe("trial adoption HTTP surface", () => {
+  let root: string;
+  let remote: string;
+  let checkout: string;
+  let bin: string;
+  let ghCalls: string;
+  let operatorPath: string;
+  let revision: string;
+  let originalPath: string | undefined;
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "companion-adoption-http-"));
+    remote = join(root, "remote.git");
+    checkout = join(root, "checkout");
+    bin = join(root, "bin");
+    ghCalls = join(root, "gh-calls");
+    operatorPath = join(root, "operator.json");
+    writeFileSync(ghCalls, "");
+    writeFileSync(
+      operatorPath,
+      JSON.stringify({ stateDir: join(root, "state") }),
+    );
+    mkdirSync(bin);
+    execFileSync("git", ["init", "--bare", remote]);
+    execFileSync("git", ["init", checkout]);
+    const git = (args: string[]): string =>
+      execFileSync("git", ["-C", checkout, ...args], {
+        encoding: "utf8",
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" },
+      }).trim();
+    git(["config", "user.name", "test"]);
+    git(["config", "user.email", "test@example.com"]);
+    mkdirSync(join(checkout, "apps"), { recursive: true });
+    writeFileSync(join(checkout, "apps/a.ts"), "one\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    git(["branch", "-M", "master"]);
+    git(["remote", "add", "origin", remote]);
+    git(["push", "-q", "origin", "master"]);
+    revision = git(["rev-parse", "HEAD"]);
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> '${ghCalls}'\nprintf 'https://github.com/example/repo/pull/42\\n'\n`,
+      { mode: 0o755 },
+    );
+    originalPath = process.env.PATH;
+    process.env.PATH = `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+  });
+
+  afterAll(() => {
+    if (originalPath !== undefined) process.env.PATH = originalPath;
+  });
+
+  function adoptionCfg(): string {
+    const cfg = JSON.parse(trialConfigJson()) as Record<string, unknown>;
+    cfg.sourceRevision = revision;
+    cfg.sourceRepoPath = checkout;
+    const runner = cfg.runner as Record<string, unknown>;
+    runner.bridgeConfigTemplatePath = operatorPath;
+    cfg.adoption = {
+      repoPath: checkout,
+      remote: "origin",
+      baseRef: "origin/master",
+      branchPrefix: "trial/",
+    };
+    return JSON.stringify(cfg);
+  }
+
+  const hash = (value: string) =>
+    createHash("sha256").update(value).digest("hex");
+
+  async function prepareAdoptable(
+    fixture: Fixture,
+    scope: string,
+  ): Promise<{
+    base: string;
+    proposalId: string;
+    executionId: string;
+    artifactSha: string;
+  }> {
+    const { app, repo } = fixture;
+    const created = await post(app, "/api/sessions", {}, randomUUID());
+    const sessionId = (created.body as { sessionId: string }).sessionId;
+    const { taskId } = stageAuthority(repo, sessionId, scope);
+    const base = `/api/sessions/${sessionId}/trials`;
+    const staged = await post(
+      app,
+      base,
+      stageBody(taskId, { literalPatchPaths: ["apps/a.ts"] }),
+      randomUUID(),
+    );
+    expect(staged.status).toBe(201);
+    const proposalId = (staged.body as { id: string }).id;
+    const approved = await post(
+      app,
+      `${base}/${proposalId}/approve`,
+      {},
+      randomUUID(),
+    );
+    expect(approved.status).toBe(201);
+    const executionId = (approved.body as { executionId: string }).executionId;
+    const rawDb = fixture.db.raw as unknown as {
+      prepare: (sql: string) => {
+        run: (...args: unknown[]) => void;
+        get: (...args: unknown[]) => unknown;
+      };
+    };
+    const grant = rawDb
+      .prepare(
+        "SELECT approved_profile_json FROM trial_grants WHERE execution_id=?",
+      )
+      .get(executionId) as { approved_profile_json: string };
+    const frozen = JSON.parse(grant.approved_profile_json) as Record<
+      string,
+      unknown
+    >;
+    frozen.allowedPaths = ["apps"];
+    rawDb
+      .prepare(
+        "UPDATE trial_grants SET approved_profile_json=? WHERE execution_id=?",
+      )
+      .run(JSON.stringify(frozen), executionId);
+    const stateDir = join(root, "state");
+    const runDir = join(stateDir, "runs", executionId);
+    mkdirSync(join(runDir, "candidate/apps"), { recursive: true });
+    writeFileSync(join(runDir, "candidate/apps/a.ts"), "two\n");
+    const artifactBytes = Buffer.from(
+      `${JSON.stringify({
+        schemaVersion: 2,
+        executionId,
+        taskHash: "f".repeat(64),
+        baseManifestDigest: "d".repeat(64),
+        profileFingerprint: FP,
+        sourceRevision: revision,
+        changeCount: 1,
+        changes: [
+          {
+            path: "apps/a.ts",
+            kind: "modify",
+            baseSha256: hash("one\n"),
+            baseMode: 0o100644,
+            candidateSha256: hash("two\n"),
+            candidateMode: 0o100644,
+            size: 4,
+          },
+        ],
+      })}\n`,
+    );
+    writeFileSync(join(runDir, "artifact.json"), artifactBytes);
+    rawDb
+      .prepare(
+        "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        executionId,
+        sessionId,
+        "done",
+        "[]",
+        "[]",
+        "[]",
+        "[]",
+        JSON.stringify({
+          sha256: hash(artifactBytes.toString("utf8")),
+          entryCount: 1,
+        }),
+        1,
+        1,
+      );
+    rawDb
+      .prepare("UPDATE trial_grants SET status='consumed' WHERE execution_id=?")
+      .run(executionId);
+    return {
+      base,
+      proposalId,
+      executionId,
+      artifactSha: hash(artifactBytes.toString("utf8")),
+    };
+  }
+
+  it("adopts on a human click and replays the same result once", async () => {
+    const fixture = await makeApp(true, adoptionCfg());
+    try {
+      const { base, proposalId, executionId, artifactSha } =
+        await prepareAdoptable(fixture, "ad1");
+      const key = randomUUID();
+      const first = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        key,
+      );
+      expect(first.status).toBe(201);
+      const branch = `trial/${executionId.slice(0, 8)}`;
+      expect(first.body).toMatchObject({
+        status: "done",
+        branch,
+        prUrl: "https://github.com/example/repo/pull/42",
+        errorCode: null,
+      });
+      const second = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        key,
+      );
+      expect(second.status).toBe(200);
+      expect(second.body).toEqual(first.body);
+      // The executor (gh) ran exactly once across both clicks (the PR body
+      // itself spans lines, so count invocations, not file lines).
+      const calls = readFileSync(ghCalls, "utf8")
+        .split("\n")
+        .filter((line) => line.startsWith("pr create "));
+      expect(calls).toHaveLength(1);
+      const detail = await get(fixture.app, `${base}/${proposalId}`);
+      expect(detail.status).toBe(200);
+      expect((detail.body as { adoption: unknown }).adoption).toEqual({
+        status: "done",
+        branch,
+        prUrl: "https://github.com/example/repo/pull/42",
+        errorCode: null,
+      });
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("rejects a wrong artifact digest with 409 and pushes nothing", async () => {
+    const fixture = await makeApp(true, adoptionCfg());
+    try {
+      const { base, proposalId } = await prepareAdoptable(fixture, "ad2");
+      const callsBefore = readFileSync(ghCalls, "utf8").trim().split("\n");
+      const mismatch = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: "c".repeat(64) },
+        randomUUID(),
+      );
+      expect(mismatch.status).toBe(409);
+      expect((mismatch.body as { error: { code: string } }).error.code).toBe(
+        "artifact_mismatch",
+      );
+      expect(readFileSync(ghCalls, "utf8").trim().split("\n")).toEqual(
+        callsBefore,
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("settles stale pending adoptions on read and recovers on boot", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const rawDb = fixture.db.raw as unknown as {
+        prepare: (sql: string) => {
+          run: (...args: unknown[]) => void;
+        };
+      };
+      const insertPending = (
+        proposalId: string,
+        executionId: string,
+        at: number,
+      ) =>
+        rawDb
+          .prepare(
+            "INSERT INTO trial_adoptions (proposal_id, execution_id, artifact_sha256, status, branch, pr_url, error_code, created_at, updated_at) VALUES (?,?,?, 'pending', NULL, NULL, NULL, ?, ?)",
+          )
+          .run(proposalId, executionId, "a".repeat(64), at, at);
+
+      const { app, repo } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "rec1");
+      const base = `/api/sessions/${sessionId}/trials`;
+      const stageOne = async () => {
+        const staged = await post(
+          app,
+          base,
+          stageBody(taskId, { literalPatchPaths: ["apps/a.ts"] }),
+          randomUUID(),
+        );
+        const proposalId = (staged.body as { id: string }).id;
+        const approved = await post(
+          app,
+          `${base}/${proposalId}/approve`,
+          {},
+          randomUUID(),
+        );
+        return {
+          proposalId,
+          executionId: (approved.body as { executionId: string }).executionId,
+        };
+      };
+      const stale = await stageOne();
+      insertPending(
+        stale.proposalId,
+        stale.executionId,
+        Date.now() - 16 * 60 * 1000,
+      );
+      const staleRead = await get(app, `${base}/${stale.proposalId}`);
+      expect(
+        (staleRead.body as { adoption: { status: string } }).adoption.status,
+      ).toBe("failed");
+      expect(
+        (staleRead.body as { adoption: { errorCode: string } }).adoption
+          .errorCode,
+      ).toBe("interrupted");
+
+      const fresh = await stageOne();
+      insertPending(fresh.proposalId, fresh.executionId, Date.now());
+      const freshRead = await get(app, `${base}/${fresh.proposalId}`);
+      expect(
+        (freshRead.body as { adoption: { status: string } }).adoption.status,
+      ).toBe("pending");
+      // Boot recovery settles every pending row of the previous process.
+      expect(repo.recoverInterruptedTrialAdoptions()).toBe(1);
+      const afterBoot = await get(app, `${base}/${fresh.proposalId}`);
+      expect((afterBoot.body as { adoption: unknown }).adoption).toMatchObject({
+        status: "failed",
+        branch: null,
+        prUrl: null,
+        errorCode: "interrupted",
+      });
     } finally {
       fixture.close();
     }

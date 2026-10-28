@@ -391,6 +391,7 @@ import {
   reconcileTrialExpiry,
   recordQuiescence,
   recordWorkerResult,
+  recoverInterruptedTrialAdoptions as recoverInterruptedTrialAdoptionsFn,
   registerWorkerBoot,
   stageTrialProposal,
   type TrialWorkerReportInput,
@@ -7609,8 +7610,16 @@ export function createKernelRepository(
     return finishTrialAdoptionFn(db, proposalId, result, now);
   }
 
-  function readTrialAdoption(sessionId: string, proposalId: string) {
-    return readTrialAdoptionFn(db, sessionId, proposalId);
+  function readTrialAdoption(
+    sessionId: string,
+    proposalId: string,
+    now?: number,
+  ) {
+    return readTrialAdoptionFn(db, sessionId, proposalId, now);
+  }
+
+  function recoverInterruptedTrialAdoptions(now?: number) {
+    return recoverInterruptedTrialAdoptionsFn(db, now);
   }
 
   /** Internal proof read only: owned, revoked, never claimed/launched grant.
@@ -8150,6 +8159,7 @@ export function createKernelRepository(
     readTrialLaunchIntent,
     readTrialCandidateRoots,
     readTrialAdoption,
+    recoverInterruptedTrialAdoptions,
     beginTrialAdoption,
     finishTrialAdoption,
     isNeverLaunchedRevokedTrialGrant,

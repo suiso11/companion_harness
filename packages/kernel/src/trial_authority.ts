@@ -2865,6 +2865,11 @@ export function readWorkerReportByProposal(
 
 export type TrialAdoptionStatus = "pending" | "done" | "failed";
 
+/** Fixed error code for an attempt orphaned by a crash/restart. */
+export const TRIAL_ADOPTION_INTERRUPTED = "interrupted";
+/** A pending row older than this is treated as orphaned on read/next click. */
+export const TRIAL_ADOPTION_PENDING_STALE_MS = 15 * 60 * 1000;
+
 export interface TrialAdoptionView {
   status: TrialAdoptionStatus;
   branch: string | null;
@@ -2905,12 +2910,45 @@ function readAdoptionRow(
       };
 }
 
+/** Settle a pending row left behind by a crash: the process that claimed it
+ * is gone, so a stale pending row is a terminal failure, never a live push. */
+function settleStaleAdoption(
+  db: Database.Database,
+  proposalId: string,
+  now: number,
+): void {
+  db.prepare(
+    "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending' AND updated_at<=?",
+  ).run(
+    TRIAL_ADOPTION_INTERRUPTED,
+    now,
+    proposalId,
+    now - TRIAL_ADOPTION_PENDING_STALE_MS,
+  );
+}
+
+/** Boot recovery: this process owns no attempt, so every pending row was
+ * orphaned by a previous process. Returns how many rows were settled. */
+export function recoverInterruptedTrialAdoptions(
+  db: Database.Database,
+  now: number = Date.now(),
+): number {
+  const result = db
+    .prepare(
+      "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, error_code=?, updated_at=? WHERE status='pending'",
+    )
+    .run(TRIAL_ADOPTION_INTERRUPTED, now);
+  return typeof result.changes === "number" ? result.changes : 0;
+}
+
 /** Read the proposal's adoption state (null before the first attempt).
- * Foreign/missing proposals return null (HTTP maps to 404). */
+ * A pending row older than the staleness window is settled as interrupted
+ * before it is returned. Foreign/missing proposals return null (HTTP 404). */
 export function readTrialAdoption(
   db: Database.Database,
   sessionId: string,
   proposalId: string,
+  now: number = Date.now(),
 ): TrialAdoptionView | null {
   const session = requireId(sessionId, "sessionId");
   const pid = requireId(proposalId, "proposalId");
@@ -2918,6 +2956,7 @@ export function readTrialAdoption(
     .prepare("SELECT session_id FROM trial_grants WHERE proposal_id=?")
     .get(pid) as { session_id: string } | undefined;
   if (!g || g.session_id !== session) return null;
+  settleStaleAdoption(db, pid, now);
   return readAdoptionRow(db, pid);
 }
 
@@ -2948,6 +2987,8 @@ export function beginTrialAdoption(
       )
       .get(pid) as { session_id: string; execution_id: string } | undefined;
     if (!g || g.session_id !== session || g.execution_id !== exec) return null;
+    // A stale pending row must never block a later human click.
+    settleStaleAdoption(db, pid, now);
     const existing = readAdoptionRow(db, pid);
     if (existing !== null) {
       if (existing.status === "done" || existing.status === "pending") {

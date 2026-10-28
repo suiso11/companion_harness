@@ -4561,6 +4561,22 @@ staging form is native-only by design.
   The response carries per-file kind/mode notes and a plain-text unified diff
   capped at 64 KB with a `truncated` flag; `/trials` renders it in a `<pre>`
   with fixed Japanese error messages and never interprets it as HTML.
+- Human-clicked adoption (draft PR only): `POST
+  /api/sessions/:id/trials/:proposalId/adopt` with the reviewed
+  `artifactSha256` and an Idempotency-Key. The first click claims the
+  proposal and pushes a `trial/<execution>` branch, then opens a DRAFT PR:
+  201 with `{status:"done", branch, prUrl, errorCode:null}`. While that
+  attempt is still running a concurrent click answers **202** with the same
+  pending shape (never a second push); a replay after completion answers
+  200 with the identical branch/prUrl (the executor runs once). A digest
+  mismatch answers 409 `artifact_mismatch` without pushing. Adoption state
+  is durable per proposal, so a server crash/restart during a push would
+  otherwise leave `pending` forever: on startup any row still `pending`
+  (this process owns no attempt) is settled as `failed` with the fixed
+  `errorCode:"interrupted"` and the repo gets a best-effort `git worktree
+  prune` (the temp worktree itself is gone with the OS tmp cleanup). A
+  pending row older than 15 minutes is settled the same way on read or the
+  next click, so a stale claim never blocks a retry.
 - Verified 2026-10-17, synthetic only (fixed `synth-e2e-model` over a
   loopback relay, never a real model): full server A+B driver green —
   scenario A `consumed`/`authorized`/`bridge-exit:0` (12 model calls,
