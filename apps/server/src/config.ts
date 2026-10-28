@@ -2385,7 +2385,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     record.sourceRepoPath.length < 1 ||
     record.sourceRepoPath.length > 4096 ||
     record.sourceRepoPath.includes("\0") ||
-    !record.sourceRepoPath.startsWith("/")
+    !isAbsolute(record.sourceRepoPath)
   ) {
     throw configError("trial config source repository path is invalid");
   }

@@ -1084,6 +1084,15 @@ describe("trial config parsing", () => {
         COMPANION_MODEL_JSON: trialModelJson(),
       }),
     ).toThrow(ServerConfigError);
+    // The sealed snapshot root must be a platform-absolute path.
+    const relativeSource = { ...full, sourceRepoPath: "relative/source" };
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AUTONOMY_JSON: JSON.stringify(relativeSource),
+        COMPANION_MODEL_JSON: trialModelJson(),
+      }),
+    ).toThrow("trial config source repository path is invalid");
     // No defaults for caps/checks: a missing field fails closed.
     const { timeoutMs: _drop, ...noCaps } = full;
     void _drop;
