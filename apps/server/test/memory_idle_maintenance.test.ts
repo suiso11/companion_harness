@@ -438,3 +438,171 @@ describe("permanent derived-maintenance misconfiguration", () => {
     }
   });
 });
+
+describe("background activity rows", () => {
+  it("records consolidate/activation success with the logged numeric counts", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async (_address, op) => {
+        if (op === "maintain.associate") {
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        if (op === "maintain.consolidate") {
+          return okEnvelope({
+            clusters: [
+              {
+                topic: "topic-a",
+                members: 2,
+                sentencesKept: 1,
+                outcome: "written",
+              },
+              {
+                topic: "topic-b",
+                members: 1,
+                sentencesKept: 0,
+                outcome: "deferred",
+              },
+            ],
+            applied: 1,
+            degraded: false,
+          });
+        }
+        if (op === "maintain.activation") {
+          return okEnvelope({
+            scored: 4,
+            scoreFailed: 1,
+            retired: 2,
+            reactivated: 1,
+            wouldRetire: 3,
+            wouldReactivate: 2,
+            degraded: false,
+          });
+        }
+        return okEnvelope({});
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      await waitFor(
+        () =>
+          f.repo
+            .listMemoryMaintenanceRuns({ limit: 100 })
+            .items.some((run) => run.op === "maintain.activation"),
+        5000,
+      );
+      const runs = f.repo.listMemoryMaintenanceRuns({ limit: 100 }).items;
+      const consolidate = runs.find((run) => run.op === "maintain.consolidate");
+      const activation = runs.find((run) => run.op === "maintain.activation");
+      expect(consolidate).toMatchObject({
+        ok: true,
+        errorCode: null,
+        counts: {
+          applied: 1,
+          written: 1,
+          unchanged: 0,
+          no_grounded: 0,
+          deferred: 1,
+          degraded: 0,
+        },
+      });
+      expect(activation).toMatchObject({
+        ok: true,
+        errorCode: null,
+        counts: {
+          scored: 4,
+          score_failed: 1,
+          retired: 2,
+          reactivated: 1,
+          would_retire: 3,
+          would_reactivate: 2,
+          degraded: 0,
+        },
+      });
+      const summary = f.repo.memoryMaintenanceSummary(Date.now());
+      expect(
+        summary.windows.last24h.ops["maintain.consolidate"].counts.applied,
+      ).toBe(1);
+      expect(
+        summary.windows.last24h.ops["maintain.activation"].counts.retired,
+      ).toBe(2);
+      expect(summary.latestByOp["maintain.activation"]).not.toBeNull();
+      expect(summary.latestByOp["maintain.distill"]).toBeNull();
+    } finally {
+      f.close();
+    }
+  });
+
+  it("records a fixed failure code for a rejected consolidate", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async (_address, op) => {
+        if (op === "maintain.associate") {
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        if (op === "maintain.consolidate") {
+          return rejectedEnvelope("TIMEOUT");
+        }
+        return okEnvelope({});
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      await waitFor(
+        () =>
+          f.repo
+            .listMemoryMaintenanceRuns({ limit: 100 })
+            .items.some((run) => run.op === "maintain.consolidate"),
+        5000,
+      );
+      const runs = f.repo.listMemoryMaintenanceRuns({ limit: 100 }).items;
+      const consolidate = runs.find((run) => run.op === "maintain.consolidate");
+      expect(consolidate).toMatchObject({
+        ok: false,
+        errorCode: "timeout",
+        counts: {},
+      });
+      // A failed consolidate does not schedule activation for that pass.
+      expect(runs.some((run) => run.op === "maintain.activation")).toBe(false);
+      // No memory bodies/text fields exist on an activity row.
+      expect(Object.keys(consolidate ?? {})).not.toContain("body");
+    } finally {
+      f.close();
+    }
+  });
+
+  it("records a fixed failure code for a rejected activation", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async (_address, op) => {
+        if (op === "maintain.associate") {
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        if (op === "maintain.consolidate") {
+          return okEnvelope({ clusters: [], applied: 0, degraded: false });
+        }
+        if (op === "maintain.activation") {
+          return rejectedEnvelope("TIMEOUT");
+        }
+        return okEnvelope({});
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+      await waitFor(
+        () =>
+          f.repo
+            .listMemoryMaintenanceRuns({ limit: 100 })
+            .items.some((run) => run.op === "maintain.activation"),
+        5000,
+      );
+      const runs = f.repo.listMemoryMaintenanceRuns({ limit: 100 }).items;
+      const activation = runs.find((run) => run.op === "maintain.activation");
+      expect(activation).toMatchObject({
+        ok: false,
+        errorCode: "timeout",
+        counts: {},
+      });
+      // No memory bodies/text fields exist on an activity row.
+      expect(Object.keys(activation ?? {})).not.toContain("text");
+    } finally {
+      f.close();
+    }
+  });
+});

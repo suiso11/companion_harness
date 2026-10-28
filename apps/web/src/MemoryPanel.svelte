@@ -78,7 +78,8 @@ type GraphScope = Scope & {
   readonly scope: "global" | "local";
   readonly center: string | null;
 };
-let view = $state<"list" | "graph">("list");
+type MemoryView = "list" | "graph" | "activity";
+let view = $state<MemoryView>("list");
 let graphStatus = $state("");
 let graphRetired = $state(false);
 let graphTopics = $state(true);
@@ -382,8 +383,8 @@ function paintGraph(): void {
   canvas.setGraph(displayGraph(graphData), { selected: graphSelected, query });
 }
 
-/** Switch between the existing result list and the read-only graph. */
-function switchView(next: "list" | "graph"): void {
+/** Switch between the result list, the read-only graph, and activity. */
+function switchView(next: MemoryView): void {
   view = next;
   if (next === "graph") {
     canvas?.setSearchQuery(query);
@@ -400,8 +401,10 @@ function switchView(next: "list" | "graph"): void {
     }
   } else {
     canvas?.setSearchQuery("");
-    // Opening the list view always starts from the full browse projection.
-    showAllMemories();
+    if (next === "list") {
+      // Opening the list view always starts from the full browse projection.
+      showAllMemories();
+    }
   }
 }
 
@@ -538,7 +541,7 @@ async function activateGraphNode(handle: string): Promise<void> {
 function refreshGraphAfterMutation(): void {
   const result = invalidateAfterMutation(
     { loaded: graphData !== null, stale: graphStale },
-    view,
+    view === "graph" ? "graph" : "list",
   );
   graphStale = result.retention.stale;
   if (view === "graph") {
@@ -990,7 +993,14 @@ $effect(() => {
       aria-pressed={view === "graph"}
       onclick={() => switchView("graph")}>グラフ</button
     >
+    <button
+      id="memory-view-activity"
+      type="button"
+      aria-pressed={view === "activity"}
+      onclick={() => switchView("activity")}>学習の動き</button
+    >
   </div>
+  {#if view !== "activity"}
   <form
     id="memory-search-form"
     onsubmit={(event) => {
@@ -1012,6 +1022,7 @@ $effect(() => {
       記憶を検索
     </button>
   </form>
+  {/if}
   {#if notice.length > 0}
     <p class="memory-notice" role="status">{notice}</p>
   {/if}
@@ -1174,6 +1185,10 @@ $effect(() => {
         </span>
       </p>
     </div>
+  {:else if view === "activity"}
+    {#await import("./MemoryActivityPanel.svelte") then module}
+      <svelte:component this={module.default} />
+    {/await}
   {:else}
     {#if listMode === "browse" && browseStatus.length > 0}
       <p class="memory-notice" role="status">{browseStatus}</p>

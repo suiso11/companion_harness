@@ -111,6 +111,7 @@ import {
   isUuidV4,
   type KernelRepository,
   LearningStateConflictError,
+  type LearningStore,
   LearningVersionConflictError,
   NotificationKeyConflictError,
   NotificationProjectionResetError,
@@ -479,6 +480,13 @@ export interface CreateAppDeps {
    * a lazily-created default using the repository clock.
    */
   monitor?: MonitorSampler;
+  /**
+   * Read-only conversation-learning proposal store (the same private store
+   * the learning service and operator CLI use). Null/absent keeps both the
+   * learning proposal browser read and the activity section's proposal list
+   * at a fixed 404; no route can approve/reject here.
+   */
+  learningStore?: LearningStore | null;
 }
 
 export interface ServerControls {
@@ -1421,6 +1429,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const learningStore = deps.learningStore ?? null;
   const autodispatchForeground = deps.autodispatchForeground;
   const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
@@ -3053,6 +3062,100 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     return "service_unavailable";
   }
+
+  /* ---------------- background memory activity (read-only) ---------- */
+  // Browser view of the idle maintenance passes the memory service already
+  // runs. Counts are fixed numeric summaries only; no memory bodies/text are
+  // stored or returned. Newest-first keyset pages are bounded to 100.
+  app.get("/api/memory/activity", (c) => {
+    const query = strictQuery(c, ["limit", "cursor"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const rawLimit = query.values.limit;
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit))
+    ) {
+      return validationError(c);
+    }
+    try {
+      return c.json(
+        repo.listMemoryMaintenanceRuns({
+          limit,
+          ...(query.values.cursor !== undefined
+            ? { cursor: query.values.cursor }
+            : {}),
+        }),
+        200,
+      );
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  app.get("/api/memory/activity/summary", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.memoryMaintenanceSummary(now()), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read-only learning proposals from the SAME private store the learning
+  // service/operator CLI use. No approve/reject route is added: the model
+  // and browser can only inspect pending/approved/rejected lessons.
+  app.get("/api/learning/proposals", (c) => {
+    const query = strictQuery(c, ["limit", "status"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const rawLimit = query.values.limit;
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit))
+    ) {
+      return validationError(c);
+    }
+    const status = query.values.status;
+    if (
+      status !== undefined &&
+      status !== "pending" &&
+      status !== "approved" &&
+      status !== "rejected"
+    ) {
+      return validationError(c);
+    }
+    if (learningStore === null) {
+      return apiError(c, 404, "not_found", "learning proposals unavailable");
+    }
+    try {
+      const items = learningStore
+        .listRecentProposals(status === undefined ? undefined : status, limit)
+        .map((row) => ({
+          id: row.id,
+          kind: row.kind,
+          lesson: row.lesson,
+          evidence: row.evidence,
+          applicability: row.applicability,
+          status: row.status,
+          createdAt: row.createdAt,
+          decidedAt: row.decidedAt,
+        }));
+      return c.json({ items }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
 
   // Global linked-memory graph (read-only, never heats/feedback). Strict
   // closed query: `includeRetired` is exactly true|false and `runId` must be

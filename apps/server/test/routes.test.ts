@@ -1590,3 +1590,87 @@ describe("drain re-check + idempotent replay", () => {
     }
   });
 });
+
+describe("background memory activity routes", () => {
+  it("serves bounded numeric activity rows and an op summary", async () => {
+    const f = await makeApp();
+    try {
+      const inserted = f.repo.insertMemoryMaintenanceRun({
+        op: "maintain.consolidate",
+        scope: "test-scope",
+        startedAt: 1790000000000,
+        finishedAt: 1790000000001,
+        ok: true,
+        counts: { applied: 2, written: 1 },
+      });
+      const list = await f.app.request("/api/memory/activity?limit=1", {
+        headers: { host: "127.0.0.1" },
+      });
+      expect(list.status).toBe(200);
+      const body = (await list.json()) as {
+        items: Array<Record<string, unknown>>;
+        nextCursor: string | null;
+        hasMore: boolean;
+      };
+      expect(body.items).toHaveLength(1);
+      expect(body.items[0]).toMatchObject({
+        id: inserted.id,
+        op: "maintain.consolidate",
+        ok: true,
+        errorCode: null,
+        counts: { applied: 2, written: 1 },
+      });
+      expect(body.hasMore).toBe(false);
+      expect(body.nextCursor).toBeNull();
+      expect(Object.keys(body.items[0] ?? {})).not.toContain("body");
+
+      const summary = await f.app.request("/api/memory/activity/summary", {
+        headers: { host: "127.0.0.1" },
+      });
+      expect(summary.status).toBe(200);
+      const summaryBody = (await summary.json()) as {
+        windows: Record<string, unknown>;
+        latestByOp: Record<string, unknown>;
+      };
+      expect(Object.keys(summaryBody.windows).sort()).toEqual([
+        "last24h",
+        "last7d",
+      ]);
+      expect(Object.keys(summaryBody.latestByOp)).toHaveLength(5);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("rejects non-strict activity queries", async () => {
+    const f = await makeApp();
+    try {
+      for (const path of [
+        "/api/memory/activity?limit=0",
+        "/api/memory/activity?limit=101",
+        "/api/memory/activity?limit=1.5",
+        "/api/memory/activity?limit=1&unknown=1",
+        "/api/memory/activity/summary?limit=1",
+      ]) {
+        const res = await f.app.request(path, {
+          headers: { host: "127.0.0.1" },
+        });
+        expect(res.status).toBe(400);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("serves proposals only when the learning store is wired", async () => {
+    const f = await makeApp();
+    try {
+      const res = await f.app.request("/api/learning/proposals?limit=50", {
+        headers: { host: "127.0.0.1" },
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      f.close();
+    }
+  });
+});

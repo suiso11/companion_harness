@@ -677,6 +677,13 @@ export type {
   MemoryGrantRow,
   MemoryJobKind,
   MemoryJobRow,
+  MemoryMaintenanceCounts,
+  MemoryMaintenanceOp,
+  MemoryMaintenanceOpWindow,
+  MemoryMaintenanceRun,
+  MemoryMaintenanceRunInput,
+  MemoryMaintenanceRunListResponse,
+  MemoryMaintenanceSummary,
   MemoryOperationKind,
   MemoryOperationRow,
   MemorySearchItemRow,
@@ -691,7 +698,12 @@ export type {
   StoredIdempotencyRecord,
   TransitionOptions,
 } from "./repository.js";
-export { createKernelRepository } from "./repository.js";
+export {
+  createKernelRepository,
+  MEMORY_MAINTENANCE_OPS,
+  MEMORY_MAINTENANCE_RETENTION_MS,
+  MEMORY_MAINTENANCE_RETENTION_ROWS,
+} from "./repository.js";
 export {
   actionExecutionGrants,
   actionExecutions,

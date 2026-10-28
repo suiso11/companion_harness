@@ -93,6 +93,11 @@ export interface LearningStore {
   /** Durable per-run lookup used to make reflection capture idempotent. */
   findReflectionByRun(runId: string): LearningReflectionRow | null;
   listProposals(status?: LearningProposalStatus): LearningProposalRow[];
+  /** Newest-first bounded page for the read-only browser view. */
+  listRecentProposals(
+    status?: LearningProposalStatus,
+    limit?: number,
+  ): LearningProposalRow[];
   show(id: string): LearningProposalRow;
   approve(id: string, expectedHash: string, now?: number): LearningProposalRow;
   reject(id: string, now?: number): LearningProposalRow;
@@ -518,6 +523,24 @@ export function createLearningStore(
                 "SELECT * FROM learning_proposals WHERE status = ? ORDER BY created_at DESC, rowid DESC",
               )
               .all(requireStatus(statusFilter)) as RawProposal[]);
+      return rows.map(toProposal);
+    },
+    listRecentProposals(statusFilter, limit = 50) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new RepositoryValidationError("limit must be 1..100");
+      }
+      const rows =
+        statusFilter === undefined
+          ? (db
+              .prepare(
+                "SELECT * FROM learning_proposals ORDER BY created_at DESC, rowid DESC LIMIT ?",
+              )
+              .all(limit) as RawProposal[])
+          : (db
+              .prepare(
+                "SELECT * FROM learning_proposals WHERE status = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+              )
+              .all(requireStatus(statusFilter), limit) as RawProposal[]);
       return rows.map(toProposal);
     },
     show(id) {
