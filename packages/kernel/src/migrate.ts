@@ -26,7 +26,7 @@ import {
 } from "./errors.js";
 
 /** Bundled M5 + memory-integration + M6 create + AV autonomy + trial authority + AV shadow + AV05 notifications + AV03 conversation-proposal + AV04 learning + AV03 delegation-handoff + I01 run memory status + I04 memory evidence + correction-kind (0022) + remote login sessions (0023) + persistent remote login lockout (0024) + ops-notification kind (0025) + web result url store (0026) + web search turn usage (0027) + memory graph (0028) + model_calls created_at monitor index (0029) + conversation->plan->standing-policy auto dispatch (0030) + per-execution materialization ledger (0031) + frozen trial proposal constraints (0032) + trial worker reports (0033) + human goal confirmation provenance (0034) schema version. Bump only with a new committed migration. */
-export const BUNDLED_SCHEMA_VERSION = 35;
+export const BUNDLED_SCHEMA_VERSION = 36;
 
 export interface BundledMigration {
   version: number;

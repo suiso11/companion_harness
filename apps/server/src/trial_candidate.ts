@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { MAX_SOURCE_BYTES } from "./autodispatch_materializer.js";
 import type { TrialConfig } from "./config.js";
 
 export const TRIAL_DIFF_MAX_BYTES = 64 * 1024;
@@ -271,7 +272,7 @@ function inScopes(scopes: readonly string[], path: string): boolean {
   return scopes.some((scope) => scopeMatches(scope, path));
 }
 
-function readOperatorStateDir(templatePath: string): string {
+export function readTrialOperatorStateDir(templatePath: string): string {
   const bytes = readNoFollowRegular(templatePath, 1024 * 1024);
   let parsed: unknown;
   try {
@@ -302,7 +303,7 @@ function readOperatorStateDir(templatePath: string): string {
  * materialized from the same tree. */
 function baseBytes(snapshotRoot: string, path: string): Buffer | null {
   try {
-    return readBeneath(snapshotRoot, path, CANDIDATE_FILE_MAX_BYTES);
+    return readBeneath(snapshotRoot, path, MAX_SOURCE_BYTES);
   } catch {
     return null;
   }
@@ -327,8 +328,12 @@ function unifiedDiff(
   }
   const dir = mkdtempSync(join(tmpdir(), "companion-candidate-diff-"));
   try {
-    const aPath = join(dir, "a");
-    const bPath = join(dir, "b");
+    // Relative names inside a temporary cwd: git on Windows would otherwise
+    // emit native absolute temp paths in the header lines.
+    const aName = "a";
+    const bName = "b";
+    const aPath = join(dir, aName);
+    const bPath = join(dir, bName);
     writeFileSync(aPath, kind === "create" ? Buffer.alloc(0) : base, {
       mode: 0o600,
     });
@@ -345,10 +350,11 @@ function unifiedDiff(
         "--no-color",
         "--no-ext-diff",
         "--unified=3",
-        aPath,
-        bPath,
+        aName,
+        bName,
       ],
       {
+        cwd: dir,
         encoding: "utf8",
         timeout: GIT_TIMEOUT_MS,
         // Worst case (every line changed in a max-size file): base + candidate
@@ -374,13 +380,34 @@ function unifiedDiff(
     ) {
       throw new TrialCandidateError("candidate_unavailable");
     }
+    // Rewrite the platform-dependent header lines ourselves so headers always
+    // read `--- a/<relpath>` / `+++ b/<relpath>` on every platform.
     let text = result.stdout;
-    text = text.replaceAll(aPath, `/${path}`).replaceAll(bPath, `/${path}`);
+    text = text.replace(
+      /^diff --git a\/a b\/b$/m,
+      `diff --git a/${path} b/${path}`,
+    );
+    text = text.replace(/^--- a\/a$/m, `--- a/${path}`);
+    text = text.replace(/^\+\+\+ b\/b$/m, `+++ b/${path}`);
     if (Buffer.byteLength(text, "utf8") > maxBytes) {
-      const buf = Buffer.from(text, "utf8").subarray(0, maxBytes);
+      const marker = "\n… (truncated)\n";
+      const markerBytes = Buffer.byteLength(marker, "utf8");
+      if (maxBytes <= markerBytes) {
+        const raw = Buffer.from(text, "utf8").subarray(0, maxBytes);
+        let cut = raw.length;
+        while (cut > 0 && ((raw[cut - 1] ?? 0) & 0xc0) === 0x80) cut -= 1;
+        if (cut > 0 && (raw[cut - 1] ?? 0) >= 0xc0) cut -= 1;
+        return { text: raw.subarray(0, cut).toString("utf8"), truncated: true };
+      }
+      const buf = Buffer.from(text, "utf8").subarray(0, maxBytes - markerBytes);
       let end = buf.length;
       while (end > 0 && ((buf[end - 1] ?? 0) & 0xc0) === 0x80) end -= 1;
-      text = buf.subarray(0, end).toString("utf8");
+      // Drop the lead byte of a character the cut split: leaving it would
+      // decode to U+FFFD (3 bytes) and overflow the byte budget.
+      if (end > 0 && (buf[end - 1] ?? 0) >= 0xc0) end -= 1;
+      // The marker itself is included in the byte budget so the returned diff
+      // never exceeds the caller's maxBytes (and TRIAL_DIFF_MAX_BYTES overall).
+      text = buf.subarray(0, end).toString("utf8") + marker;
       return { text, truncated: true };
     }
     return { text, truncated: false };
@@ -394,6 +421,10 @@ export interface LoadTrialCandidateInput {
   readonly trial: TrialConfig;
   readonly expectedArtifactSha256: string;
   readonly literalPatchPaths: readonly string[];
+  /** Resolved at claim time and frozen on the grant row. Absent for legacy
+   * rows, which fall back to the currently published operator template. */
+  readonly frozenStateDir?: string;
+  readonly frozenSourceRepoPath?: string;
 }
 
 /** Verify + render the retained candidate for a completed trial. */
@@ -410,9 +441,9 @@ export function loadTrialCandidate(
   if (!/^[0-9a-f]{64}$/.test(input.expectedArtifactSha256)) {
     throw new TrialCandidateError("candidate_unavailable");
   }
-  const stateDir = readOperatorStateDir(
-    input.trial.runner.bridgeConfigTemplatePath,
-  );
+  const stateDir =
+    input.frozenStateDir ??
+    readTrialOperatorStateDir(input.trial.runner.bridgeConfigTemplatePath);
   const realState = realDirectory(stateDir, "candidate_unavailable");
   const runsDir = realDirectory(
     join(realState, "runs"),
@@ -439,9 +470,12 @@ export function loadTrialCandidate(
   if (artifact.sourceRevision !== input.trial.sourceRevision) {
     throw new TrialCandidateError("candidate_unavailable");
   }
+  // Prefer the frozen source root persisted for this execution. Legacy rows
+  // have no frozen root and fall back to the currently published template.
+  const frozenSource = input.frozenSourceRepoPath;
   const snapshotRoot = realDirectory(
-    resolve(input.trial.sourceRepoPath),
-    "base_mismatch",
+    resolve(frozenSource ?? input.trial.sourceRepoPath),
+    frozenSource === undefined ? "base_mismatch" : "candidate_unavailable",
   );
   // Deletion-only artifacts retain no candidate tree; the bridge never creates
   // `candidate` when every entry is a deletion.

@@ -5415,11 +5415,16 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
             (entry): entry is string => typeof entry === "string",
           )
         : [];
+      const roots = repo.readTrialCandidateRoots(session.id, executionId);
       const view = loadTrialCandidate({
         executionId,
         trial,
         expectedArtifactSha256: report.artifact.sha256,
         literalPatchPaths,
+        ...(roots.stateDir !== null ? { frozenStateDir: roots.stateDir } : {}),
+        ...(roots.sourceDir !== null
+          ? { frozenSourceRepoPath: roots.sourceDir }
+          : {}),
       });
       return c.json({ available: true, ...view }, 200);
     } catch (error) {

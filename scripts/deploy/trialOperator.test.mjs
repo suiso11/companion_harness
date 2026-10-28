@@ -693,6 +693,16 @@ describe("companion-deploy.sh trial-operator ordering", () => {
 describe("build-trial-operator frozen profile fields", () => {
   const source = readFileSync(join(HERE, "build-trial-operator.mts"), "utf8");
 
+  it("includes the required sourceRepoPath before parsing trialRaw", () => {
+    const start = source.indexOf("const trialRaw = {");
+    const parseAt = source.indexOf(
+      "parseTrialConfig(JSON.stringify(trialRaw))",
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(parseAt).toBeGreaterThan(start);
+    expect(source.slice(start, parseAt)).toContain("sourceRepoPath: SRC");
+  });
+
   it("copies the frozen allowedPaths and modelRoute into autonomy JSON", () => {
     expect(source).toContain("allowedPaths: [...config.profile.allowedPaths]");
     expect(source).toContain("modelRoute: config.profile.model.route");

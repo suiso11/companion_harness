@@ -271,6 +271,9 @@ try {
     mandatoryChecks: selectedChecks,
     configFingerprint: "0".repeat(64),
     sourceRevision: "0".repeat(40),
+    // Required by the strict parser: base bytes for candidate review are
+    // read from this exact frozen source tree, never from git.
+    sourceRepoPath: SRC,
     currentModel,
     disclosedWholeRepoRead: true,
     timeoutMs: limits.timeoutMs,

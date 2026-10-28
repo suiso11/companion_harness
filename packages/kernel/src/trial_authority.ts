@@ -1452,6 +1452,37 @@ export function approveTrialProposal(
 }
 
 /** Exact immutable intent read (pure GET: never mutates). */
+/** Claim-time resolved candidate roots for one owned execution. Nullable
+ * columns are returned as null for legacy rows so callers fall back to the
+ * current template. */
+export function readTrialCandidateRoots(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+): { stateDir: string | null; sourceDir: string | null } {
+  const session = requireId(sessionId, "sessionId");
+  const exec = requireId(executionId, "executionId");
+  const row = db
+    .prepare(
+      "SELECT session_id, candidate_state_dir, candidate_source_dir FROM trial_grants WHERE execution_id=?",
+    )
+    .get(exec) as
+    | {
+        session_id: string;
+        candidate_state_dir: string | null;
+        candidate_source_dir: string | null;
+      }
+    | undefined;
+  if (!row || row.session_id !== session)
+    throw new RepositoryNotFoundError(
+      `grant ${exec} not found in session ${session}`,
+    );
+  return {
+    stateDir: row.candidate_state_dir,
+    sourceDir: row.candidate_source_dir,
+  };
+}
+
 export function readTrialIntent(
   db: Database.Database,
   sessionId: string,
@@ -1526,6 +1557,9 @@ export function claimTrialGrant(
     now?: number;
     profile: TrialProfileSnapshot;
     workspaceAlias: string;
+    /** Claim-time resolved roots, frozen for later candidate review. */
+    candidateStateDir?: string | null;
+    candidateSourceDir?: string | null;
   },
 ): {
   status: number;
@@ -1764,8 +1798,15 @@ export function claimTrialGrant(
       "launch request",
     );
     db.prepare(
-      "UPDATE trial_grants SET status='claimed', control_generation=?, request_json=?, claimed_at=? WHERE execution_id=?",
-    ).run(ctl.version, JSON.stringify(req), now, exec);
+      "UPDATE trial_grants SET status='claimed', control_generation=?, request_json=?, claimed_at=?, candidate_state_dir=?, candidate_source_dir=? WHERE execution_id=?",
+    ).run(
+      ctl.version,
+      JSON.stringify(req),
+      now,
+      options.candidateStateDir ?? null,
+      options.candidateSourceDir ?? null,
+      exec,
+    );
     const updated = db
       .prepare("SELECT * FROM trial_grants WHERE execution_id=?")
       .get(exec) as Parameters<typeof toGrantView>[0];

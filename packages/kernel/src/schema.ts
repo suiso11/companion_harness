@@ -1391,6 +1391,10 @@ export const trialGrants = sqliteTable("trial_grants", {
   // Schema13: frozen approval-time workspace alias + profile snapshot JSON.
   workspaceAlias: text("workspace_alias"),
   approvedProfileJson: text("approved_profile_json"),
+  // Schema36: claim-time resolved candidate roots. Nullable for legacy rows,
+  // which fall back to the currently published operator template.
+  candidateStateDir: text("candidate_state_dir"),
+  candidateSourceDir: text("candidate_source_dir"),
 });
 
 // Schema13: internal execution-lifecycle tables (Root service only).

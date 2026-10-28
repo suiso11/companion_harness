@@ -224,7 +224,20 @@ describe("loadTrialCandidate", () => {
     roots.push(fixture.root);
     const view = load(fixture);
     expect(view.truncated).toBe(true);
+    // The marker is inside the 65536-byte budget (off-by-one guard).
     expect(Buffer.byteLength(view.diff, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(view.diff.endsWith("\n… (truncated)\n")).toBe(true);
+  });
+
+  it("keeps the truncation marker within an exact 65536-byte budget", () => {
+    // A single ASCII line yields a header plus one huge hunk line: the cut
+    // lands exactly at the cap and must still leave room for the marker.
+    const fixture = makeFixture({ candidate: `${"z".repeat(140_000)}\n` });
+    roots.push(fixture.root);
+    const view = load(fixture);
+    expect(view.truncated).toBe(true);
+    expect(Buffer.byteLength(view.diff, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(view.diff.endsWith("\n… (truncated)\n")).toBe(true);
   });
 
   it("fails closed when the frozen snapshot base file is missing", () => {
@@ -232,6 +245,50 @@ describe("loadTrialCandidate", () => {
     roots.push(fixture.root);
     rmSync(join(fixture.repoPath, "apps/a.ts"));
     expect(() => load(fixture)).toThrow(/base_mismatch/);
+  });
+
+  it("verifies deletion bases against the sealed source budget, not 16 MiB", () => {
+    const base = "a".repeat(17 * 1024 * 1024);
+    const fixture = makeFixture({ kind: "delete", base });
+    roots.push(fixture.root);
+    const view = load(fixture);
+    expect(view.changes[0]?.kind).toBe("delete");
+    expect(view.truncated).toBe(true);
+  });
+
+  it("uses the frozen claim-time roots instead of the current template", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    // Point the current template at a different (pruned) state dir: the
+    // frozen roots must win.
+    writeFileSync(
+      fixture.trial.runner.bridgeConfigTemplatePath,
+      JSON.stringify({ stateDir: join(fixture.root, "elsewhere") }),
+    );
+    const view = loadTrialCandidate({
+      executionId: fixture.executionId,
+      trial: fixture.trial,
+      expectedArtifactSha256: fixture.artifactSha256,
+      literalPatchPaths: ["apps/a.ts"],
+      frozenStateDir: join(fixture.root, "state"),
+      frozenSourceRepoPath: fixture.repoPath,
+    });
+    expect(view.diff).toContain("-one");
+  });
+
+  it("fails closed when a frozen claim-time root was pruned", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    expect(() =>
+      loadTrialCandidate({
+        executionId: fixture.executionId,
+        trial: fixture.trial,
+        expectedArtifactSha256: fixture.artifactSha256,
+        literalPatchPaths: ["apps/a.ts"],
+        frozenStateDir: join(fixture.root, "pruned-state"),
+        frozenSourceRepoPath: fixture.repoPath,
+      }),
+    ).toThrow(/candidate_unavailable/);
   });
 
   it("reads base bytes from the snapshot even when a git export is absent", () => {

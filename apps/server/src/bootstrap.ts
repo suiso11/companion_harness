@@ -3137,6 +3137,7 @@ export async function startServer(
           nodeRealpath: trialConfig.runner.nodeRealpath,
           bridgeScriptPath: trialConfig.runner.bridgeScriptPath,
           bridgeConfigTemplatePath: trialConfig.runner.bridgeConfigTemplatePath,
+          sourceRepoPath: trialConfig.sourceRepoPath,
           systemctlRealpath: trialConfig.runner.systemctlRealpath,
           xdgRuntimeDir: trialConfig.runner.xdgRuntimeDir,
           workspaceAlias: trialConfig.workspaceAlias,

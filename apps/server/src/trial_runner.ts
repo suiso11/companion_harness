@@ -38,6 +38,7 @@ import {
   type TrialMaterializationResolution,
 } from "./autodispatch_materializer.js";
 import type { ServerLogger } from "./logger.js";
+import { readTrialOperatorStateDir } from "./trial_candidate.js";
 import {
   narrowTrialModelRelayCaps,
   TrialModelRelay,
@@ -182,6 +183,8 @@ export interface TrialRunnerConfig {
    * `profile.model.sockHostPath` is used verbatim, and the parsed config is
    * copied verbatim to the private run dir (no template rewrite). */
   bridgeConfigTemplatePath: string;
+  /** Sealed source snapshot for manual (non-policy) grants. */
+  sourceRepoPath?: string | undefined;
   systemctlRealpath: string;
   xdgRuntimeDir: string;
   workspaceAlias: string;
@@ -687,6 +690,24 @@ export class TrialRunner {
           resolution.kind === "policy"
             ? resolution.profile
             : this.config.profile;
+        let candidateStateDir: string | undefined;
+        let candidateSourceDir: string | undefined;
+        if (resolution.kind === "policy") {
+          candidateStateDir = join(
+            resolution.materialization.state.jobRoot,
+            "bridge-state",
+          );
+          candidateSourceDir = resolution.materialization.state.snapshotRoot;
+        } else {
+          try {
+            candidateStateDir = readTrialOperatorStateDir(
+              this.config.bridgeConfigTemplatePath,
+            );
+            candidateSourceDir = this.config.sourceRepoPath;
+          } catch {
+            // Legacy/unreadable template: no frozen roots, review falls back.
+          }
+        }
         try {
           const out = this.repo.claimTrial(
             candidate.sessionId,
@@ -696,6 +717,10 @@ export class TrialRunner {
               now: this.clock(),
               profile: claimProfile,
               workspaceAlias: this.config.workspaceAlias,
+              ...(candidateStateDir !== undefined ? { candidateStateDir } : {}),
+              ...(candidateSourceDir !== undefined
+                ? { candidateSourceDir }
+                : {}),
             },
           );
           // claimTrial body is { kind, grant, request, applied? }: normalize.
