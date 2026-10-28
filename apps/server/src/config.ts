@@ -1516,7 +1516,8 @@ export interface TrialConfig {
   readonly configFingerprint: string;
   /** 40 lowercase hex source revision. */
   readonly sourceRevision: string;
-  /** Absolute path to the source checkout used to verify base bytes. */
+  /** Absolute path to the frozen source snapshot the trial started from; base
+   * bytes are read from this sealed tree (never from git). */
   readonly sourceRepoPath: string;
   /** Current model identifier (1..256 chars). */
   readonly currentModel: string;

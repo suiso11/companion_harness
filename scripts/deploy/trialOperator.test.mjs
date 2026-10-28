@@ -211,6 +211,7 @@ describe("disableTrialEnv", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "0".repeat(64),
       sourceRevision: "0".repeat(40),
+      sourceRepoPath: "/opt/source-snapshot",
       currentModel: "local-chat",
       disclosedWholeRepoRead: true,
       timeoutMs: 60_000,
@@ -459,6 +460,7 @@ describe("autodispatch config shape (real parser)", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "0".repeat(64),
       sourceRevision: "0".repeat(40),
+      sourceRepoPath: "/synthetic/source",
       currentModel: resolveCurrentModel({
         COMPANION_MODEL_JSON: JSON.stringify({ model: "local-chat" }),
       }),

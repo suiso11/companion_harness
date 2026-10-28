@@ -295,33 +295,17 @@ function readOperatorStateDir(templatePath: string): string {
   return stateDir;
 }
 
-function baseBytes(
-  repoPath: string,
-  revision: string,
-  path: string,
-): Buffer | null {
-  const result = spawnSync(
-    "git",
-    ["-C", repoPath, "show", `${revision}:${path}`],
-    {
-      encoding: "buffer",
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: CANDIDATE_FILE_MAX_BYTES,
-      env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: tmpdir(),
-        GIT_TERMINAL_PROMPT: "0",
-      },
-    },
-  );
-  if (
-    result.error !== undefined ||
-    result.status !== 0 ||
-    !Buffer.isBuffer(result.stdout)
-  ) {
+/** Base bytes come from the frozen source snapshot the trial started from.
+ * `sourceRevision` is a synthetic sealed-manifest revision (not a git object),
+ * so `git show` can never resolve it. The snapshot is verified byte-for-byte
+ * against the clean export when the frozen root is built, and the workspace is
+ * materialized from the same tree. */
+function baseBytes(snapshotRoot: string, path: string): Buffer | null {
+  try {
+    return readBeneath(snapshotRoot, path, CANDIDATE_FILE_MAX_BYTES);
+  } catch {
     return null;
   }
-  return result.stdout;
 }
 
 function looksBinary(bytes: Buffer): boolean {
@@ -425,7 +409,10 @@ export function loadTrialCandidate(
   if (artifact.sourceRevision !== input.trial.sourceRevision) {
     throw new TrialCandidateError("candidate_unavailable");
   }
-  const repoPath = resolve(input.trial.sourceRepoPath);
+  const snapshotRoot = realDirectory(
+    resolve(input.trial.sourceRepoPath),
+    "base_mismatch",
+  );
   const candidateRoot = realDirectory(
     join(runDir, "candidate"),
     "candidate_unavailable",
@@ -444,7 +431,7 @@ export function loadTrialCandidate(
     }
     let base: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     if (change.kind !== "create") {
-      const bytes = baseBytes(repoPath, artifact.sourceRevision, change.path);
+      const bytes = baseBytes(snapshotRoot, change.path);
       if (bytes === null) throw new TrialCandidateError("base_mismatch");
       if (sha256(bytes) !== change.baseSha256) {
         throw new TrialCandidateError("base_mismatch");

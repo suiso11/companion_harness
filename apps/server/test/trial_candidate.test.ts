@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -20,18 +20,6 @@ const EXECUTION_ID = "6747773a-0000-4000-8000-000000000000";
 
 function sha256(bytes: Buffer | string): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function git(root: string, args: string[]): string {
-  return execFileSync("git", ["-C", root, ...args], {
-    encoding: "utf8",
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      HOME: root,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-    },
-  }).trim();
 }
 
 interface Fixture {
@@ -58,22 +46,12 @@ function makeFixture(
   const base = options.base ?? "one\n";
   const candidate = options.candidate ?? "two\n";
   const root = mkdtempSync(join(tmpdir(), "companion-candidate-"));
+  // The frozen source snapshot: a plain tree, no .git. The trial's revision is
+  // the synthetic manifest hash, so base bytes can only come from here.
   const repo = join(root, "source");
   mkdirSync(join(repo, "apps"), { recursive: true });
-  git(root, ["init", "-q", "source"]);
   writeFileSync(join(repo, "apps/a.ts"), base);
-  git(repo, ["add", "-A"]);
-  git(repo, [
-    "-c",
-    "user.email=t@example.invalid",
-    "-c",
-    "user.name=t",
-    "commit",
-    "-q",
-    "-m",
-    "base",
-  ]);
-  const revision = git(repo, ["rev-parse", "HEAD"]);
+  const revision = "a".repeat(40);
   const stateDir = join(root, "state");
   const runDir = join(stateDir, "runs", EXECUTION_ID);
   const candidateRoot = join(runDir, "candidate");
@@ -214,5 +192,19 @@ describe("loadTrialCandidate", () => {
     const fixture = makeFixture({ baseSha256: "1".repeat(64) });
     roots.push(fixture.root);
     expect(() => load(fixture)).toThrow(/base_mismatch/);
+  });
+
+  it("fails closed when the frozen snapshot base file is missing", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    rmSync(join(fixture.repoPath, "apps/a.ts"));
+    expect(() => load(fixture)).toThrow(/base_mismatch/);
+  });
+
+  it("reads base bytes from the snapshot even when a git export is absent", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    expect(existsSync(join(fixture.repoPath, ".git"))).toBe(false);
+    expect(load(fixture).diff).toContain("-one");
   });
 });

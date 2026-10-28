@@ -449,7 +449,9 @@ try {
     ...trialRaw,
     configFingerprint: fp,
     sourceRevision: rev,
-    sourceRepoPath: input.sourceRepo,
+    // Base bytes for candidate review are read from this exact sealed tree,
+    // not from git: the computed sourceRevision is a synthetic manifest hash.
+    sourceRepoPath: res.materialization.state.snapshotRoot,
     mandatoryChecks: Object.keys(eff.checks as object).sort(),
     allowedPaths: [...config.profile.allowedPaths],
     modelRoute: config.profile.model.route,
