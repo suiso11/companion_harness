@@ -591,6 +591,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   readonly prompt: string;
   readonly launcherExecuted: boolean;
   readonly config: string;
+  readonly ompEnv: Record<string, string>;
 } {
   const dir = tempRoot("guest-realpi");
   const workRoot = join(dir, "work");
@@ -636,7 +637,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
     .join("\n");
   write(
     join(fake, "omp"),
-    `#!${process.execPath}\nimport { readFileSync, writeFileSync } from 'node:fs';\nconst argv = process.argv.slice(2);\nwriteFileSync('/work/captured-argv.json', JSON.stringify(argv));\nwriteFileSync('/work/captured-prompt.txt', argv.at(-1) ?? "");\ntry { writeFileSync('/work/captured-config.yml', readFileSync((process.env.HOME ?? '/scratch') + '/.omp/agent/config.yml')); } catch {}\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
+    `#!${process.execPath}\nimport { readFileSync, writeFileSync } from 'node:fs';\nconst argv = process.argv.slice(2);\nwriteFileSync('/work/captured-argv.json', JSON.stringify(argv));\nwriteFileSync('/work/captured-prompt.txt', argv.at(-1) ?? "");\ntry { writeFileSync('/work/captured-config.yml', readFileSync((process.env.HOME ?? '/scratch') + '/.omp/agent/config.yml')); } catch {}\nwriteFileSync('/work/captured-env.json', JSON.stringify(process.env));\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
     0o700,
   );
   const jobFile = join(dir, "job.json");
@@ -708,6 +709,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   let argv: string[] = [];
   let prompt = "";
   let config = "";
+  let ompEnv: Record<string, string> = {};
   try {
     argv = JSON.parse(
       readFileSync(join(workRoot, "captured-argv.json"), "utf8"),
@@ -721,6 +723,13 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   } catch {
     // The fake OMP may not have reached the config read.
   }
+  try {
+    ompEnv = JSON.parse(
+      readFileSync(join(workRoot, "captured-env.json"), "utf8"),
+    ) as Record<string, string>;
+  } catch {
+    // The fake OMP may not have been spawned.
+  }
   return {
     status: run.status,
     stderr: run.stderr ?? "",
@@ -728,6 +737,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
     prompt,
     launcherExecuted: existsSync(join(workRoot, "launcher-was-executed")),
     config,
+    ompEnv,
   };
 }
 
@@ -879,10 +889,15 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
       // 416-char cycle x3) after making the exact requested edit. On 40bc410
       // trial 96f19690 repeated a ~600-char cycle after 14 model calls: the
       // guard still exited 1, so the bridge never reached host checks.
-      // Calls (maxOutputTokens 1024) and the run (maxModelCalls 64 +
-      // timeoutMs) are already capped, so the guard must be off entirely.
+      // On 8495fed the config key above was present yet a write trial still
+      // died with "Thinking loop detected ... 466-character cycle 3x" (exit
+      // 1): OMP 18.12.1 ignores model.loopGuard.enabled in the headless
+      // stream path, so the env switch is the authoritative one. Calls
+      // (maxOutputTokens 1024) and the run (maxModelCalls 64 + timeoutMs)
+      // are already capped, so the guard must be off entirely.
       const run = runRealPiGuestJob("write");
       expect(run.status, run.stderr).toBe(0);
+      expect(run.ompEnv.PI_NO_THINKING_LOOP_GUARD).toBe("1");
       expect(run.config).toContain("model:");
       expect(run.config).toMatch(
         /model:\n {2}loopGuard:\n {4}enabled: false\n/,

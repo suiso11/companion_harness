@@ -316,17 +316,22 @@ function writeAgentConfig(agentDir, port) {
       "  enabled: false",
       "  maxRetries: 0",
       "  modelFallback: false",
-      // OMP's loop guard (model.loopGuard) aborts a stream when the assistant
-      // repeats itself. E2E write trials on eb92119 showed a finished guest
-      // emitting the exact requested one-line edit and then repeating its
-      // report (416-char cycle x3); on 40bc410 (after #173 disabled only
-      // checkAssistantContent) trial 96f19690 still edited successfully, then
-      // after 14 model calls the guard detected a repeated ~600-char cycle and
-      // OMP exited 1, so the bridge reported exit 10 "executor failed" with no
-      // artifact before host checks ran. Runaway generation is already bounded
-      // by relay maxOutputTokens (1024/call), relay.maxModelCalls (64/run) and
-      // the trial timeoutMs, and host checks plus artifact hashing are the
-      // authority, so disable the guard entirely.
+      // OMP's loop guard aborts a stream when the assistant repeats itself.
+      // E2E write trials on eb92119 showed a finished guest emitting the exact
+      // requested one-line edit and then repeating its report (416-char cycle
+      // x3); on 40bc410 trial 96f19690 still edited successfully, then after
+      // 14 model calls the guard detected a repeated ~600-char cycle and OMP
+      // exited 1, so the bridge reported exit 10 "executor failed" with no
+      // artifact before host checks ran. This config key is NOT enough: on
+      // 8495fed the guest config below carried `model.loopGuard.enabled:
+      // false`, yet trial output still failed with "Thinking loop detected ...
+      // 466-character cycle 3x" and exit 1. OMP 18.12.1 honors the key in
+      // `omp config get` but the headless JSON stream options ignore it, so
+      // the authoritative switch is PI_NO_THINKING_LOOP_GUARD=1 in `env`.
+      // Runaway generation is already bounded by relay maxOutputTokens
+      // (1024/call), relay.maxModelCalls (64/run) and the trial timeoutMs, and
+      // host checks plus artifact hashing are the authority, so disable the
+      // guard entirely.
       "model:",
       "  loopGuard:",
       "    enabled: false",
@@ -782,6 +787,9 @@ async function main() {
     HOME: home,
     TMPDIR: scratch,
     PI_SKIP_VERSION_CHECK: "1",
+    // Disable OMP's thinking/prose loop guard (see writeAgentConfig): the
+    // config.yml key above is ignored by the headless stream path.
+    PI_NO_THINKING_LOOP_GUARD: "1",
     PI_TELEMETRY: "0",
     DO_NOT_TRACK: "1",
     OMP_LOG_LEVEL: "error",
