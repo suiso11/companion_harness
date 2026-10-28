@@ -1451,7 +1451,6 @@ export function approveTrialProposal(
   return out;
 }
 
-/** Exact immutable intent read (pure GET: never mutates). */
 /** Claim-time resolved candidate roots for one owned execution. Nullable
  * columns are returned as null for legacy rows so callers fall back to the
  * current template. */
@@ -1459,27 +1458,49 @@ export function readTrialCandidateRoots(
   db: Database.Database,
   sessionId: string,
   executionId: string,
-): { stateDir: string | null; sourceDir: string | null } {
+): {
+  stateDir: string | null;
+  sourceDir: string | null;
+  sourceRevision: string | null;
+} {
   const session = requireId(sessionId, "sessionId");
   const exec = requireId(executionId, "executionId");
   const row = db
     .prepare(
-      "SELECT session_id, candidate_state_dir, candidate_source_dir FROM trial_grants WHERE execution_id=?",
+      "SELECT session_id, candidate_state_dir, candidate_source_dir, request_json FROM trial_grants WHERE execution_id=?",
     )
     .get(exec) as
     | {
         session_id: string;
         candidate_state_dir: string | null;
         candidate_source_dir: string | null;
+        request_json: string | null;
       }
     | undefined;
   if (!row || row.session_id !== session)
     throw new RepositoryNotFoundError(
       `grant ${exec} not found in session ${session}`,
     );
+  let sourceRevision: string | null = null;
+  if (typeof row.request_json === "string") {
+    try {
+      const parsed = JSON.parse(row.request_json) as {
+        sourceRevision?: unknown;
+      };
+      if (
+        typeof parsed.sourceRevision === "string" &&
+        /^[0-9a-f]{40}$/.test(parsed.sourceRevision)
+      ) {
+        sourceRevision = parsed.sourceRevision;
+      }
+    } catch {
+      sourceRevision = null;
+    }
+  }
   return {
     stateDir: row.candidate_state_dir,
     sourceDir: row.candidate_source_dir,
+    sourceRevision,
   };
 }
 

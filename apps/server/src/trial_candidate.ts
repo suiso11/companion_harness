@@ -22,13 +22,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { MAX_SOURCE_BYTES } from "./autodispatch_materializer.js";
+import { MAX_FILES, MAX_SOURCE_BYTES } from "./autodispatch_materializer.js";
 import type { TrialConfig } from "./config.js";
 
 export const TRIAL_DIFF_MAX_BYTES = 64 * 1024;
 const ARTIFACT_MAX_BYTES = 1024 * 1024;
 const CANDIDATE_FILE_MAX_BYTES = 16 * 1024 * 1024;
-const CHANGES_MAX = 1000;
+const CHANGES_MAX = MAX_FILES;
 const GIT_TIMEOUT_MS = 5000;
 
 export type TrialCandidateErrorCode =
@@ -425,6 +425,9 @@ export interface LoadTrialCandidateInput {
    * rows, which fall back to the currently published operator template. */
   readonly frozenStateDir?: string;
   readonly frozenSourceRepoPath?: string;
+  /** Approved source revision frozen in the claim wire. Absent for legacy
+   * rows, which fall back to the current trial config. */
+  readonly frozenSourceRevision?: string;
 }
 
 /** Verify + render the retained candidate for a completed trial. */
@@ -467,7 +470,9 @@ export function loadTrialCandidate(
     throw new TrialCandidateError("candidate_digest_mismatch");
   }
   const artifact = parseArtifact(artifactBytes, input.executionId);
-  if (artifact.sourceRevision !== input.trial.sourceRevision) {
+  const expectedRevision =
+    input.frozenSourceRevision ?? input.trial.sourceRevision;
+  if (artifact.sourceRevision !== expectedRevision) {
     throw new TrialCandidateError("candidate_unavailable");
   }
   // Prefer the frozen source root persisted for this execution. Legacy rows

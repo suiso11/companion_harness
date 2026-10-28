@@ -39,6 +39,7 @@ function makeFixture(
     readonly kind?: "modify" | "create" | "delete";
     readonly baseSha256?: string;
     readonly candidateSha256?: string;
+    readonly extraDeletes?: number;
   } = {},
 ): Fixture {
   const path = options.path ?? "apps/a.ts";
@@ -69,6 +70,23 @@ function makeFixture(
     candidateMode: kind === "delete" ? null : 0o100644,
     size: kind === "delete" ? 0 : Buffer.byteLength(candidate),
   };
+  const changes =
+    options.extraDeletes === undefined
+      ? [change]
+      : Array.from({ length: options.extraDeletes }, (_, i) => {
+          const deletePath = `apps/d${i}.bin`;
+          const bytes = Buffer.from(`\0${i}`);
+          writeFileSync(join(repo, deletePath), bytes);
+          return {
+            path: deletePath,
+            kind: "delete" as const,
+            baseSha256: sha256(bytes),
+            baseMode: 0o100644,
+            candidateSha256: null,
+            candidateMode: null,
+            size: 0,
+          };
+        });
   const artifactBytes = Buffer.from(
     `${JSON.stringify({
       schemaVersion: 2,
@@ -77,8 +95,8 @@ function makeFixture(
       baseManifestDigest: "d".repeat(64),
       profileFingerprint: "e".repeat(64),
       sourceRevision: revision,
-      changeCount: 1,
-      changes: [change],
+      changeCount: changes.length,
+      changes,
     })}\n`,
   );
   writeFileSync(join(runDir, "artifact.json"), artifactBytes);
@@ -289,6 +307,34 @@ describe("loadTrialCandidate", () => {
         frozenSourceRepoPath: fixture.repoPath,
       }),
     ).toThrow(/candidate_unavailable/);
+  });
+
+  it("uses the frozen claim-time source revision when the current config drifts", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    const drifted = { ...fixture.trial, sourceRevision: "b".repeat(40) };
+    const loadDrifted = (frozenSourceRevision?: string) =>
+      loadTrialCandidate({
+        executionId: fixture.executionId,
+        trial: drifted,
+        expectedArtifactSha256: fixture.artifactSha256,
+        literalPatchPaths: ["apps/a.ts"],
+        ...(frozenSourceRevision !== undefined ? { frozenSourceRevision } : {}),
+      });
+    expect(() => loadDrifted()).toThrow(/candidate_unavailable/);
+    expect(loadDrifted("a".repeat(40)).diff).toContain("-one");
+  });
+
+  it("accepts change counts supported by the bridge", () => {
+    const fixture = makeFixture({ extraDeletes: 1001 });
+    roots.push(fixture.root);
+    const view = loadTrialCandidate({
+      executionId: fixture.executionId,
+      trial: fixture.trial,
+      expectedArtifactSha256: fixture.artifactSha256,
+      literalPatchPaths: ["apps"],
+    });
+    expect(view.changes).toHaveLength(1001);
   });
 
   it("reads base bytes from the snapshot even when a git export is absent", () => {

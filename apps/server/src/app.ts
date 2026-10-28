@@ -5425,6 +5425,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         ...(roots.sourceDir !== null
           ? { frozenSourceRepoPath: roots.sourceDir }
           : {}),
+        ...(roots.sourceRevision !== null
+          ? { frozenSourceRevision: roots.sourceRevision }
+          : {}),
       });
       return c.json({ available: true, ...view }, 200);
     } catch (error) {
