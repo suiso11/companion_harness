@@ -8,12 +8,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { TrialConfig } from "../src/config.js";
 import {
   loadTrialCandidate,
   TrialCandidateError,
+  truncateDiff,
 } from "../src/trial_candidate.js";
 
 const EXECUTION_ID = "6747773a-0000-4000-8000-000000000000";
@@ -58,6 +59,7 @@ function makeFixture(
   const candidateRoot = join(runDir, "candidate");
   mkdirSync(join(candidateRoot, "apps"), { recursive: true });
   if (kind !== "delete") {
+    mkdirSync(dirname(join(candidateRoot, path)), { recursive: true });
     writeFileSync(join(candidateRoot, path), candidate);
   }
   const change = {
@@ -256,6 +258,40 @@ describe("loadTrialCandidate", () => {
     expect(view.truncated).toBe(true);
     expect(Buffer.byteLength(view.diff, "utf8")).toBeLessThanOrEqual(64 * 1024);
     expect(view.diff.endsWith("\n… (truncated)\n")).toBe(true);
+  });
+
+  it("counts the remaining budget against binary notices", () => {
+    const notice = "Binary files a/apps/a.ts and b/apps/a.ts differ\n";
+    const rendered = truncateDiff(notice, 12);
+    expect(rendered.truncated).toBe(true);
+    expect(Buffer.byteLength(rendered.text, "utf8")).toBeLessThanOrEqual(12);
+  });
+
+  it("accepts producer-supported nested paths beyond the scope length", () => {
+    const segments = Array.from({ length: 40 }, (_, i) =>
+      `d${i}`.padEnd(12, "x"),
+    );
+    const path = `apps/${segments.join("/")}/a.ts`;
+    expect(path.length).toBeGreaterThan(512);
+    const fixture = makeFixture({ path });
+    roots.push(fixture.root);
+    const baseDir = join(fixture.repoPath, "apps", ...segments);
+    mkdirSync(baseDir, { recursive: true });
+    writeFileSync(join(baseDir, "a.ts"), "one\n");
+    const view = load(fixture, [path]);
+    expect(view.changes[0]?.path).toBe(path);
+    expect(view.truncated).toBe(false);
+  });
+
+  it("renders replacement-token filenames literally", () => {
+    const path = "apps/$&.ts";
+    const fixture = makeFixture({ path });
+    roots.push(fixture.root);
+    writeFileSync(join(fixture.repoPath, "apps/$&.ts"), "one\n");
+    const view = load(fixture, ["apps/$&.ts"]);
+    expect(view.diff).toContain("--- a/apps/$&.ts");
+    expect(view.diff).toContain("+++ b/apps/$&.ts");
+    expect(view.diff).not.toContain("a/apps/---");
   });
 
   it("fails closed when the frozen snapshot base file is missing", () => {

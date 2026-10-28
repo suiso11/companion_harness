@@ -29,6 +29,10 @@ export const TRIAL_DIFF_MAX_BYTES = 64 * 1024;
 const ARTIFACT_MAX_BYTES = 1024 * 1024;
 const CANDIDATE_FILE_MAX_BYTES = 16 * 1024 * 1024;
 const CHANGES_MAX = MAX_FILES;
+// The producer's snapshot walk imposes no per-path cap (only a short grant
+// scope is required), so keep this above any realistic nested path instead of
+// rejecting producer-supported descendants.
+const CANDIDATE_PATH_MAX_CHARS = 4096;
 const GIT_TIMEOUT_MS = 5000;
 
 export type TrialCandidateErrorCode =
@@ -146,7 +150,11 @@ function realDirectory(path: string, code: TrialCandidateErrorCode): string {
 }
 
 function normalizeRelativePath(path: unknown): string | null {
-  if (typeof path !== "string" || path.length < 1 || path.length > 512)
+  if (
+    typeof path !== "string" ||
+    path.length < 1 ||
+    path.length > CANDIDATE_PATH_MAX_CHARS
+  )
     return null;
   if (path.includes("\0") || path.includes("\\") || path.startsWith("/"))
     return null;
@@ -321,10 +329,10 @@ function unifiedDiff(
   maxBytes: number,
 ): { text: string; truncated: boolean } {
   if (looksBinary(base) || looksBinary(candidate)) {
-    return {
-      text: `Binary files a/${path} and b/${path} differ\n`,
-      truncated: false,
-    };
+    return truncateDiff(
+      `Binary files a/${path} and b/${path} differ\n`,
+      maxBytes,
+    );
   }
   const dir = mkdtempSync(join(tmpdir(), "companion-candidate-diff-"));
   try {
@@ -385,35 +393,42 @@ function unifiedDiff(
     let text = result.stdout;
     text = text.replace(
       /^diff --git a\/a b\/b$/m,
-      `diff --git a/${path} b/${path}`,
+      () => `diff --git a/${path} b/${path}`,
     );
-    text = text.replace(/^--- a\/a$/m, `--- a/${path}`);
-    text = text.replace(/^\+\+\+ b\/b$/m, `+++ b/${path}`);
-    if (Buffer.byteLength(text, "utf8") > maxBytes) {
-      const marker = "\n… (truncated)\n";
-      const markerBytes = Buffer.byteLength(marker, "utf8");
-      if (maxBytes <= markerBytes) {
-        const raw = Buffer.from(text, "utf8").subarray(0, maxBytes);
-        let cut = raw.length;
-        while (cut > 0 && ((raw[cut - 1] ?? 0) & 0xc0) === 0x80) cut -= 1;
-        if (cut > 0 && (raw[cut - 1] ?? 0) >= 0xc0) cut -= 1;
-        return { text: raw.subarray(0, cut).toString("utf8"), truncated: true };
-      }
-      const buf = Buffer.from(text, "utf8").subarray(0, maxBytes - markerBytes);
-      let end = buf.length;
-      while (end > 0 && ((buf[end - 1] ?? 0) & 0xc0) === 0x80) end -= 1;
-      // Drop the lead byte of a character the cut split: leaving it would
-      // decode to U+FFFD (3 bytes) and overflow the byte budget.
-      if (end > 0 && (buf[end - 1] ?? 0) >= 0xc0) end -= 1;
-      // The marker itself is included in the byte budget so the returned diff
-      // never exceeds the caller's maxBytes (and TRIAL_DIFF_MAX_BYTES overall).
-      text = buf.subarray(0, end).toString("utf8") + marker;
-      return { text, truncated: true };
-    }
-    return { text, truncated: false };
+    text = text.replace(/^--- a\/a$/m, () => `--- a/${path}`);
+    text = text.replace(/^\+\+\+ b\/b$/m, () => `+++ b/${path}`);
+    return truncateDiff(text, maxBytes);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+export function truncateDiff(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    const marker = "\n… (truncated)\n";
+    const markerBytes = Buffer.byteLength(marker, "utf8");
+    if (maxBytes <= markerBytes) {
+      const raw = Buffer.from(text, "utf8").subarray(0, maxBytes);
+      let cut = raw.length;
+      while (cut > 0 && ((raw[cut - 1] ?? 0) & 0xc0) === 0x80) cut -= 1;
+      if (cut > 0 && (raw[cut - 1] ?? 0) >= 0xc0) cut -= 1;
+      return { text: raw.subarray(0, cut).toString("utf8"), truncated: true };
+    }
+    const buf = Buffer.from(text, "utf8").subarray(0, maxBytes - markerBytes);
+    let end = buf.length;
+    while (end > 0 && ((buf[end - 1] ?? 0) & 0xc0) === 0x80) end -= 1;
+    // Drop the lead byte of a character the cut split: leaving it would
+    // decode to U+FFFD (3 bytes) and overflow the byte budget.
+    if (end > 0 && (buf[end - 1] ?? 0) >= 0xc0) end -= 1;
+    // The marker itself is included in the byte budget so the returned diff
+    // never exceeds the caller's maxBytes (and TRIAL_DIFF_MAX_BYTES overall).
+    text = buf.subarray(0, end).toString("utf8") + marker;
+    return { text, truncated: true };
+  }
+  return { text, truncated: false };
 }
 
 export interface LoadTrialCandidateInput {
