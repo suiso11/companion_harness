@@ -121,6 +121,14 @@ const LOG_STATUS_ALLOWLIST: ReadonlySet<string> = new Set([
   "disabled",
   "used",
   "unavailable",
+  // Human-only trial adoption fixed error codes.
+  "adoption_disabled",
+  "not_verified",
+  "artifact_mismatch",
+  "base_changed",
+  "branch_exists",
+  "git_failed",
+  "gh_failed",
 ]);
 
 /** Whitelisted scalar fields. Nothing else is ever emitted. */

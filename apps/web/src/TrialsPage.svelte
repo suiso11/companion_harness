@@ -171,6 +171,58 @@ interface TrialReport {
   readonly verified: boolean;
 }
 
+/** Adoption state attached to the trial detail (null before first attempt). */
+interface TrialAdoption {
+  readonly status: "pending" | "done" | "failed";
+  readonly branch: string | null;
+  readonly prUrl: string | null;
+  readonly errorCode: string | null;
+}
+
+function readTrialAdoption(value: unknown): TrialAdoption | null {
+  if (typeof value !== "object" || value === null) return null;
+  const adoption = (value as Record<string, unknown>).adoption;
+  if (adoption === null || adoption === undefined) return null;
+  if (typeof adoption !== "object" || Array.isArray(adoption)) return null;
+  const row = adoption as Record<string, unknown>;
+  if (
+    row.status !== "pending" &&
+    row.status !== "done" &&
+    row.status !== "failed"
+  ) {
+    return null;
+  }
+  const optionalString = (v: unknown): string | null =>
+    typeof v === "string" ? v : null;
+  return {
+    status: row.status,
+    branch: optionalString(row.branch),
+    prUrl: optionalString(row.prUrl),
+    errorCode: optionalString(row.errorCode),
+  };
+}
+
+function adoptionErrorText(code: string | null): string {
+  switch (code) {
+    case "adoption_disabled":
+      return "この環境ではブランチとPRの作成は無効です";
+    case "not_verified":
+      return "検証済みの試行結果がないため作成できません";
+    case "artifact_mismatch":
+      return "確認した成果物と一致しません。試行をやり直してください";
+    case "base_changed":
+      return "基準リビジョンのファイルが変わりました。試行をやり直してください";
+    case "branch_exists":
+      return "同名のブランチが既に存在します";
+    case "git_failed":
+      return "Gitの操作に失敗しました";
+    case "gh_failed":
+      return "PRの作成に失敗しました（gh認証を確認してください）";
+    default:
+      return "ブランチとPRを作成できませんでした";
+  }
+}
+
 const GUEST_PROVENANCE = "guest-reported-unattested";
 const HOST_PROVENANCE = "host-checked";
 const HOST_OBSERVED_PROVENANCE = "host-observed";
@@ -360,6 +412,9 @@ let detailReport = $state<TrialReport | null>(null);
 let candidateView = $state<TrialCandidateView | null>(null);
 let candidateError = $state<string | null>(null);
 let candidateLoading = $state(false);
+let adoption = $state<TrialAdoption | null>(null);
+let adoptionStatus = $state("");
+let adoptionMutating = $state(false);
 let mutating = $state(false);
 let seq = 0;
 
@@ -575,6 +630,8 @@ async function select(proposalId: string): Promise<void> {
   const outcome = readTrialOutcome(fetched.body);
   const report = readTrialReport(fetched.body);
   detailReport = report;
+  adoption = readTrialAdoption(fetched.body);
+  adoptionStatus = "";
   selected = proposal.id;
   candidateView = null;
   candidateError = null;
@@ -640,6 +697,62 @@ async function select(proposalId: string): Promise<void> {
   opStatus = model.statusText;
   decisionVisible = model.decisionVisible;
   detailVisible = true;
+}
+
+/** Human click only: adopt the reviewed candidate into a DRAFT PR. Confirms
+ * that a branch will be pushed to GitHub before calling the API. */
+async function adopt(): Promise<void> {
+  const sessionId = getSessionId();
+  const id = selected;
+  const sha = detailReport?.artifact?.sha256 ?? null;
+  if (
+    sessionId === null ||
+    id === null ||
+    sha === null ||
+    adoptionMutating ||
+    !window.confirm(
+      "確認した差分を GitHub の新しいブランチに push し、下書きPRを作成します。続けますか？",
+    )
+  ) {
+    return;
+  }
+  adoptionMutating = true;
+  adoptionStatus = "ブランチとPRを作成しています";
+  try {
+    const result = await postJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/adopt`,
+      { artifactSha256: sha },
+      randomUuid(),
+    );
+    if (
+      result.status === 200 ||
+      result.status === 201 ||
+      result.status === 202
+    ) {
+      const mapped = readTrialAdoption({ adoption: result.body });
+      adoption = mapped;
+      if (mapped?.status === "done") {
+        adoptionStatus = "下書きPRを作成しました";
+      } else if (mapped?.status === "pending") {
+        adoptionStatus = "作成中です。しばらくしてから更新してください";
+      } else {
+        adoptionStatus = "作成状況を更新しました";
+      }
+    } else {
+      const mapped = readTrialAdoption(result.body);
+      adoption = mapped ?? adoption;
+      const code = (result.body as { error?: { code?: unknown } })?.error?.code;
+      adoptionStatus =
+        (mapped?.errorCode ?? (typeof code === "string" ? code : null))
+          ? adoptionErrorText(
+              mapped?.errorCode ?? (typeof code === "string" ? code : null),
+            )
+          : "ブランチとPRを作成できませんでした";
+    }
+    await refreshList();
+  } finally {
+    adoptionMutating = false;
+  }
 }
 
 async function approve(): Promise<void> {
@@ -712,6 +825,9 @@ $effect(() => {
   candidateView = null;
   candidateError = null;
   candidateLoading = false;
+  adoption = null;
+  adoptionStatus = "";
+  adoptionMutating = false;
   seq += 1;
   defaultsApplied = false;
   taskId = "";
@@ -890,6 +1006,32 @@ $effect(() => {
           <p id="trial-candidate-truncated">差分は上限に達したため省略されています</p>
         {/if}
         <pre id="trial-candidate-diff">{candidateView.diff}</pre>
+        {#if adoption?.status !== "done"}
+          <button
+            id="trial-adopt-button"
+            type="button"
+            disabled={!detailReport?.verified || adoptionMutating}
+            onclick={() => void adopt()}
+          >
+            ブランチとPRを作成（下書き）
+          </button>
+          <p id="trial-adopt-status" aria-live="polite">{adoptionStatus}</p>
+        {/if}
+        {#if adoption?.status === "done"}
+          <p id="trial-adoption-result">
+            下書きPR:
+            {#if adoption.prUrl !== null}
+              <a href={adoption.prUrl}>{adoption.prUrl}</a>
+            {:else}
+              作成済み
+            {/if}
+          </p>
+        {/if}
+        {#if adoption?.status === "failed" && adoptionStatus === ""}
+          <p id="trial-adoption-result">
+            {adoptionErrorText(adoption.errorCode)}
+          </p>
+        {/if}
       </section>
     {/if}
     {#if detailReport !== null}

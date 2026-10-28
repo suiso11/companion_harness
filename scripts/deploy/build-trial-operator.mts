@@ -294,6 +294,9 @@ try {
       observe: { ...input.runner.observe },
       pollMs: input.runner.pollMs,
     },
+    ...(input.adoption !== null && input.adoption !== undefined
+      ? { adoption: { ...input.adoption } }
+      : {}),
   };
   const trialPre =
     parseTrialConfig(JSON.stringify(trialRaw)) ?? fail("trial parse");

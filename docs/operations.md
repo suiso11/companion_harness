@@ -5880,3 +5880,22 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 ### 会話から採用した目的の確定（人間のみ）
 
 会話中の提案から採用された目的は `is_explicit=0 / source_kind='self'` で保存されるため、それだけでは試行権限（明示的な利用者の目的を要求）を満たしません。利用者が目的一覧の「会話から採用（未確認）」バッジ横の「自分の目的として確定」を押すと、`POST /api/sessions/:sessionId/goals/:goalId/confirm`（Idempotency-Key + `expectedVersion` CAS）がその目的を**その場で** `is_explicit=1 / source_kind='user'` に更新し、`confirmed_from='conversation_proposal'`・`confirmed_at` に確定の出所を記録します（目的イベントとして追記、行の id・scope・依存タスクは不変）。この経路は HTTP のみで、モデルツール・自動実行経路からは呼べません。退避・完了済みの目的は 409、既に明示的な目的は 200 の no-op、`expectedVersion` 不一致は 409 です。試行の提案フォームは、選択した作業の親目的が未確認のとき、この確定ボタンへの案内を表示します。
+
+### 検証済み試行のブランチ・下書きPR化（人間のクリックのみ）
+
+`/trials` で検証済み（`verified: true`）かつ差分が取得できた試行には「ブランチとPRを作成（下書き）」ボタンが出ます。押すと確認ダイアログの後に `POST /api/sessions/:sessionId/trials/:proposalId/adopt` を呼び、確認した `report.artifact.sha256` を本文で固定します。サーバーは凍結済み候補の全ファイル・基準バイト・スコープを再検証し、`git worktree` 上に候補バイトを書き（モードは変更しない）、固定 author/message でコミットして `trial/<executionId 先頭8桁>` を push、`gh pr create --draft` で下書きPRを作ります。マージ・base ブランチへの push・force push は決して行いません。同じ proposal は一度だけ実行され、完了済みなら同じ branch/PR を返し、実行中なら 202 を返します。
+
+有効化はホストの `~/.config/companion/trial-operator.json` に任意の `adoption` を追加します（未設定なら adoption は無効で、API は 409 `adoption_disabled`）。
+
+```json
+{
+  "adoption": {
+    "repoPath": "/home/USER/companion_master",
+    "remote": "origin",
+    "baseRef": "origin/master",
+    "branchPrefix": "trial/"
+  }
+}
+```
+
+`scripts/deploy/build-trial-operator.mts` がこの値を `autonomy.env` の `COMPANION_AUTONOMY_JSON` にそのまま引き渡します（厳格パース。未知キーは起動失敗）。`repoPath` は絶対パスの git checkout、`remote` はそのリポジトリの remote 名、`baseRef` は fetch 後の基準 ref、`branchPrefix` は `/` で終わる名前空間です。`gh` はサービス環境の `HOME`/`PATH`（必要なら `XDG_CONFIG_HOME`）で認証済みである必要があります。固定エラーは `adoption_disabled` / `not_verified` / `artifact_mismatch` / `base_changed` / `branch_exists` / `git_failed` / `gh_failed` で、`base_changed` の場合は試行をやり直してください（adoption テーブルは proposal 単位で失敗を記録し、再クリックで再試行できます）。

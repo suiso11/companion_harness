@@ -365,10 +365,12 @@ import {
 import {
   approveTrialProposal,
   authorityDeadlineMs,
+  beginTrialAdoption as beginTrialAdoptionFn,
   claimTrialGrant,
   clearAliasFence,
   expireTrialProposal,
   fenceUnknownExecution,
+  finishTrialAdoption as finishTrialAdoptionFn,
   hashTrialRequest,
   issueLaunchPermit,
   listClaimedTrialWorkers,
@@ -377,6 +379,7 @@ import {
   type QueuedTrialGrantCursor,
   readLaunchPermit,
   readQueuedTrialGrantHorizon,
+  readTrialAdoption as readTrialAdoptionFn,
   readTrialCandidateRoots as readTrialCandidateRootsFn,
   readTrialIntent,
   readTrialProposal,
@@ -7576,6 +7579,40 @@ export function createKernelRepository(
     return readTrialCandidateRootsFn(db, sessionId, executionId);
   }
 
+  function beginTrialAdoption(
+    sessionId: string,
+    proposalId: string,
+    executionId: string,
+    artifactSha256: string,
+    now: number,
+  ) {
+    return beginTrialAdoptionFn(
+      db,
+      sessionId,
+      proposalId,
+      executionId,
+      artifactSha256,
+      now,
+    );
+  }
+
+  function finishTrialAdoption(
+    proposalId: string,
+    result: {
+      status: "done" | "failed";
+      branch: string | null;
+      prUrl: string | null;
+      errorCode: string | null;
+    },
+    now: number,
+  ) {
+    return finishTrialAdoptionFn(db, proposalId, result, now);
+  }
+
+  function readTrialAdoption(sessionId: string, proposalId: string) {
+    return readTrialAdoptionFn(db, sessionId, proposalId);
+  }
+
   /** Internal proof read only: owned, revoked, never claimed/launched grant.
    * Missing/foreign => false; DB errors propagate; no mutation. */
   function isNeverLaunchedRevokedTrialGrant(
@@ -8112,6 +8149,9 @@ export function createKernelRepository(
     hashTrialLaunchRequest,
     readTrialLaunchIntent,
     readTrialCandidateRoots,
+    readTrialAdoption,
+    beginTrialAdoption,
+    finishTrialAdoption,
     isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,

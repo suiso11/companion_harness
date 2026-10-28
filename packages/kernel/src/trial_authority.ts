@@ -2863,6 +2863,146 @@ export function readWorkerReportByProposal(
   return readWorkerReport(db, session, g.execution_id);
 }
 
+export type TrialAdoptionStatus = "pending" | "done" | "failed";
+
+export interface TrialAdoptionView {
+  status: TrialAdoptionStatus;
+  branch: string | null;
+  prUrl: string | null;
+  errorCode: string | null;
+}
+
+export interface TrialAdoptionClaim {
+  /** started: caller owns execution; pending: another attempt is running;
+   * done: replay of the same proposal result. */
+  state: "started" | "pending" | "done";
+  adoption: TrialAdoptionView;
+}
+
+function readAdoptionRow(
+  db: Database.Database,
+  proposalId: string,
+): TrialAdoptionView | null {
+  const row = db
+    .prepare(
+      "SELECT status, branch, pr_url, error_code FROM trial_adoptions WHERE proposal_id=?",
+    )
+    .get(proposalId) as
+    | {
+        status: TrialAdoptionStatus;
+        branch: string | null;
+        pr_url: string | null;
+        error_code: string | null;
+      }
+    | undefined;
+  return row === undefined
+    ? null
+    : {
+        status: row.status,
+        branch: row.branch,
+        prUrl: row.pr_url,
+        errorCode: row.error_code,
+      };
+}
+
+/** Read the proposal's adoption state (null before the first attempt).
+ * Foreign/missing proposals return null (HTTP maps to 404). */
+export function readTrialAdoption(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): TrialAdoptionView | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const g = db
+    .prepare("SELECT session_id FROM trial_grants WHERE proposal_id=?")
+    .get(pid) as { session_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  return readAdoptionRow(db, pid);
+}
+
+/**
+ * Claim one human-only adoption attempt. Idempotent by proposal: a done row
+ * returns the recorded result, a pending row blocks concurrent attempts, and
+ * a failed row may be retried (reset to pending by this same call).
+ * Foreign/missing proposals return null.
+ */
+export function beginTrialAdoption(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+  executionId: string,
+  artifactSha256: string,
+  now: number,
+): TrialAdoptionClaim | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const exec = requireId(executionId, "executionId");
+  if (!/^[0-9a-f]{64}$/.test(artifactSha256)) {
+    throw new RangeError("artifactSha256 must be 64 lowercase hex");
+  }
+  const claim = db.transaction((): TrialAdoptionClaim | null => {
+    const g = db
+      .prepare(
+        "SELECT session_id, execution_id FROM trial_grants WHERE proposal_id=?",
+      )
+      .get(pid) as { session_id: string; execution_id: string } | undefined;
+    if (!g || g.session_id !== session || g.execution_id !== exec) return null;
+    const existing = readAdoptionRow(db, pid);
+    if (existing !== null) {
+      if (existing.status === "done" || existing.status === "pending") {
+        return { state: existing.status, adoption: existing };
+      }
+      db.prepare(
+        "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",
+      ).run(exec, artifactSha256, now, pid);
+      return {
+        state: "started",
+        adoption: {
+          status: "pending",
+          branch: null,
+          prUrl: null,
+          errorCode: null,
+        },
+      };
+    }
+    db.prepare(
+      "INSERT INTO trial_adoptions (proposal_id, execution_id, artifact_sha256, status, branch, pr_url, error_code, created_at, updated_at) VALUES (?,?,?, 'pending', NULL, NULL, NULL, ?, ?)",
+    ).run(pid, exec, artifactSha256, now, now);
+    return {
+      state: "started",
+      adoption: {
+        status: "pending",
+        branch: null,
+        prUrl: null,
+        errorCode: null,
+      },
+    };
+  });
+  return claim();
+}
+
+/** Record the terminal result of a pending adoption (idempotent update). */
+export function finishTrialAdoption(
+  db: Database.Database,
+  proposalId: string,
+  result: {
+    status: "done" | "failed";
+    branch: string | null;
+    prUrl: string | null;
+    errorCode: string | null;
+  },
+  now: number,
+): TrialAdoptionView {
+  const pid = requireId(proposalId, "proposalId");
+  db.prepare(
+    "UPDATE trial_adoptions SET status=?, branch=?, pr_url=?, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending'",
+  ).run(result.status, result.branch, result.prUrl, result.errorCode, now, pid);
+  const row = readAdoptionRow(db, pid);
+  if (row === null) throw new RangeError("adoption row missing");
+  return row;
+}
+
 /**
  * Record a trusted validated worker result. The result proof (taskHash,
  * exitCode, exact check list vs the frozen requiredChecks, outputMatched,

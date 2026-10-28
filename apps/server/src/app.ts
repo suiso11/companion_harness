@@ -151,6 +151,12 @@ import {
 import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import {
+  executeTrialAdoption,
+  TrialAdoptionError,
+  type TrialAdoptionErrorCode,
+} from "./trial_adoption.js";
+import {
+  loadTrialAdoptionFiles,
   loadTrialCandidate,
   TrialCandidateError,
   type TrialCandidateErrorCode,
@@ -5351,7 +5357,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         session.id,
         proposal.id,
       );
-      return c.json({ ...found, outcome, report }, 200);
+      const adoption = repo.readTrialAdoption(session.id, proposal.id);
+      return c.json({ ...found, outcome, report, adoption }, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -5438,6 +5445,198 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         const code: TrialCandidateErrorCode = error.code;
         return c.json({ available: false, code }, 200);
       }
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Human-only adoption of a verified write-trial candidate into a DRAFT PR.
+  // Same UUID/idempotency gates as approve; the body binds the reviewed
+  // artifact digest. Adoption config is optional: absent => 409 disabled.
+  // Nothing here runs on a timer, and the base branch is never pushed.
+  app.post("/api/sessions/:sessionId/trials/:proposalId/adopt", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) return proposal.response;
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) return keyed.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    const raw = await readJsonBody(c);
+    if (!raw.ok) return validationError(c);
+    const body = raw.value as Record<string, unknown> | null;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 1 ||
+      typeof body.artifactSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.artifactSha256)
+    ) {
+      return validationError(c);
+    }
+    const trial = config.trial;
+    const adoption = trial?.adoption ?? null;
+    if (trial === null || adoption === null) {
+      return c.json(
+        {
+          error: {
+            code: "adoption_disabled",
+            message: "trial adoption is disabled",
+          },
+        },
+        409,
+      );
+    }
+    if (draining) return shuttingDown(c);
+    const adoptionError = (
+      code: TrialAdoptionErrorCode | "not_verified" | "artifact_mismatch",
+    ): Response =>
+      c.json(
+        {
+          error: { code, message: `trial adoption failed: ${code}` },
+        },
+        409,
+      );
+    try {
+      const found = repo.readTrial(session.id, proposal.id);
+      const report = repo.readTrialWorkerReportByProposal(
+        session.id,
+        proposal.id,
+      );
+      const outcome = repo.readTrialWorkerOutcomeByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (
+        report === null ||
+        report.artifact === null ||
+        report.verified !== true ||
+        outcome === null ||
+        outcome.status !== "consumed"
+      ) {
+        return adoptionError("not_verified");
+      }
+      if (report.artifact.sha256 !== body.artifactSha256) {
+        return adoptionError("artifact_mismatch");
+      }
+      const executionId = repo.readTrialExecutionIdByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (executionId === null) return adoptionError("not_verified");
+      const literalPatchPaths = Array.isArray(found.literalPatchPaths)
+        ? found.literalPatchPaths.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+      const roots = repo.readTrialCandidateRoots(session.id, executionId);
+      let files: Awaited<ReturnType<typeof loadTrialAdoptionFiles>>["files"];
+      try {
+        files = loadTrialAdoptionFiles({
+          executionId,
+          trial,
+          expectedArtifactSha256: report.artifact.sha256,
+          literalPatchPaths,
+          ...(roots.stateDir !== null
+            ? { frozenStateDir: roots.stateDir }
+            : {}),
+          ...(roots.sourceDir !== null
+            ? { frozenSourceRepoPath: roots.sourceDir }
+            : {}),
+          ...(roots.sourceRevision !== null
+            ? { frozenSourceRevision: roots.sourceRevision }
+            : {}),
+          ...(roots.frozenAllowedPaths !== null
+            ? { frozenAllowedPaths: roots.frozenAllowedPaths }
+            : {}),
+        }).files;
+      } catch (error) {
+        if (error instanceof TrialCandidateError) {
+          return adoptionError(
+            error.code === "candidate_digest_mismatch"
+              ? "artifact_mismatch"
+              : error.code === "base_mismatch"
+                ? "base_changed"
+                : "not_verified",
+          );
+        }
+        throw error;
+      }
+      const claim = repo.beginTrialAdoption(
+        session.id,
+        proposal.id,
+        executionId,
+        report.artifact.sha256,
+        now(),
+      );
+      if (claim === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      if (claim.state === "done") {
+        return c.json(claim.adoption, 200);
+      }
+      if (claim.state === "pending") {
+        // Another click is already running; never start a second push.
+        return c.json(claim.adoption, 202);
+      }
+      try {
+        const result = await executeTrialAdoption({
+          config: adoption,
+          executionId,
+          artifactSha256: report.artifact.sha256,
+          objective: found.objective,
+          files,
+        });
+        const saved = repo.finishTrialAdoption(
+          proposal.id,
+          {
+            status: "done",
+            branch: result.branch,
+            prUrl: result.prUrl,
+            errorCode: null,
+          },
+          now(),
+        );
+        logger.info("http.trials.adopt", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: "done",
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(saved, 201);
+      } catch (error) {
+        const code: TrialAdoptionErrorCode =
+          error instanceof TrialAdoptionError ? error.code : "git_failed";
+        const saved = repo.finishTrialAdoption(
+          proposal.id,
+          {
+            status: "failed",
+            branch: null,
+            prUrl: null,
+            errorCode: code,
+          },
+          now(),
+        );
+        logger.info("http.trials.adopt", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: "failed",
+          reason: code,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(
+          {
+            error: {
+              code,
+              message: `trial adoption failed: ${code}`,
+            },
+            adoption: saved,
+          },
+          code === "git_failed" || code === "gh_failed" ? 502 : 409,
+        );
+      }
+    } catch (error) {
       return mapDomainError(c, error);
     }
   });

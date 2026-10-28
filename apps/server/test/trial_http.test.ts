@@ -241,6 +241,17 @@ describe("trial HTTP disabled surface", () => {
         "trials_disabled",
       );
 
+      const adopted = await post(
+        app,
+        `${base}/${randomUUID()}/adopt`,
+        { artifactSha256: "c".repeat(64) },
+        randomUUID(),
+      );
+      expect(adopted.status).toBe(409);
+      expect((adopted.body as { error: { code: string } }).error.code).toBe(
+        "adoption_disabled",
+      );
+
       const listed = await get(app, base);
       expect(listed.status).toBe(404);
       expect((listed.body as { error: { code: string } }).error.code).toBe(
