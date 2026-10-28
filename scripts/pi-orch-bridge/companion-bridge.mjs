@@ -1417,14 +1417,17 @@ async function main() {
                           config.storage.maxArtifactBytes,
                         ),
                       );
+                      // Base evidence is source-sized, not artifact-sized: a
+                      // valid deletion can reference a file far larger than
+                      // the 256 KiB artifact cap. The sealed snapshot already
+                      // fits maxSourceBytes. retainBaseChanges caps each
+                      // retained base file at maxSourceBytes and the aggregate
+                      // retained bytes at that same maxSourceBytes budget.
                       retainBaseChanges(
                         snapshot.snapshotRoot,
                         changes,
                         join(runDir, "base"),
-                        Math.min(
-                          config.profile.limits.maxArtifactBytes,
-                          config.storage.maxArtifactBytes,
-                        ),
+                        config.profile.limits.maxSourceBytes,
                       );
                     } catch {
                       throw new Error("candidate retention invalid");
