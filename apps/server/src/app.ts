@@ -135,11 +135,6 @@ import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
-  loadTrialCandidate,
-  TrialCandidateError,
-  type TrialCandidateErrorCode,
-} from "./trial_candidate.js";
-import {
   createMonitorSampler,
   createWebSearchHealth,
   type MonitorSampler,
@@ -155,6 +150,11 @@ import {
 } from "./remote_session.js";
 import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
+import {
+  loadTrialCandidate,
+  TrialCandidateError,
+  type TrialCandidateErrorCode,
+} from "./trial_candidate.js";
 import {
   renderConversationShell,
   renderRemoteLogin,
