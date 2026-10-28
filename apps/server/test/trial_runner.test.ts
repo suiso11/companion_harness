@@ -1438,6 +1438,108 @@ describe("trial_runner", () => {
     }
   });
 
+  it("keeps the bridge result line when a failure precedes the scope", async () => {
+    const { handle, repo, sessionId } = await makeKernel();
+    try {
+      const { executionId } = queueGrant(repo, sessionId, "b1", "ws");
+      const identity = {
+        pid: 4348,
+        bootId: "boot-containment",
+        processStartTicks: "891",
+      };
+      // The frozen bridge finalized a containment preflight rejection,
+      // wrote its wire result line, and exited 0 before any capsule scope
+      // existed. Node also prints the SQLite ExperimentalWarning.
+      const { spawnImpl, state } = createFakeSpawn({
+        exitCode: 0,
+        stderrBeforeExit:
+          "(node:1234) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)",
+        lineForRequest: (req) =>
+          JSON.stringify({
+            version: 1,
+            taskHash: req.taskHash,
+            status: "error",
+            exitCode: 12,
+            verified: false,
+            evidence: { checks: [] },
+            report: {
+              summary: "companion bridge: containment unavailable",
+              findings: [],
+              unresolved: [
+                "blocked: containment",
+                "user systemd scope unavailable (no DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR or systemd user bus)",
+              ],
+              hostDiagnostics: [],
+              checks: [],
+              artifact: null,
+            },
+          }),
+      });
+      const spawnProxy = ((cmd: string, args: string[], opts: unknown) => {
+        const child = (
+          spawnImpl as unknown as (
+            c: string,
+            a: string[],
+            o: unknown,
+          ) => FakeChild
+        )(cmd, args, opts);
+        child.pid = identity.pid;
+        return child;
+      }) as unknown as TrialRunnerSpawn;
+      const observer = createObserver({
+        scopeBeforeExit: "unknown",
+        scopeAfterExit: "gone",
+        identity,
+        exited: () => state.exited,
+      });
+      const { factory } = createFakeRelayFactory();
+      const { logger } = createCollectingLogger("debug");
+      const dir = mkdtempSync(join(tmpdir(), "trial-run-"));
+      const runner = new TrialRunner({
+        repo,
+        config: {
+          ...runnerConfigBase("ws", writeTemplate(dir), join(dir, "runs")),
+          observe: {
+            activeTimeoutMs: 5000,
+            goneTimeoutMs: 2000,
+            pollIntervalMs: 5,
+          },
+        },
+        isForegroundBusy: () => false,
+        logger,
+        observer,
+        createRelay: factory,
+        spawnImpl: spawnProxy,
+        clock: makeClock(),
+      });
+      const out = await runner.runNext();
+      expect(out).toMatchObject({
+        ran: true,
+        outcome: "launch-failed",
+        executionId,
+      });
+      const outcome = repo.readTrialWorkerOutcome(sessionId, executionId);
+      expect(outcome?.status).toBe("interrupted");
+      // Never authorized even though a valid result line was written.
+      expect(outcome?.authorized).toBe(false);
+      const report = repo.readTrialWorkerReport(sessionId, executionId);
+      expect(report?.summary).toBe("companion bridge: containment unavailable");
+      expect(report?.unresolved).toContain("blocked: containment");
+      expect(
+        (report?.unresolved ?? []).some((line) =>
+          line.includes("user systemd scope unavailable"),
+        ),
+      ).toBe(true);
+      expect(report?.verified).toBe(false);
+      const joined = (report?.hostDiagnostics ?? []).join("\n");
+      expect(joined).toContain("result exitCode 12");
+      expect(joined).not.toContain("ExperimentalWarning");
+      expect(joined).not.toContain("trace-warnings");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("unknown scope after exit fences the alias and the next runNext is a no-op", async () => {
     const { handle, repo, sessionId } = await makeKernel();
     try {

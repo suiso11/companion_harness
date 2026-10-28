@@ -1209,6 +1209,49 @@ export class TrialRunner {
     };
     this.currentCloseFd3 = closeFd3;
     const launchFailureReport = () => bridgeFailureReport(stderrChunks);
+    // A bridge that exits cleanly (any exit code, no signal) may still have
+    // written its wire result line before the capsule scope ever started,
+    // e.g. a containment preflight rejection. Prefer that faithful report
+    // over the stderr-only generic launch-failure text. Authorization is
+    // never derived from it: the quiescence outcome stays unauthorized.
+    const bridgeStdoutResult = (exit: {
+      exitCode: number | null;
+      signal: string | null;
+    }): ParsedBridgeValidResult | null => {
+      if (exit.signal !== null) return null;
+      const proof = parseBridgeResult(
+        Buffer.concat(stdoutChunks).toString("utf8"),
+        request,
+      );
+      return proof.kind === "valid" ? proof : null;
+    };
+    const launchFailureReportFor = (exit: {
+      exitCode: number | null;
+      signal: string | null;
+    }) => {
+      const diagnostics = launchFailureReport();
+      const proof = bridgeStdoutResult(exit);
+      if (proof === null || proof.report === null) return diagnostics;
+      // Keep the bridge's own summary/unresolved/checks; host diagnostics
+      // stay host-observed (filtered stderr + the observed exit code) so
+      // the real reason survives the bounded report storage.
+      const exitLine = `bridge: result exitCode ${proof.exitCode}`;
+      // The kernel keeps at most 4 host diagnostics; reserve the first slot
+      // for the observed exit code so the stored head is never truncated
+      // before it.
+      const hostDiagnostics = [
+        exitLine,
+        ...(diagnostics?.hostDiagnostics ?? [])
+          .filter((line) => line !== exitLine)
+          .slice(0, 3),
+      ];
+      return {
+        ...proof.report,
+        hostDiagnostics,
+        // Presentation only: a launch failure is never verified/authorized.
+        verified: false,
+      };
+    };
     const failLaunch = async (): Promise<TrialRunNextResult> => {
       try {
         relay.revoke();
@@ -1228,7 +1271,7 @@ export class TrialRunner {
       // Persist the bounded redacted stderr head with the quiescence record
       // so a pre-boot bridge exit (e.g. wire scope rejection) is diagnosable
       // instead of only `interrupted` with no report.
-      const report = launchFailureReport();
+      const report = launchFailureReportFor(bridgeExit);
       try {
         const intent = this.repo.readTrialLaunchIntent(sessionId, executionId);
         this.repo.recordTrialQuiescence(
@@ -1837,6 +1880,8 @@ type ParsedBridgeResult =
     }
   | { kind: "invalid"; exitCode: number };
 
+type ParsedBridgeValidResult = Extract<ParsedBridgeResult, { kind: "valid" }>;
+
 function parseWireCheckEntry(
   entry: unknown,
 ): { id: string; ok: boolean } | null {
@@ -1883,6 +1928,11 @@ function bridgeFailureReport(chunks: readonly Buffer[]): {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
+    // Node emits these at module load for node:sqlite. They are not a
+    // bridge failure reason and would crowd the bounded host diagnostic
+    // head, so drop the warning and its trace-warnings hint line.
+    .filter((line) => !/ExperimentalWarning/.test(line))
+    .filter((line) => !/^\(Use `node --trace-warnings/.test(line))
     .slice(0, 4)
     .map((line) => truncateReportText(`bridge: ${line}`, 512));
   if (lines.length === 0) return null;
