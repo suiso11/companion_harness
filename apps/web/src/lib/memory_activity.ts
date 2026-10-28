@@ -539,9 +539,36 @@ export const MEMORY_STATUS_LABELS: Record<MemoryStatus, string> = {
 export interface MemoryStats {
   readonly byKind: Readonly<Record<MemoryKind, number>>;
   readonly byStatus: Readonly<Record<MemoryStatus, number>>;
+  readonly importance?: MemoryStatsImportance;
   readonly computedAt: number;
   readonly truncated: boolean;
 }
+
+export interface MemoryImportanceBucket {
+  readonly lt: number;
+  readonly count: number;
+}
+
+export interface MemoryStatsImportance {
+  readonly scored: number;
+  readonly unscored: number;
+  readonly buckets: readonly MemoryImportanceBucket[];
+}
+
+export interface MemoryImportanceBar extends MemoryStatsCard {
+  readonly percent: number;
+}
+
+/** Fixed server bucket upper bounds (last is the exclusive top). */
+const IMPORTANCE_BUCKET_LTS: readonly number[] = [0.2, 0.4, 0.6, 0.8, 1.0001];
+/** Fixed display labels for those five buckets. */
+export const MEMORY_IMPORTANCE_LABELS: readonly string[] = [
+  "0–0.2",
+  "0.2–0.4",
+  "0.4–0.6",
+  "0.6–0.8",
+  "0.8–1.0",
+];
 
 export interface MemoryStatsCard {
   readonly key: string;
@@ -577,14 +604,44 @@ function parseStatusCounts(
   return out;
 }
 
+function parseImportance(value: unknown): MemoryStatsImportance | null {
+  if (
+    !isRecord(value) ||
+    !isNonNegativeInteger(value.scored) ||
+    !isNonNegativeInteger(value.unscored) ||
+    !Array.isArray(value.buckets) ||
+    value.buckets.length !== IMPORTANCE_BUCKET_LTS.length
+  ) {
+    return null;
+  }
+  const buckets: MemoryImportanceBucket[] = [];
+  for (let index = 0; index < value.buckets.length; index += 1) {
+    const raw = value.buckets[index];
+    if (
+      !isRecord(raw) ||
+      raw.lt !== IMPORTANCE_BUCKET_LTS[index] ||
+      !isNonNegativeInteger(raw.count)
+    ) {
+      return null;
+    }
+    buckets.push({ lt: raw.lt as number, count: raw.count });
+  }
+  return { scored: value.scored, unscored: value.unscored, buckets };
+}
+
 /** Strict parse of GET /api/memory/stats (numbers only, no bodies). */
 export function parseMemoryStats(body: unknown): MemoryStats | null {
   if (!isRecord(body)) return null;
   const byKind = parseKindCounts(body.byKind);
   const byStatus = parseStatusCounts(body.byStatus);
+  const importance =
+    body.importance === undefined
+      ? undefined
+      : parseImportance(body.importance);
   if (
     byKind === null ||
     byStatus === null ||
+    (body.importance !== undefined && importance === null) ||
     !isNonNegativeInteger(body.computedAt) ||
     typeof body.truncated !== "boolean"
   ) {
@@ -593,6 +650,7 @@ export function parseMemoryStats(body: unknown): MemoryStats | null {
   return {
     byKind,
     byStatus,
+    ...(importance !== undefined && importance !== null ? { importance } : {}),
     computedAt: body.computedAt,
     truncated: body.truncated,
   };
@@ -616,5 +674,31 @@ export function memoryKindBars(stats: MemoryStats): MemoryKindBar[] {
     label: MEMORY_KIND_LABELS[kind],
     value: stats.byKind[kind],
     percent: Math.round((stats.byKind[kind] / max) * 100),
+  }));
+}
+
+/**
+ * Importance distribution bars (five fixed buckets + unscored). Empty when
+ * the older paged fallback produced no importance data.
+ */
+export function memoryImportanceBars(
+  stats: MemoryStats,
+): MemoryImportanceBar[] {
+  const importance = stats.importance;
+  if (importance === undefined) return [];
+  const entries = importance.buckets.map((bucket, index) => ({
+    key: `importance-${index}`,
+    label: MEMORY_IMPORTANCE_LABELS[index] ?? String(bucket.lt),
+    value: bucket.count,
+  }));
+  entries.push({
+    key: "importance-unscored",
+    label: "未採点",
+    value: importance.unscored,
+  });
+  const max = Math.max(1, ...entries.map((entry) => entry.value));
+  return entries.map((entry) => ({
+    ...entry,
+    percent: Math.round((entry.value / max) * 100),
   }));
 }

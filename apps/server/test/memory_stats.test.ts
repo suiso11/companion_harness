@@ -1,7 +1,8 @@
-// Memory-content statistics service: bounded `record.list` walks, counts by
-// kind/status, five-minute cache with single-flight, page-limit fallback, and
-// row-cap truncation. Real migrated `:memory:` kernel DB + injected fake
-// remind CLI (no child, no remind DB, no network).
+// Memory-content statistics service: `record.stats` parsing, unknown-op
+// latch + bounded `record.list` fallback, five-minute cache with
+// single-flight, page-limit fallback, and row-cap truncation. Real migrated
+// `:memory:` kernel DB + injected fake remind CLI (no child, no remind DB,
+// no network).
 
 import {
   closeKernelDatabase,
@@ -50,6 +51,9 @@ interface CliState {
     since?: string;
     until?: string;
   }>;
+  /** Valid `record.stats` payload; absent means the older BAD_REQUEST answer. */
+  stats?: Record<string, unknown>;
+  statsCalls?: number;
   readonly rejectOver?: number;
   delay?: Promise<void>;
 }
@@ -95,6 +99,18 @@ function makeService(
 
 function makeCli(state: CliState): CliCall {
   return async (_address, op, params) => {
+    if (op === "record.stats") {
+      state.statsCalls = (state.statsCalls ?? 0) + 1;
+      if (state.stats === undefined) {
+        return {
+          ok: false,
+          code: "BAD_REQUEST",
+          data: null,
+          deduplicated: false,
+        };
+      }
+      return okEnvelope(state.stats);
+    }
     if (op !== "record.list") {
       return {
         ok: false,
@@ -165,6 +181,36 @@ async function openRepo(): Promise<{
 
 function at(offsetMs: number): string {
   return new Date(T0 + offsetMs).toISOString();
+}
+
+function statsPayload(): Record<string, unknown> {
+  return {
+    scope: SCOPE,
+    byKind: {
+      user_fact: 5,
+      model_inference: 3,
+      summary: 2,
+      correction: 1,
+    },
+    byStatus: {
+      active: 11,
+      retired: 4,
+      superseded: 2,
+      archived: 1,
+    },
+    importance: {
+      scored: 8,
+      unscored: 3,
+      buckets: [
+        { lt: 0.2, count: 2 },
+        { lt: 0.4, count: 3 },
+        { lt: 0.6, count: 1 },
+        { lt: 0.8, count: 1 },
+        { lt: 1.0001, count: 1 },
+      ],
+    },
+    computedAt: at(0),
+  };
 }
 
 function seed(
@@ -269,8 +315,9 @@ describe("memory content statistics", () => {
       const service = makeService(fixture.repo, makeCli(state), () => clock);
       const first = service.getMemoryStats();
       const second = service.getMemoryStats();
-      // Both callers await the SAME in-flight walk (one active page).
-      expect(state.calls).toHaveLength(1);
+      // Both callers await the SAME in-flight collection (one stats call).
+      expect(state.statsCalls).toBe(1);
+      expect(state.calls).toHaveLength(0);
       release();
       const [a, b] = await Promise.all([first, second]);
       expect(a).toEqual(b);
@@ -385,6 +432,86 @@ describe("memory content statistics", () => {
       expect(stats.byStatus.active).toBe(MEMORY_STATS_ACTIVE_ROW_CAP);
       expect(stats.byKind.user_fact).toBe(MEMORY_STATS_ACTIVE_ROW_CAP);
       expect(stats.byStatus.archived).toBe(MEMORY_STATS_STATUS_ROW_CAP);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("uses one record.stats call and returns the importance distribution", async () => {
+    const fixture = await openRepo();
+    try {
+      const state: CliState = { rows: [], calls: [], stats: statsPayload() };
+      const service = makeService(fixture.repo, makeCli(state), () => T0);
+      const stats = await service.getMemoryStats();
+      expect(stats.byKind).toEqual({
+        user_fact: 5,
+        model_inference: 3,
+        summary: 2,
+        correction: 1,
+      });
+      expect(stats.byStatus).toEqual({
+        active: 11,
+        retired: 4,
+        superseded: 2,
+        archived: 1,
+      });
+      expect(stats.importance).toEqual({
+        scored: 8,
+        unscored: 3,
+        buckets: [
+          { lt: 0.2, count: 2 },
+          { lt: 0.4, count: 3 },
+          { lt: 0.6, count: 1 },
+          { lt: 0.8, count: 1 },
+          { lt: 1.0001, count: 1 },
+        ],
+      });
+      expect(stats.computedAt).toBe(T0);
+      expect(stats.truncated).toBe(false);
+      expect(state.statsCalls).toBe(1);
+      expect(state.calls).toHaveLength(0);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("falls back once on an unknown stats op and latches for the process", async () => {
+    const fixture = await openRepo();
+    try {
+      const state: CliState = {
+        rows: seed([{ kind: "user_fact", status: "active", count: 1 }]),
+        calls: [],
+      };
+      let clock = T0;
+      const service = makeService(fixture.repo, makeCli(state), () => clock);
+      const first = await service.getMemoryStats();
+      expect(first.importance).toBeUndefined();
+      expect(first.truncated).toBe(false);
+      expect(state.statsCalls).toBe(1);
+      expect(state.calls).toHaveLength(4);
+
+      clock = T0 + MEMORY_STATS_CACHE_TTL_MS;
+      await service.getMemoryStats();
+      // The unsupported op is never retried after the latch.
+      expect(state.statsCalls).toBe(1);
+      expect(state.calls).toHaveLength(8);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("reports a malformed stats response instead of crashing or falling back", async () => {
+    const fixture = await openRepo();
+    try {
+      const bad = statsPayload();
+      delete bad.importance;
+      const state: CliState = { rows: [], calls: [], stats: bad };
+      const service = makeService(fixture.repo, makeCli(state), () => T0);
+      await expect(service.getMemoryStats()).rejects.toMatchObject({
+        code: "service_unavailable",
+      });
+      expect(state.statsCalls).toBe(1);
+      expect(state.calls).toHaveLength(0);
     } finally {
       fixture.close();
     }

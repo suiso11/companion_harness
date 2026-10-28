@@ -426,12 +426,17 @@ connector instance owns **all** configured roots.
   pending/approval flow is unchanged.
 - Memory content statistics (2026-10-28): `GET /api/memory/stats` (browser
   read-only, same session auth as other API routes, no query parameters)
-  returns fixed numeric `{ byKind, byStatus, computedAt, truncated }`.
-  `byKind` covers ACTIVE records only (`user_fact / model_inference /
-  summary / correction`); `byStatus` covers `active / retired / superseded /
-  archived`. Remind has no aggregate stats op, so the service walks bounded
+  returns fixed numeric `{ byKind, byStatus, importance?, computedAt,
+  truncated }`. `byKind` covers ACTIVE records only (`user_fact /
+  model_inference / summary / correction`); `byStatus` covers `active /
+  retired / superseded / archived`. The service prefers remind's read-only
+  `record.stats` aggregate (remind#42): one bounded call, `truncated` false,
+  plus `importance {scored, unscored, buckets}` where `scored` counts active
+  records whose `record_importance.bodyHash` matches the current body.
+  Remind versions without the op answer `BAD_REQUEST`; the service then
+  latches "stats unsupported" for the process and falls back to bounded
   `record.list` pages filtered by status, newest -> oldest with the
-  exclusive `until` timestamp, and caps the walk (300 active rows, 100 rows
+  exclusive `until` timestamp, capping the walk (300 active rows, 100 rows
   for each other status). Reaching a cap sets `truncated` (counts are lower
   bounds); the UI labels this `上限まで集計`. The page size starts at 100 and
   falls back through 25/10/5/1 when remind answers `LIMIT_EXCEEDED` for a
@@ -439,9 +444,8 @@ connector instance owns **all** configured roots.
   for five minutes with single-flight, so the panel's 30s auto-refresh does
   not spawn a CLI child per view. Only counts cross the API boundary: the
   `record.list` snippets are discarded server-side and never logged.
-  Importance distribution is NOT emitted: `activation.preview` only exposes
-  a retirement-score-ordered sample plus a scope-wide status summary, so a
-  faithful score histogram would need a remind aggregate op.
+  `importance` is absent in the fallback path, and the UI then omits the
+  importance chart.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted

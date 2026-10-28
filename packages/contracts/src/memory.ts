@@ -240,9 +240,9 @@ export type MemoryGraphVersionResponse = z.infer<
  * Read-only memory-content statistics for the configured scope. Counts are
  * numbers only (no record bodies, ids, or scopes). `byKind` covers ACTIVE
  * records; `truncated` means at least one status walk hit its server-side
- * row cap, so the numbers are lower bounds. Optional `importance` is reserved
- * for an aggregate reminder stats source (not emitted while remind has no
- * such op).
+ * row cap, so the numbers are lower bounds. Optional `importance` comes from
+ * remind's `record.stats`: active records with a fresh score (`scored`),
+ * active records without one (`unscored`), and the five fixed buckets.
  */
 export const MemoryStatsKindCountsSchema = z.strictObject({
   user_fact: z.number().int().min(0),
@@ -262,19 +262,9 @@ export type MemoryStatsStatusCounts = z.infer<
   typeof MemoryStatsStatusCountsSchema
 >;
 
-export const MemoryImportanceBucketKeySchema = z.enum([
-  "0-0.25",
-  "0.25-0.5",
-  "0.5-0.75",
-  "0.75-1",
-  "unscored",
-]);
-export type MemoryImportanceBucketKey = z.infer<
-  typeof MemoryImportanceBucketKeySchema
->;
-
+/** One importance bucket (`lt` is the exclusive upper bound). */
 export const MemoryImportanceBucketSchema = z.strictObject({
-  key: MemoryImportanceBucketKeySchema,
+  lt: z.number().min(0),
   count: z.number().int().min(0),
 });
 export type MemoryImportanceBucket = z.infer<
@@ -282,10 +272,9 @@ export type MemoryImportanceBucket = z.infer<
 >;
 
 export const MemoryStatsImportanceSchema = z.strictObject({
+  scored: z.number().int().min(0),
+  unscored: z.number().int().min(0),
   buckets: z.array(MemoryImportanceBucketSchema).length(5),
-  sampled: z.number().int().min(0),
-  total: z.number().int().min(0),
-  truncated: z.boolean(),
 });
 export type MemoryStatsImportance = z.infer<typeof MemoryStatsImportanceSchema>;
 

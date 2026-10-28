@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   dailyActivity,
   formatRunCounts,
+  MEMORY_IMPORTANCE_LABELS,
   MEMORY_KIND_LABELS,
   MEMORY_MAINTENANCE_OPS,
   MEMORY_STATUS_LABELS,
+  memoryImportanceBars,
   memoryKindBars,
   memoryStatusCards,
   parseActivityList,
@@ -234,6 +236,17 @@ describe("parseMemoryStats + memory stats view", () => {
       superseded: 2,
       archived: 1,
     },
+    importance: {
+      scored: 6,
+      unscored: 2,
+      buckets: [
+        { lt: 0.2, count: 1 },
+        { lt: 0.4, count: 2 },
+        { lt: 0.6, count: 1 },
+        { lt: 0.8, count: 1 },
+        { lt: 1.0001, count: 1 },
+      ],
+    },
     computedAt: T0,
     truncated: false,
   };
@@ -259,6 +272,29 @@ describe("parseMemoryStats + memory stats view", () => {
     expect(MEMORY_STATUS_LABELS.active).toBe("有効");
   });
 
+  it("renders the importance buckets plus the unscored bar", () => {
+    const stats = parseMemoryStats(statsBody);
+    expect(stats).not.toBeNull();
+    const bars = memoryImportanceBars(stats as NonNullable<typeof stats>);
+    expect(bars.map((bar) => bar.label)).toEqual([
+      ...MEMORY_IMPORTANCE_LABELS,
+      "未採点",
+    ]);
+    expect(bars.map((bar) => bar.value)).toEqual([1, 2, 1, 1, 1, 2]);
+    expect(bars[1]).toMatchObject({ value: 2, percent: 100 });
+    expect(bars[5]).toMatchObject({ value: 2, percent: 100 });
+  });
+
+  it("omits the importance chart for the paged fallback", () => {
+    const withoutImportance = { ...statsBody } as Record<string, unknown>;
+    delete withoutImportance.importance;
+    const stats = parseMemoryStats(withoutImportance);
+    expect(stats).not.toBeNull();
+    expect(memoryImportanceBars(stats as NonNullable<typeof stats>)).toEqual(
+      [],
+    );
+  });
+
   it("rejects missing/negative/float counts and non-boolean truncation", () => {
     expect(
       parseMemoryStats({ ...statsBody, byKind: { user_fact: 1 } }),
@@ -276,6 +312,21 @@ describe("parseMemoryStats + memory stats view", () => {
       }),
     ).toBeNull();
     expect(parseMemoryStats({ ...statsBody, truncated: "no" })).toBeNull();
+    expect(
+      parseMemoryStats({
+        ...statsBody,
+        importance: { ...statsBody.importance, scored: -1 },
+      }),
+    ).toBeNull();
+    expect(
+      parseMemoryStats({
+        ...statsBody,
+        importance: {
+          ...statsBody.importance,
+          buckets: statsBody.importance.buckets.slice(0, 4),
+        },
+      }),
+    ).toBeNull();
     expect(parseMemoryStats(null)).toBeNull();
   });
 });

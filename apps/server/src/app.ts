@@ -276,6 +276,11 @@ export interface MemoryHttpPort {
       superseded: number;
       archived: number;
     };
+    importance?: {
+      scored: number;
+      unscored: number;
+      buckets: readonly { lt: number; count: number }[];
+    };
     computedAt: number;
     truncated: boolean;
   }>;
@@ -3126,9 +3131,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
   });
 
-  // Read-only memory-content counts (active by kind, all statuses). The
-  // service reads bounded `record.list` pages, caches for five minutes with
-  // single-flight, and returns numbers only: no bodies, ids, or scopes.
+  // Read-only memory-content counts (active by kind, all statuses, and the
+  // importance distribution from `record.stats` when remind supports it).
+  // The service caches for five minutes with single-flight and returns
+  // numbers only: no bodies, ids, or scopes.
   app.get("/api/memory/stats", async (c) => {
     if (memory === null) {
       return memoryUnavailable(c);
@@ -3141,6 +3147,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       const body = MemoryStatsResponseSchema.parse({
         byKind: { ...out.byKind },
         byStatus: { ...out.byStatus },
+        ...(out.importance !== undefined
+          ? {
+              importance: {
+                scored: out.importance.scored,
+                unscored: out.importance.unscored,
+                buckets: out.importance.buckets.map((bucket) => ({
+                  lt: bucket.lt,
+                  count: bucket.count,
+                })),
+              },
+            }
+          : {}),
         computedAt: out.computedAt,
         truncated: out.truncated,
       });

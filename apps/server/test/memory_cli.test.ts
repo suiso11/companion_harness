@@ -213,6 +213,24 @@ process.stdin.on("end", () => {
     });
   });
 
+  it("allows the read-only record.stats op used by memory stats", async () => {
+    const dir = tempDir();
+    const entry = writeScript(dir, "ok.mjs", ENVELOPE_SCRIPT);
+    const address = addressOf(entry);
+    const envelope = await callMemoryCli(
+      address,
+      "record.stats",
+      { scope: "s" },
+      undefined,
+    );
+    expect(envelope).toEqual({
+      ok: true,
+      code: "OK",
+      data: { echo: "record.stats" },
+      deduplicated: false,
+    });
+  });
+
   it("rejects oversize requests before spawn", async () => {
     const dir = tempDir();
     const entry = writeScript(dir, "never.mjs", `process.exit(9);`);

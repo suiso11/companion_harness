@@ -74,8 +74,11 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "topic.pending",
   "record.search",
   "record.get",
-  // Read-only bounded listing for the memory content stats panel.
+  // Read-only bounded listing for the memory content stats panel (fallback
+  // for remind versions without the aggregate `record.stats` op).
   "record.list",
+  // Read-only aggregate stats (remind#42).
+  "record.stats",
   "record.correct",
   "record.retire",
   "record.reactivate",

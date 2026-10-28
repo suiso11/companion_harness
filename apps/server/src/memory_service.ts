@@ -206,9 +206,13 @@ export const MEMORY_GRAPH_PAGE_LIMIT_DEFAULT = 50;
 const MEMORY_GRAPH_PAGE_MAX = 100;
 export const MEMORY_GRAPH_LABEL_MAX_CP = 512;
 /**
- * Memory-content statistics (read-only panel). There is no aggregate stats
- * op in remind, so counts come from bounded `record.list` pages filtered by
- * status. `record.list` has no cursor (only `until`), so each status walks
+ * Memory-content statistics (read-only panel). `record.stats` (remind#42) is
+ * the preferred source: one read-only aggregate call with active kind/status
+ * counts plus the active importance distribution. Older remind versions
+ * reject the unknown op with BAD_REQUEST; the service then latches
+ * "stats unsupported" for the process and falls back to bounded
+ * `record.list` pages (no importance) with no further stats attempts.
+ * `record.list` has no cursor (only `until`), so each status walks
  * newest -> oldest with a fixed row cap; reaching the cap sets `truncated`.
  * The result is cached server-side for five minutes with single-flight so
  * auto-refreshing views do not spawn a CLI child per request.
@@ -404,14 +408,33 @@ export interface MemoryStatsByStatus {
   readonly archived: number;
 }
 
+/** One importance histogram bucket from `record.stats` (`lt` exclusive). */
+export interface MemoryStatsImportanceBucket {
+  readonly lt: number;
+  readonly count: number;
+}
+
+/**
+ * Active-record importance distribution from `record.stats`. `scored` counts
+ * records whose stored importance matches the CURRENT bodyHash; `unscored`
+ * counts active records with no fresh score. Bucket counts sum to `scored`.
+ */
+export interface MemoryStatsImportance {
+  readonly scored: number;
+  readonly unscored: number;
+  readonly buckets: readonly MemoryStatsImportanceBucket[];
+}
+
 /**
  * Aggregated memory-content statistics. Numbers only: no snippets, ids, or
  * scopes ever leave the service. `truncated` is true when any status row cap
- * was reached, so `byKind` is a lower bound for active records.
+ * was reached, so `byKind` is a lower bound for active records. `importance`
+ * is absent when the older paged `record.list` fallback was used.
  */
 export interface MemoryStats {
   readonly byKind: MemoryStatsByKind;
   readonly byStatus: MemoryStatsByStatus;
+  readonly importance?: MemoryStatsImportance;
   /** Epoch ms when this snapshot was collected. */
   readonly computedAt: number;
   readonly truncated: boolean;
@@ -1285,6 +1308,8 @@ export function createMemoryService(
   let statsPending: Promise<MemoryStats> | null = null;
   /** Remind's accepted `record.list` page size (downgraded on rejection). */
   let statsPageLimitIndex = 0;
+  /** Latched after remind answers BAD_REQUEST for the `record.stats` op. */
+  let statsUnsupported = false;
 
   function throwIfStagingCancelled(signal?: AbortSignal): void {
     if (isAborted(signal)) {
@@ -4205,8 +4230,146 @@ export function createMemoryService(
     }
   }
 
+  /** Fixed `record.stats` bucket upper bounds (last is exclusive top). */
+  const STATS_IMPORTANCE_LT: readonly number[] = [0.2, 0.4, 0.6, 0.8, 1.0001];
+
+  function isNonNegativeInteger(value: unknown): value is number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0;
+  }
+
+  function hasExactKeys(
+    value: Record<string, unknown>,
+    expected: readonly string[],
+  ): boolean {
+    const keys = Object.keys(value);
+    return (
+      keys.length === expected.length &&
+      expected.every((key) => Object.hasOwn(value, key))
+    );
+  }
+
+  /**
+   * Strict, bounded parse of one `record.stats` payload: exact top-level and
+   * nested keys, non-negative integer counts, the configured scope, an ISO
+   * `computedAt`, and the five fixed importance buckets. Anything else is
+   * rejected (the service reports service_unavailable, never crashes).
+   */
+  function parseRecordStats(
+    data: Record<string, unknown> | null,
+  ): MemoryStats | null {
+    if (
+      !isRecord(data) ||
+      !hasExactKeys(data, [
+        "scope",
+        "byKind",
+        "byStatus",
+        "importance",
+        "computedAt",
+      ]) ||
+      data.scope !== scope ||
+      typeof data.computedAt !== "string"
+    ) {
+      return null;
+    }
+    const computedAt = Date.parse(data.computedAt);
+    if (!Number.isSafeInteger(computedAt) || computedAt < 0) return null;
+    const rawKind = data.byKind;
+    const rawStatus = data.byStatus;
+    if (
+      !isRecord(rawKind) ||
+      !hasExactKeys(rawKind, [
+        "user_fact",
+        "model_inference",
+        "summary",
+        "correction",
+      ]) ||
+      !isRecord(rawStatus) ||
+      !hasExactKeys(rawStatus, ["active", "retired", "superseded", "archived"])
+    ) {
+      return null;
+    }
+    const kindKeys = [
+      "user_fact",
+      "model_inference",
+      "summary",
+      "correction",
+    ] as const;
+    const statusKeys = ["active", "retired", "superseded", "archived"] as const;
+    const byKind = {} as Record<(typeof kindKeys)[number], number>;
+    for (const key of kindKeys) {
+      const count = rawKind[key];
+      if (!isNonNegativeInteger(count)) return null;
+      byKind[key] = count;
+    }
+    const byStatus = {} as Record<(typeof statusKeys)[number], number>;
+    for (const key of statusKeys) {
+      const count = rawStatus[key];
+      if (!isNonNegativeInteger(count)) return null;
+      byStatus[key] = count;
+    }
+    const rawImportance = data.importance;
+    if (
+      !isRecord(rawImportance) ||
+      !hasExactKeys(rawImportance, ["scored", "unscored", "buckets"]) ||
+      !isNonNegativeInteger(rawImportance.scored) ||
+      !isNonNegativeInteger(rawImportance.unscored) ||
+      !Array.isArray(rawImportance.buckets) ||
+      rawImportance.buckets.length !== STATS_IMPORTANCE_LT.length
+    ) {
+      return null;
+    }
+    const buckets: MemoryStatsImportanceBucket[] = [];
+    for (let index = 0; index < STATS_IMPORTANCE_LT.length; index += 1) {
+      const raw = rawImportance.buckets[index];
+      if (
+        !isRecord(raw) ||
+        !hasExactKeys(raw, ["lt", "count"]) ||
+        raw.lt !== STATS_IMPORTANCE_LT[index] ||
+        !isNonNegativeInteger(raw.count)
+      ) {
+        return null;
+      }
+      buckets.push({ lt: raw.lt as number, count: raw.count });
+    }
+    return {
+      byKind,
+      byStatus,
+      importance: {
+        scored: rawImportance.scored,
+        unscored: rawImportance.unscored,
+        buckets,
+      },
+      computedAt,
+      // `record.stats` is a complete single-transaction aggregate.
+      truncated: false,
+    };
+  }
+
   async function collectMemoryStats(): Promise<MemoryStats> {
     throwIfStagingCancelled();
+    if (!statsUnsupported) {
+      let envelope: MemoryCliEnvelope;
+      try {
+        envelope = await cliCall(address, "record.stats", { scope }, undefined);
+      } catch {
+        // Transport failure is NOT an unsupported op: report it instead of
+        // silently switching to the expensive fallback.
+        throw new MemoryManageError("service_unavailable");
+      }
+      if (envelope.ok) {
+        const parsed = parseRecordStats(envelope.data);
+        if (parsed === null) {
+          throw new MemoryManageError("service_unavailable");
+        }
+        return parsed;
+      }
+      if (envelope.code !== "BAD_REQUEST") {
+        throw new MemoryManageError("service_unavailable");
+      }
+      // Older remind: unknown op -> BAD_REQUEST. Latch for this process so
+      // later cache misses never retry the unsupported call.
+      statsUnsupported = true;
+    }
     const computedAt = now();
     // Statuses are independent reads; each is bounded by its row cap.
     const active = await walkStatsStatus("active", MEMORY_STATS_ACTIVE_ROW_CAP);

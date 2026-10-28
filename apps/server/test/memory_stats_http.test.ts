@@ -123,6 +123,50 @@ describe("GET /api/memory/stats", () => {
     }
   });
 
+  it("passes the importance distribution through when present", async () => {
+    const fixture = await makeApp(
+      fakeMemory(async () => ({
+        byKind: {
+          user_fact: 3,
+          model_inference: 2,
+          summary: 1,
+          correction: 0,
+        },
+        byStatus: { active: 6, retired: 2, superseded: 1, archived: 0 },
+        importance: {
+          scored: 4,
+          unscored: 2,
+          buckets: [
+            { lt: 0.2, count: 1 },
+            { lt: 0.4, count: 1 },
+            { lt: 0.6, count: 1 },
+            { lt: 0.8, count: 1 },
+            { lt: 1.0001, count: 0 },
+          ],
+        },
+        computedAt: T0,
+        truncated: false,
+      })),
+    );
+    try {
+      const out = await get(fixture.app, "/api/memory/stats");
+      expect(out.status).toBe(200);
+      expect((out.body as { importance: unknown }).importance).toEqual({
+        scored: 4,
+        unscored: 2,
+        buckets: [
+          { lt: 0.2, count: 1 },
+          { lt: 0.4, count: 1 },
+          { lt: 0.6, count: 1 },
+          { lt: 0.8, count: 1 },
+          { lt: 1.0001, count: 0 },
+        ],
+      });
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("rejects any query parameter before calling the service", async () => {
     let calls = 0;
     const fixture = await makeApp(

@@ -19,6 +19,7 @@ import {
   latestLabel,
   type MemoryMaintenanceOp,
   type MemoryStats,
+  memoryImportanceBars,
   memoryKindBars,
   memoryStatusCards,
   opLabel,
@@ -50,6 +51,9 @@ let seq = 0;
 let cards = $derived(summary === null ? [] : summaryCards(summary));
 let statusCards = $derived(stats === null ? [] : memoryStatusCards(stats));
 let kindBars = $derived(stats === null ? [] : memoryKindBars(stats));
+let importanceBars = $derived(
+  stats === null ? [] : memoryImportanceBars(stats),
+);
 let daily = $derived(
   summary === null ? [] : dailyActivity(runs, summary.generatedAt),
 );
@@ -221,6 +225,27 @@ onMount(() => {
           </div>
         {/each}
       </div>
+      {#if importanceBars.length > 0}
+        <h5>重要度の分布</h5>
+        <div
+          class="memory-stats-chart"
+          role="img"
+          aria-label="有効な記憶の重要度の分布"
+        >
+          {#each importanceBars as bar (bar.key)}
+            <div class="memory-stats-row">
+              <span class="memory-stats-label">{bar.label}</span>
+              <span class="memory-stats-track">
+                <span
+                  class="memory-stats-fill"
+                  style={`width: ${Math.max(bar.percent, bar.value > 0 ? 4 : 0)}%`}
+                ></span>
+              </span>
+              <span class="memory-stats-value">{bar.value}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <p class="activity-updated">
         集計 {formatActivityTime(stats.computedAt)}{stats.truncated
           ? "・上限まで集計（全件ではない場合があります）"
