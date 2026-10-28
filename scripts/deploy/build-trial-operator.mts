@@ -449,6 +449,7 @@ try {
     ...trialRaw,
     configFingerprint: fp,
     sourceRevision: rev,
+    sourceRepoPath: input.sourceRepo,
     mandatoryChecks: Object.keys(eff.checks as object).sort(),
     allowedPaths: [...config.profile.allowedPaths],
     modelRoute: config.profile.model.route,

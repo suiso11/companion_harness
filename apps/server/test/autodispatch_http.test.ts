@@ -49,6 +49,7 @@ function envConfig(): NodeJS.ProcessEnv {
     mandatoryChecks: ["lint"],
     configFingerprint: FP,
     sourceRevision: REV,
+    sourceRepoPath: "/synthetic/source",
     currentModel: "test-model",
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,

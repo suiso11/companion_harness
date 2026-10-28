@@ -379,6 +379,7 @@ import {
   readQueuedTrialGrantHorizon,
   readTrialIntent,
   readTrialProposal,
+  readWorkerExecutionIdByProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
   readWorkerReport,
@@ -7632,6 +7633,13 @@ export function createKernelRepository(
     return readWorkerReportByProposal(db, sessionId, proposalId);
   }
 
+  function readTrialExecutionIdByProposal(
+    sessionId: string,
+    proposalId: string,
+  ) {
+    return readWorkerExecutionIdByProposal(db, sessionId, proposalId);
+  }
+
   function recordTrialWorkerResult(
     sessionId: string,
     executionId: string,
@@ -8098,6 +8106,7 @@ export function createKernelRepository(
     readTrialWorkerOutcomeByProposal,
     readTrialWorkerReport,
     readTrialWorkerReportByProposal,
+    readTrialExecutionIdByProposal,
     recordTrialWorkerResult,
     recordTrialQuiescence,
     clearTrialAliasFence,

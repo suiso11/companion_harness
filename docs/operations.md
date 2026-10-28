@@ -4546,6 +4546,21 @@ staging form is native-only by design.
   the frozen bridge journal. `/trials` renders 報告 / ホスト検証 /
   ゲスト報告（未検証）/ 未解決, and a terminal chat trial card shows a
   one-line summary plus a link to `/trials`.
+- Retained candidate review (read-only): a completed write trial keeps
+  `<stateDir>/runs/<executionId>/artifact.json` plus `candidate/<path>` under
+  the operator state root (stateDir is read from the operator template named
+  by the trial runner). `GET /api/sessions/:id/trials/:proposalId/candidate`
+  requires the stored host-checked `report.artifact` digest, re-hashes the
+  exact artifact bytes (`candidate_digest_mismatch` on drift), re-hashes every
+  candidate file, and enforces the grant's literal patch paths plus the
+  profile write scopes. Base bytes come from the server's own configured
+  source checkout (`sourceRepoPath`, emitted by the trial-operator builder and
+  required when trials are enabled) via `git show <sourceRevision>:<path>`;
+  a missing or mismatched base fails as `base_mismatch`. Pruned/absent runs
+  fail closed as `candidate_unavailable` (404 when no artifact was stored).
+  The response carries per-file kind/mode notes and a plain-text unified diff
+  capped at 64 KB with a `truncated` flag; `/trials` renders it in a `<pre>`
+  with fixed Japanese error messages and never interprets it as HTML.
 - Verified 2026-10-17, synthetic only (fixed `synth-e2e-model` over a
   loopback relay, never a real model): full server A+B driver green —
   scenario A `consumed`/`authorized`/`bridge-exit:0` (12 model calls,

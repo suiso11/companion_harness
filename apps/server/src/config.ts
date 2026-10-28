@@ -1516,6 +1516,8 @@ export interface TrialConfig {
   readonly configFingerprint: string;
   /** 40 lowercase hex source revision. */
   readonly sourceRevision: string;
+  /** Absolute path to the source checkout used to verify base bytes. */
+  readonly sourceRepoPath: string;
   /** Current model identifier (1..256 chars). */
   readonly currentModel: string;
   /** Whole-repo READ disclosure attested. */
@@ -2306,6 +2308,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
       key !== "mandatoryChecks" &&
       key !== "configFingerprint" &&
       key !== "sourceRevision" &&
+      key !== "sourceRepoPath" &&
       key !== "currentModel" &&
       key !== "disclosedWholeRepoRead" &&
       key !== "timeoutMs" &&
@@ -2324,6 +2327,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     mandatoryChecks?: unknown;
     configFingerprint?: unknown;
     sourceRevision?: unknown;
+    sourceRepoPath?: unknown;
     currentModel?: unknown;
     disclosedWholeRepoRead?: unknown;
     timeoutMs?: unknown;
@@ -2374,6 +2378,15 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     !/^[0-9a-f]{40}$/.test(record.sourceRevision)
   ) {
     throw configError("trial config source revision is invalid");
+  }
+  if (
+    typeof record.sourceRepoPath !== "string" ||
+    record.sourceRepoPath.length < 1 ||
+    record.sourceRepoPath.length > 4096 ||
+    record.sourceRepoPath.includes("\0") ||
+    !record.sourceRepoPath.startsWith("/")
+  ) {
+    throw configError("trial config source repository path is invalid");
   }
   if (
     typeof record.currentModel !== "string" ||
@@ -2458,6 +2471,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     mandatoryChecks: Object.freeze(checks),
     configFingerprint: record.configFingerprint,
     sourceRevision: record.sourceRevision,
+    sourceRepoPath: record.sourceRepoPath,
     currentModel: record.currentModel,
     disclosedWholeRepoRead: record.disclosedWholeRepoRead,
     timeoutMs: record.timeoutMs,
@@ -2479,7 +2493,9 @@ function isLegacyTrialConfig(raw: string | undefined): boolean {
       return false;
     const record = parsed as Record<string, unknown>;
     return (
-      !Array.isArray(record.allowedPaths) || record.modelRoute === undefined
+      !Array.isArray(record.allowedPaths) ||
+      record.modelRoute === undefined ||
+      typeof record.sourceRepoPath !== "string"
     );
   } catch {
     return false;

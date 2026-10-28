@@ -21,6 +21,12 @@ import { type TrialProposalStatus, trialProposalModel } from "./lib/reducer.js";
 // not mounted on this route), and every session change rebinds the panel.
 import { ensureSession, getSessionId } from "./lib/session.svelte.js";
 import {
+  candidateChangeNote,
+  readTrialCandidate,
+  type TrialCandidateView,
+  trialCandidateErrorText,
+} from "./lib/trial_candidate.js";
+import {
   buildTrialStageBody,
   defaultTrialExpiryLocal,
   TRIAL_LINE_MAX,
@@ -351,6 +357,9 @@ let opStatus = $state("");
 let decisionVisible = $state(false);
 let selected = $state<string | null>(null);
 let detailReport = $state<TrialReport | null>(null);
+let candidateView = $state<TrialCandidateView | null>(null);
+let candidateError = $state<string | null>(null);
+let candidateLoading = $state(false);
 let mutating = $state(false);
 let seq = 0;
 
@@ -564,8 +573,31 @@ async function select(proposalId: string): Promise<void> {
   if (fetched.status !== 200 || !isTrialProposal(fetched.body)) return;
   const proposal = fetched.body;
   const outcome = readTrialOutcome(fetched.body);
-  detailReport = readTrialReport(fetched.body);
+  const report = readTrialReport(fetched.body);
+  detailReport = report;
   selected = proposal.id;
+  candidateView = null;
+  candidateError = null;
+  candidateLoading = report !== null && report.artifact !== null;
+  if (candidateLoading) {
+    const candidateFetched = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposal.id)}/candidate`,
+    );
+    if (!current(mine, sessionId)) return;
+    candidateLoading = false;
+    if (candidateFetched.status === 404) {
+      candidateError = trialCandidateErrorText("candidate_unavailable");
+    } else if (candidateFetched.status !== 200) {
+      candidateError = "差分を取得できませんでした";
+    } else {
+      const mapped = readTrialCandidate(candidateFetched.body);
+      if (mapped.available) {
+        candidateView = mapped.view;
+      } else {
+        candidateError = trialCandidateErrorText(mapped.code);
+      }
+    }
+  }
   const model = trialProposalModel(
     {
       status: proposal.status,
@@ -676,6 +708,10 @@ $effect(() => {
   decisionVisible = false;
   detailLines = [];
   detailTitles = [];
+  detailReport = null;
+  candidateView = null;
+  candidateError = null;
+  candidateLoading = false;
   seq += 1;
   defaultsApplied = false;
   taskId = "";
@@ -834,6 +870,28 @@ $effect(() => {
         <div title={detailTitles[i]}>{line}</div>
       {/each}
     </pre>
+    {#if candidateLoading}
+      <p id="trial-candidate-loading">差分を読み込んでいます</p>
+    {/if}
+    {#if candidateError !== null}
+      <p id="trial-candidate-error">{candidateError}</p>
+    {/if}
+    {#if candidateView !== null}
+      <section id="trial-candidate" aria-label="試行の差分">
+        <h3>差分</h3>
+        <ul id="trial-candidate-files">
+          {#each candidateView.changes as change (change.path)}
+            <li>
+              {change.path}: {candidateChangeNote(change)}（{change.size} バイト）
+            </li>
+          {/each}
+        </ul>
+        {#if candidateView.truncated}
+          <p id="trial-candidate-truncated">差分は上限に達したため省略されています</p>
+        {/if}
+        <pre id="trial-candidate-diff">{candidateView.diff}</pre>
+      </section>
+    {/if}
     {#if detailReport !== null}
       {@const report = detailReport}
       <section id="trial-report" aria-label="試行の報告">

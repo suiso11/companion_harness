@@ -2752,6 +2752,23 @@ export function readWorkerReport(
   return { ...normalized, provenance: REPORT_PROVENANCE };
 }
 
+/** Host-only execution lookup for the session-owned proposal's grant. */
+export function readWorkerExecutionIdByProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): string | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const g = db
+    .prepare(
+      "SELECT session_id, execution_id FROM trial_grants WHERE proposal_id=?",
+    )
+    .get(pid) as { session_id: string; execution_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  return g.execution_id;
+}
+
 /** Pure report read by proposal (null before a grant/report exists). */
 export function readWorkerReportByProposal(
   db: Database.Database,
