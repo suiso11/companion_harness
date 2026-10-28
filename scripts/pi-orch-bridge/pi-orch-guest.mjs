@@ -59,6 +59,14 @@ const MAX_MODEL_CALLS = Math.max(
 );
 const MAX_OMP_STDOUT_BYTES = 4 * 1024 * 1024;
 const MAX_OBSERVATION_BYTES = 64 * 1024;
+// Last assistant text/thinking characters seen on the relayed wire. Bounded
+// so a degenerate loop (repeating a short cycle hundreds of times) is still
+// diagnosable from the observation without retaining model prose wholesale.
+const MAX_ASSISTANT_TAIL_CHARS = 512;
+// Same credential-shape redaction as the host bridge's diagnostic reader.
+const ASSISTANT_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
+let assistantTail = "";
+let assistantWireRemainder = "";
 // Stop this far before the bridge's outer deadline so the guest can write
 // its observation and exit instead of being killed at the boundary.
 const GUEST_TIMEOUT_MARGIN_SECONDS = 2;
@@ -377,6 +385,7 @@ function startModelRelay() {
           res.writeHead(upstreamRes.statusCode ?? 502, headers);
           let responseBytes = 0;
           upstreamRes.on("data", (chunk) => {
+            observeAssistantWireChunk(chunk.toString("utf8"));
             responseBytes += chunk.length;
             if (responseBytes > MAX_RESPONSE_BYTES) {
               upstreamRes.destroy();
@@ -385,7 +394,10 @@ function startModelRelay() {
             }
             res.write(chunk);
           });
-          upstreamRes.on("end", () => res.end());
+          upstreamRes.on("end", () => {
+            flushAssistantWireRemainder();
+            res.end();
+          });
           upstreamRes.on("error", () => res.destroy());
         },
       );
@@ -417,6 +429,79 @@ function startModelRelay() {
       else resolve({ server, port });
     });
   });
+}
+
+function redactAssistant(value) {
+  return String(value ?? "")
+    .replace(ASSISTANT_SECRET_PATTERN, "[redacted]")
+    .replaceAll("\u0000", "");
+}
+
+function appendAssistantTail(text) {
+  if (typeof text !== "string" || text.length === 0) return;
+  assistantTail = (assistantTail + redactAssistant(text)).slice(
+    -MAX_ASSISTANT_TAIL_CHARS,
+  );
+}
+
+function captureAssistantPayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  for (const choice of choices) {
+    if (!choice || typeof choice !== "object") continue;
+    for (const part of [choice.delta, choice.message]) {
+      if (!part || typeof part !== "object") continue;
+      for (const key of [
+        "content",
+        "reasoning_content",
+        "reasoning",
+        "thinking",
+      ]) {
+        const value = part[key];
+        if (typeof value === "string") appendAssistantTail(value);
+        else if (Array.isArray(value)) {
+          for (const block of value) {
+            if (
+              block &&
+              typeof block === "object" &&
+              typeof block.text === "string"
+            )
+              appendAssistantTail(block.text);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Observes streamed SSE deltas (and a plain JSON completion body) so loop
+// aborts leave a bounded tail behind. Never consulted for host authority.
+function observeAssistantWireChunk(text) {
+  const buffered = assistantWireRemainder + text;
+  const lines = buffered.split("\n");
+  assistantWireRemainder = lines.pop() ?? "";
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice("data:".length).trim();
+    if (data.length === 0 || data === "[DONE]") continue;
+    try {
+      captureAssistantPayload(JSON.parse(data));
+    } catch {
+      // Ignore malformed frames; they are not observable assistant text.
+    }
+  }
+}
+
+function flushAssistantWireRemainder() {
+  const remainder = assistantWireRemainder;
+  assistantWireRemainder = "";
+  if (remainder.length === 0) return;
+  try {
+    captureAssistantPayload(JSON.parse(remainder));
+  } catch {
+    // Incomplete/non-JSON tail: ignore.
+  }
 }
 
 const TASK_STATUSES = new Set(["running", "done", "error", "cancelled"]);
@@ -564,7 +649,14 @@ function summarizeEvents(text, stderrText) {
     sawError ||= "delegated worker did not complete";
   }
   if (stderrText.length > 0) sawError ||= stderrText.slice(0, 512);
-  return { tools, finalText, modelCalls, delegatedWorkers, error: sawError };
+  return {
+    tools,
+    finalText,
+    modelCalls,
+    delegatedWorkers,
+    error: sawError,
+    ...(assistantTail.length > 0 ? { lastAssistantTail: assistantTail } : {}),
+  };
 }
 
 function sanitizeArgs(value) {

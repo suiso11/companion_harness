@@ -56,6 +56,13 @@ export interface ChatRequest {
    */
   maxOutputTokens?: number;
   /**
+   * Optional presence penalty in the OpenAI-compatible range [-2, 2].
+   * Serialized only on the OpenAI-compatible wire as `presence_penalty`;
+   * absent leaves the request body byte-identical to the default request.
+   * Ollama has no equivalent and ignores it.
+   */
+  presencePenalty?: number;
+  /**
    * Optional provider-side thinking-token budget. Only meaningful on the
    * OpenAI-compatible adapter, which serializes it as the top-level
    * `reasoning_budget_tokens` field understood by the installed

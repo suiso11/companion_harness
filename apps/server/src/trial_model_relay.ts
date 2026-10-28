@@ -93,6 +93,19 @@ export const GUEST_TOOL_NAMES = [
 
 export type GuestToolName = (typeof GUEST_TOOL_NAMES)[number];
 
+/**
+ * Forced presence penalty for every relayed trial call.
+ *
+ * Evidence (eb926fd e2e write trial): the 4th guest model call degenerated
+ * into repeating a 6-character cycle 299 times; OMP's loop guard aborted and
+ * the bridge reported "executor failed" with no checks/artifact. The guest
+ * forwards no sampling parameters and LiteLLM applies no defaults, so the
+ * llama.cpp server ran with none; a positive presence penalty damps exactly
+ * this token-level repetition. The relay is a transport, not a sampler
+ * authority: the guest cannot widen or disable this value.
+ */
+export const TRIAL_RELAY_PRESENCE_PENALTY = 1.0;
+
 /** Gateway-safe image of a guest tool name (satisfies NATIVE_TOOL_NAME_PATTERN). */
 export function toGatewayToolName(guest: GuestToolName): string {
   return `capsule.${guest}`;
@@ -640,6 +653,8 @@ export class TrialModelRelay {
             ? {}
             : { tools: translated.gatewayTools }),
           maxOutputTokens: translated.maxOutputTokens,
+          // Fixed, guest-independent repetition damping (see the constant).
+          presencePenalty: TRIAL_RELAY_PRESENCE_PENALTY,
           // The relayed guest never receives thinking text, so its tokens are
           // pure latency. Without a global llama-server budget, a hybrid
           // model can think unboundedly and blow the per-call timeout.

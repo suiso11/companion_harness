@@ -4397,6 +4397,11 @@ Strict opt-in workspace-trial runner (schema 12 trial authority). Unset
 `COMPANION_AUTONOMY_JSON` (default) disables the whole path: no
 proposals, grants, runner, or bridge spawn.
 
+Relayed trial model calls carry a fixed `presence_penalty` of 1.0 (a
+guest-sent value is ignored) to damp the token-level repetition loops that
+previously aborted a write trial; guest observations also keep a bounded,
+redacted `lastAssistantTail` so such aborts stay diagnosable.
+
 ### Configuration
 
 - `COMPANION_AUTONOMY_JSON` must be one strict JSON object with exactly

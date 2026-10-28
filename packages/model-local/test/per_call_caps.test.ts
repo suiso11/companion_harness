@@ -71,6 +71,47 @@ describe("maxOutputTokens serialization", () => {
     expect("max_tokens" in (plain.body as Record<string, unknown>)).toBe(false);
   });
 
+  it("sends presence_penalty only when set (openai-compatible)", async () => {
+    const captured: { body?: unknown } = {};
+    const gateway = createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: capturingFetch(openaiOk(), captured),
+    });
+    await gateway.chat({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      presencePenalty: 1,
+    });
+    expect((captured.body as Record<string, unknown>).presence_penalty).toBe(1);
+
+    const plain: { body?: unknown } = {};
+    const gateway2 = createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: capturingFetch(openaiOk(), plain),
+    });
+    await gateway2.chat({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect("presence_penalty" in (plain.body as Record<string, unknown>)).toBe(
+      false,
+    );
+  });
+
+  it("rejects an out-of-range presence penalty", async () => {
+    const gateway = createOpenAICompatibleGateway({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: capturingFetch(openaiOk(), {}),
+    });
+    await expect(
+      gateway.chat({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+        presencePenalty: 2.5,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("sends options.num_predict only when set (ollama)", async () => {
     const captured: { body?: unknown } = {};
     const gateway = createOllamaGateway({

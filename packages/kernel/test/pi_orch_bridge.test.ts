@@ -981,6 +981,7 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       ompExitCode: 3,
       timedOut: false,
       error: "model failed \u0000sk-OBSECRET123",
+      lastAssistantTail: `sk-TAILSECRET123 ${"z".repeat(900)} cycle abcdef TAILEND`,
     });
     const fixture = await makeFixture({
       executorBody: [
@@ -1006,6 +1007,11 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       "engine=omp-headless-json executorKind=fixed ompExitCode=3",
     );
     expect(joined).toContain("toolCount=2 toolErrors=1");
+    expect(joined).toContain("guest assistant tail:");
+    // Bounded to the LAST 512 chars: the prefix (and secret) is dropped.
+    expect(joined).toContain("TAILEND");
+    expect(joined).not.toContain("cycle abcdef TAILEND TAILEND");
+    expect(joined).not.toContain("sk-TAILSECRET123");
     expect(joined).toContain("guest stderr:");
     expect(joined).toContain("guest stdout:");
     expect(joined).not.toContain("sk-OBSECRET123");
