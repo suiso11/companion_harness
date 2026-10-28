@@ -220,6 +220,7 @@ function executorFailureDiagnostics(workRoot, run) {
     );
   }
   if (
+    observation !== null &&
     typeof observation.lastAssistantTail === "string" &&
     observation.lastAssistantTail.length > 0
   ) {

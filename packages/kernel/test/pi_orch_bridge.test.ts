@@ -1056,6 +1056,27 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(tightView?.exitCode).toBe(10);
   });
 
+  it("keeps executor failure diagnostics when the observation is missing", async () => {
+    const fixture = await makeFixture({
+      executorBody: [
+        `process.stderr.write(${JSON.stringify("executor died before observation\n")});`,
+        `process.stdout.write(${JSON.stringify("executor stdout\n")});`,
+        "process.exit(4);",
+      ].join("\n"),
+    });
+    const request = makeRequest(fixture);
+    const run = await runBridge(fixture, request);
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("error");
+    expect(result.exitCode).toBe(10);
+    expect(result.report.summary).toBe("companion bridge: executor failed");
+    const joined = result.report.unresolved.join("\n");
+    expect(joined).toContain("diagnostic: guest observation missing");
+    expect(joined).toContain("guest stderr:");
+    expect(joined).toContain("guest stdout:");
+  });
+
   it("runs a real synthetic read-only trial and retains artifact metadata", async () => {
     const fixture = await makeFixture({
       executorBody: "process.stdout.write('executor-ok\\n');\n",
