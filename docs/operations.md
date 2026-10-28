@@ -4519,6 +4519,12 @@ staging form is native-only by design.
   a stale socket/file with no listener) fails closed as `launch-failed`
   (`relay-start`); the operator must remove it. Only a relay that
   actually bound the path unlinks it on `close`.
+- A trial that fails before its capsule scope starts (for example the
+  bridge's containment preflight rejecting) keeps the bridge's own result
+  line in the stored report (summary/unresolved/checks plus the observed
+  exit code) and is never authorized; run the server with
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` exported so the user
+  systemd bus is reachable.
 - Every relayed model call is sent with `reasoning: "off"`: the sealed
   guest never sees thinking text, so unrequested hybrid-model thinking
   only burns the per-call timeout.
