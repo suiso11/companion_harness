@@ -1462,12 +1462,13 @@ export function readTrialCandidateRoots(
   stateDir: string | null;
   sourceDir: string | null;
   sourceRevision: string | null;
+  frozenAllowedPaths: string[] | null;
 } {
   const session = requireId(sessionId, "sessionId");
   const exec = requireId(executionId, "executionId");
   const row = db
     .prepare(
-      "SELECT session_id, candidate_state_dir, candidate_source_dir, request_json FROM trial_grants WHERE execution_id=?",
+      "SELECT session_id, candidate_state_dir, candidate_source_dir, request_json, approved_profile_json FROM trial_grants WHERE execution_id=?",
     )
     .get(exec) as
     | {
@@ -1475,6 +1476,7 @@ export function readTrialCandidateRoots(
         candidate_state_dir: string | null;
         candidate_source_dir: string | null;
         request_json: string | null;
+        approved_profile_json: string | null;
       }
     | undefined;
   if (!row || row.session_id !== session)
@@ -1497,10 +1499,23 @@ export function readTrialCandidateRoots(
       sourceRevision = null;
     }
   }
+  // The grant's frozen profile owns the write scope the human approved.
+  // Parse strictly (contracts schema): a corrupt/missing profile must never
+  // silently widen validation to the current template's allowedPaths.
+  let frozenAllowedPaths: string[] | null = null;
+  if (row.approved_profile_json !== null) {
+    frozenAllowedPaths = profileOrThrow(
+      parseOr(
+        () => JSON.parse(row.approved_profile_json as string),
+        "approved profile",
+      ),
+    ).allowedPaths;
+  }
   return {
     stateDir: row.candidate_state_dir,
     sourceDir: row.candidate_source_dir,
     sourceRevision,
+    frozenAllowedPaths,
   };
 }
 

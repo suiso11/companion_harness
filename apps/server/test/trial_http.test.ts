@@ -933,6 +933,12 @@ describe("trial candidate HTTP surface", () => {
     const fixture = await makeApp(true, JSON.stringify(cfg));
     try {
       const { app } = fixture;
+      const rawDb = fixture.db.raw as unknown as {
+        prepare: (sql: string) => {
+          run: (...args: unknown[]) => void;
+          get: (...args: unknown[]) => unknown;
+        };
+      };
       const created = await post(app, "/api/sessions", {}, randomUUID());
       const sessionId = (created.body as { sessionId: string }).sessionId;
       const { taskId } = stageAuthority(fixture.repo, sessionId, "c1");
@@ -954,6 +960,21 @@ describe("trial candidate HTTP surface", () => {
       expect(approved.status).toBe(201);
       const executionId = (approved.body as { executionId: string })
         .executionId;
+      const grant = rawDb
+        .prepare(
+          "SELECT approved_profile_json FROM trial_grants WHERE execution_id=?",
+        )
+        .get(executionId) as { approved_profile_json: string };
+      const frozenProfile = JSON.parse(grant.approved_profile_json) as Record<
+        string,
+        unknown
+      >;
+      frozenProfile.allowedPaths = ["apps"];
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=? WHERE execution_id=?",
+        )
+        .run(JSON.stringify(frozenProfile), executionId);
       const runDir = join(stateDir, "runs", executionId);
       mkdirSync(join(runDir, "candidate/apps"), { recursive: true });
       writeFileSync(join(runDir, "candidate/apps/a.ts"), "two\n");
@@ -992,9 +1013,6 @@ describe("trial candidate HTTP surface", () => {
       change.candidateSha256 = hash("two\n");
       const artifactBytes = Buffer.from(`${JSON.stringify(doc)}\n`);
       writeFileSync(join(runDir, "artifact.json"), artifactBytes);
-      const rawDb = fixture.db.raw as unknown as {
-        prepare: (sql: string) => { run: (...args: unknown[]) => void };
-      };
       rawDb
         .prepare(
           "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1024,6 +1042,28 @@ describe("trial candidate HTTP surface", () => {
         ],
       });
       expect((candidate.body as { diff: string }).diff).toContain("+two");
+      // A frozen scope that does not cover the change must fail closed even
+      // though the current template allows it.
+      frozenProfile.allowedPaths = ["packages"];
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=? WHERE execution_id=?",
+        )
+        .run(JSON.stringify(frozenProfile), executionId);
+      const outOfScope = await get(app, `${base}/${proposalId}/candidate`);
+      expect(outOfScope.status).toBe(200);
+      expect(outOfScope.body).toMatchObject({
+        available: false,
+        code: "candidate_unavailable",
+      });
+      // Legacy grants (null frozen profile) fall back to the current template.
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=NULL WHERE execution_id=?",
+        )
+        .run(executionId);
+      const legacy = await get(app, `${base}/${proposalId}/candidate`);
+      expect(legacy.body).toMatchObject({ available: true });
       rawDb
         .prepare("DELETE FROM trial_worker_reports WHERE execution_id=?")
         .run(executionId);

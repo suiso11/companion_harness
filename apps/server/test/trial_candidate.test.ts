@@ -201,6 +201,57 @@ describe("loadTrialCandidate", () => {
     );
   });
 
+  it("validates against the grant's frozen allowedPaths, not the current template", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    // The template drifted to `packages` after approval; the grant froze
+    // `apps`, so the retained apps/ change must still be accepted.
+    const driftedTrial = {
+      ...fixture.trial,
+      allowedPaths: ["packages"],
+    };
+    const view = loadTrialCandidate({
+      executionId: fixture.executionId,
+      trial: driftedTrial,
+      expectedArtifactSha256: fixture.artifactSha256,
+      literalPatchPaths: ["apps/a.ts"],
+      frozenAllowedPaths: ["apps"],
+    });
+    expect(view.changes[0]?.path).toBe("apps/a.ts");
+    // And a frozen scope that does not cover the change still fails closed.
+    expect(() =>
+      loadTrialCandidate({
+        executionId: fixture.executionId,
+        trial: fixture.trial,
+        expectedArtifactSha256: fixture.artifactSha256,
+        literalPatchPaths: ["apps/a.ts"],
+        frozenAllowedPaths: ["packages"],
+      }),
+    ).toThrow(/candidate_unavailable/);
+  });
+
+  it("falls back to the current template scope for legacy grants", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    const narrowTrial = { ...fixture.trial, allowedPaths: ["packages"] };
+    expect(() =>
+      loadTrialCandidate({
+        executionId: fixture.executionId,
+        trial: narrowTrial,
+        expectedArtifactSha256: fixture.artifactSha256,
+        literalPatchPaths: ["apps/a.ts"],
+      }),
+    ).toThrow(/candidate_unavailable/);
+    expect(
+      loadTrialCandidate({
+        executionId: fixture.executionId,
+        trial: fixture.trial,
+        expectedArtifactSha256: fixture.artifactSha256,
+        literalPatchPaths: ["apps/a.ts"],
+      }).changes[0]?.path,
+    ).toBe("apps/a.ts");
+  });
+
   it("fails closed when the pruned run root is missing", () => {
     const fixture = makeFixture();
     roots.push(fixture.root);

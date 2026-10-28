@@ -5428,6 +5428,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         ...(roots.sourceRevision !== null
           ? { frozenSourceRevision: roots.sourceRevision }
           : {}),
+        ...(roots.frozenAllowedPaths !== null
+          ? { frozenAllowedPaths: roots.frozenAllowedPaths }
+          : {}),
       });
       return c.json({ available: true, ...view }, 200);
     } catch (error) {

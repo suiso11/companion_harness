@@ -443,6 +443,11 @@ export interface LoadTrialCandidateInput {
   /** Approved source revision frozen in the claim wire. Absent for legacy
    * rows, which fall back to the current trial config. */
   readonly frozenSourceRevision?: string;
+  /** Write scope frozen in the grant's approved profile. Absent for legacy
+   * rows (null approved_profile_json), which fall back to the current
+   * template's allowedPaths. Never widen validation to current template
+   * paths when the grant carries a frozen scope. */
+  readonly frozenAllowedPaths?: readonly string[];
 }
 
 /** Verify + render the retained candidate for a completed trial. */
@@ -521,13 +526,16 @@ export function loadTrialCandidate(
     ? realDirectory(join(runDir, "candidate"), "candidate_unavailable")
     : null;
 
+  // The grant's frozen scope wins: a profile change after approval must not
+  // retroactively authorize (or reject) bytes the human never approved.
+  const allowedPaths = input.frozenAllowedPaths ?? input.trial.allowedPaths;
   const changes: TrialCandidateChangeView[] = [];
   const parts: string[] = [];
   let truncated = false;
   let remaining = TRIAL_DIFF_MAX_BYTES;
   for (const change of artifact.changes) {
     if (
-      !inScopes(input.trial.allowedPaths, change.path) ||
+      !inScopes(allowedPaths, change.path) ||
       !inScopes(input.literalPatchPaths, change.path)
     ) {
       throw new TrialCandidateError("candidate_unavailable");
