@@ -585,6 +585,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   readonly argv: string[];
   readonly prompt: string;
   readonly launcherExecuted: boolean;
+  readonly config: string;
 } {
   const dir = tempRoot("guest-realpi");
   const workRoot = join(dir, "work");
@@ -630,7 +631,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
     .join("\n");
   write(
     join(fake, "omp"),
-    `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nconst argv = process.argv.slice(2);\nwriteFileSync('/work/captured-argv.json', JSON.stringify(argv));\nwriteFileSync('/work/captured-prompt.txt', argv.at(-1) ?? "");\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
+    `#!${process.execPath}\nimport { readFileSync, writeFileSync } from 'node:fs';\nconst argv = process.argv.slice(2);\nwriteFileSync('/work/captured-argv.json', JSON.stringify(argv));\nwriteFileSync('/work/captured-prompt.txt', argv.at(-1) ?? "");\ntry { writeFileSync('/work/captured-config.yml', readFileSync((process.env.HOME ?? '/scratch') + '/.omp/agent/config.yml')); } catch {}\nprocess.stdout.write(${JSON.stringify(`${events}\n`)});\n`,
     0o700,
   );
   const jobFile = join(dir, "job.json");
@@ -701,6 +702,7 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   );
   let argv: string[] = [];
   let prompt = "";
+  let config = "";
   try {
     argv = JSON.parse(
       readFileSync(join(workRoot, "captured-argv.json"), "utf8"),
@@ -709,12 +711,18 @@ function runRealPiGuestJob(mode: "read_only" | "write"): {
   } catch {
     // Rejected jobs never invoke the fake OMP binary.
   }
+  try {
+    config = readFileSync(join(workRoot, "captured-config.yml"), "utf8");
+  } catch {
+    // The fake OMP may not have reached the config read.
+  }
   return {
     status: run.status,
     stderr: run.stderr ?? "",
     argv,
     prompt,
     launcherExecuted: existsSync(join(workRoot, "launcher-was-executed")),
+    config,
   };
 }
 
@@ -856,6 +864,26 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
       // The pinned launcher itself must never execute: executing it would
       // load the coordinator extension and block the write tool.
       expect(run.launcherExecuted).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "disables only the OMP assistant-prose loop guard in the sealed guest config",
+    () => {
+      // A finished guest on eb92119 restated its completion report (a
+      // 416-char cycle x3) after making the exact requested edit. The pinned
+      // OMP loop guard treated that as a stream stall and exited 1, so the
+      // bridge never reached host checks. Calls (maxOutputTokens 1024) and the
+      // run (maxModelCalls 64 + timeoutMs) are already capped, so prose
+      // scanning must stay off while loopGuard stays available for thinking.
+      const run = runRealPiGuestJob("write");
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.config).toContain("model:");
+      expect(run.config).toMatch(
+        /model:\n {2}loopGuard:\n {4}checkAssistantContent: false\n/,
+      );
+      // Only the prose scan is disabled; do not switch thinking loop guard off.
+      expect(run.config).not.toContain("loopGuard:\n    enabled: false");
     },
   );
 

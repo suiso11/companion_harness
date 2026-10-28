@@ -316,6 +316,19 @@ function writeAgentConfig(agentDir, port) {
       "  enabled: false",
       "  maxRetries: 0",
       "  modelFallback: false",
+      // OMP's loop guard (model.loopGuard, checkAssistantContent defaults to
+      // true) aborts a stream when the assistant restates its completion report.
+      // E2E write trials on eb92119 showed a finished guest emitting the exact
+      // requested one-line edit and then repeating its report (416-char cycle
+      // x3); the guard treated that as a stream stall, so OMP exited 1 and the
+      // bridge reported exit 10 "executor failed" before host checks ran. Each
+      // relay call is already capped (maxOutputTokens 1024) and so is the run
+      // (relay.maxModelCalls 64 plus timeoutMs), so scanning prose for loops is
+      // redundant here. Keep loopGuard.enabled at its default for thinking; only
+      // disable the assistant-prose scan.
+      "model:",
+      "  loopGuard:",
+      "    checkAssistantContent: false",
       "",
     ].join("\n"),
     { mode: 0o600 },
