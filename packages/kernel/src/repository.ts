@@ -377,8 +377,10 @@ import {
   type QueuedTrialGrantCursor,
   readLaunchPermit,
   readQueuedTrialGrantHorizon,
+  readTrialCandidateRoots as readTrialCandidateRootsFn,
   readTrialIntent,
   readTrialProposal,
+  readWorkerExecutionIdByProposal,
   readWorkerOutcome,
   readWorkerOutcomeByProposal,
   readWorkerReport,
@@ -7503,6 +7505,8 @@ export function createKernelRepository(
     options: AutonomyKeyOptions & {
       profile: TrialProfileSnapshot;
       workspaceAlias: string;
+      candidateStateDir?: string | null;
+      candidateSourceDir?: string | null;
     },
   ): { status: number; body: unknown; replayed: boolean } {
     const profile = parseOrValidation(
@@ -7514,6 +7518,12 @@ export function createKernelRepository(
       ...(options.now !== undefined ? { now: options.now } : {}),
       profile,
       workspaceAlias: options.workspaceAlias,
+      ...(options.candidateStateDir !== undefined
+        ? { candidateStateDir: options.candidateStateDir }
+        : {}),
+      ...(options.candidateSourceDir !== undefined
+        ? { candidateSourceDir: options.candidateSourceDir }
+        : {}),
     });
     const req = parseOrValidation(
       () =>
@@ -7560,6 +7570,10 @@ export function createKernelRepository(
   /* Internal execution-lifecycle facade (Root service only, never browser). */
   function readTrialLaunchIntent(sessionId: string, executionId: string) {
     return readTrialIntent(db, sessionId, executionId);
+  }
+
+  function readTrialCandidateRoots(sessionId: string, executionId: string) {
+    return readTrialCandidateRootsFn(db, sessionId, executionId);
   }
 
   /** Internal proof read only: owned, revoked, never claimed/launched grant.
@@ -7630,6 +7644,13 @@ export function createKernelRepository(
     proposalId: string,
   ) {
     return readWorkerReportByProposal(db, sessionId, proposalId);
+  }
+
+  function readTrialExecutionIdByProposal(
+    sessionId: string,
+    proposalId: string,
+  ) {
+    return readWorkerExecutionIdByProposal(db, sessionId, proposalId);
   }
 
   function recordTrialWorkerResult(
@@ -8090,6 +8111,7 @@ export function createKernelRepository(
     fenceTrialUnknown,
     hashTrialLaunchRequest,
     readTrialLaunchIntent,
+    readTrialCandidateRoots,
     isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,
@@ -8098,6 +8120,7 @@ export function createKernelRepository(
     readTrialWorkerOutcomeByProposal,
     readTrialWorkerReport,
     readTrialWorkerReportByProposal,
+    readTrialExecutionIdByProposal,
     recordTrialWorkerResult,
     recordTrialQuiescence,
     clearTrialAliasFence,

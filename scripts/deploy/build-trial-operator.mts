@@ -271,6 +271,9 @@ try {
     mandatoryChecks: selectedChecks,
     configFingerprint: "0".repeat(64),
     sourceRevision: "0".repeat(40),
+    // Required by the strict parser: base bytes for candidate review are
+    // read from this exact frozen source tree, never from git.
+    sourceRepoPath: SRC,
     currentModel,
     disclosedWholeRepoRead: true,
     timeoutMs: limits.timeoutMs,
@@ -449,6 +452,9 @@ try {
     ...trialRaw,
     configFingerprint: fp,
     sourceRevision: rev,
+    // Base bytes for candidate review are read from this exact sealed tree,
+    // not from git: the computed sourceRevision is a synthetic manifest hash.
+    sourceRepoPath: res.materialization.state.snapshotRoot,
     mandatoryChecks: Object.keys(eff.checks as object).sort(),
     allowedPaths: [...config.profile.allowedPaths],
     modelRoute: config.profile.model.route,

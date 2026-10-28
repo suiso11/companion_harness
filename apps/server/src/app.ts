@@ -151,6 +151,11 @@ import {
 import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import {
+  loadTrialCandidate,
+  TrialCandidateError,
+  type TrialCandidateErrorCode,
+} from "./trial_candidate.js";
+import {
   renderConversationShell,
   renderRemoteLogin,
   renderSvelteShell,
@@ -5348,6 +5353,91 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       );
       return c.json({ ...found, outcome, report }, 200);
     } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Read-only review of the retained candidate. Same ownership/auth/host
+  // checks as the trial detail GET; 404 when no host-checked artifact exists.
+  app.get("/api/sessions/:sessionId/trials/:proposalId/candidate", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) {
+      return proposal.response;
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    const trial = config.trial;
+    if (trial === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const found = repo.readTrial(session.id, proposal.id);
+      const report = repo.readTrialWorkerReportByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (report === null || report.artifact === null) {
+        return c.json(
+          {
+            error: {
+              code: "candidate_unavailable",
+              message: "no host-checked candidate artifact",
+            },
+          },
+          404,
+        );
+      }
+      const executionId = repo.readTrialExecutionIdByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (executionId === null) {
+        return c.json(
+          {
+            error: {
+              code: "candidate_unavailable",
+              message: "no host-checked candidate artifact",
+            },
+          },
+          404,
+        );
+      }
+      const literalPatchPaths = Array.isArray(found.literalPatchPaths)
+        ? found.literalPatchPaths.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+      const roots = repo.readTrialCandidateRoots(session.id, executionId);
+      const view = loadTrialCandidate({
+        executionId,
+        trial,
+        expectedArtifactSha256: report.artifact.sha256,
+        literalPatchPaths,
+        ...(roots.stateDir !== null ? { frozenStateDir: roots.stateDir } : {}),
+        ...(roots.sourceDir !== null
+          ? { frozenSourceRepoPath: roots.sourceDir }
+          : {}),
+        ...(roots.sourceRevision !== null
+          ? { frozenSourceRevision: roots.sourceRevision }
+          : {}),
+        ...(roots.frozenAllowedPaths !== null
+          ? { frozenAllowedPaths: roots.frozenAllowedPaths }
+          : {}),
+      });
+      return c.json({ available: true, ...view }, 200);
+    } catch (error) {
+      if (error instanceof TrialCandidateError) {
+        const code: TrialCandidateErrorCode = error.code;
+        return c.json({ available: false, code }, 200);
+      }
       return mapDomainError(c, error);
     }
   });

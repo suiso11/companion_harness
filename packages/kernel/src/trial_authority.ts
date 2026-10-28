@@ -1451,7 +1451,74 @@ export function approveTrialProposal(
   return out;
 }
 
-/** Exact immutable intent read (pure GET: never mutates). */
+/** Claim-time resolved candidate roots for one owned execution. Nullable
+ * columns are returned as null for legacy rows so callers fall back to the
+ * current template. */
+export function readTrialCandidateRoots(
+  db: Database.Database,
+  sessionId: string,
+  executionId: string,
+): {
+  stateDir: string | null;
+  sourceDir: string | null;
+  sourceRevision: string | null;
+  frozenAllowedPaths: string[] | null;
+} {
+  const session = requireId(sessionId, "sessionId");
+  const exec = requireId(executionId, "executionId");
+  const row = db
+    .prepare(
+      "SELECT session_id, candidate_state_dir, candidate_source_dir, request_json, approved_profile_json FROM trial_grants WHERE execution_id=?",
+    )
+    .get(exec) as
+    | {
+        session_id: string;
+        candidate_state_dir: string | null;
+        candidate_source_dir: string | null;
+        request_json: string | null;
+        approved_profile_json: string | null;
+      }
+    | undefined;
+  if (!row || row.session_id !== session)
+    throw new RepositoryNotFoundError(
+      `grant ${exec} not found in session ${session}`,
+    );
+  let sourceRevision: string | null = null;
+  if (typeof row.request_json === "string") {
+    try {
+      const parsed = JSON.parse(row.request_json) as {
+        sourceRevision?: unknown;
+      };
+      if (
+        typeof parsed.sourceRevision === "string" &&
+        /^[0-9a-f]{40}$/.test(parsed.sourceRevision)
+      ) {
+        sourceRevision = parsed.sourceRevision;
+      }
+    } catch {
+      sourceRevision = null;
+    }
+  }
+  // The grant's frozen profile owns the write scope the human approved.
+  // Parse strictly (contracts schema): a corrupt/missing profile must never
+  // silently widen validation to the current template's allowedPaths.
+  let frozenAllowedPaths: string[] | null = null;
+  if (row.approved_profile_json !== null) {
+    frozenAllowedPaths = profileOrThrow(
+      parseOr(
+        () => JSON.parse(row.approved_profile_json as string),
+        "approved profile",
+      ),
+    ).allowedPaths;
+  }
+  return {
+    stateDir: row.candidate_state_dir,
+    sourceDir: row.candidate_source_dir,
+    sourceRevision,
+    frozenAllowedPaths,
+  };
+}
+
 export function readTrialIntent(
   db: Database.Database,
   sessionId: string,
@@ -1526,6 +1593,9 @@ export function claimTrialGrant(
     now?: number;
     profile: TrialProfileSnapshot;
     workspaceAlias: string;
+    /** Claim-time resolved roots, frozen for later candidate review. */
+    candidateStateDir?: string | null;
+    candidateSourceDir?: string | null;
   },
 ): {
   status: number;
@@ -1764,8 +1834,15 @@ export function claimTrialGrant(
       "launch request",
     );
     db.prepare(
-      "UPDATE trial_grants SET status='claimed', control_generation=?, request_json=?, claimed_at=? WHERE execution_id=?",
-    ).run(ctl.version, JSON.stringify(req), now, exec);
+      "UPDATE trial_grants SET status='claimed', control_generation=?, request_json=?, claimed_at=?, candidate_state_dir=?, candidate_source_dir=? WHERE execution_id=?",
+    ).run(
+      ctl.version,
+      JSON.stringify(req),
+      now,
+      options.candidateStateDir ?? null,
+      options.candidateSourceDir ?? null,
+      exec,
+    );
     const updated = db
       .prepare("SELECT * FROM trial_grants WHERE execution_id=?")
       .get(exec) as Parameters<typeof toGrantView>[0];
@@ -2750,6 +2827,23 @@ export function readWorkerReport(
   });
   if (normalized === null) return null;
   return { ...normalized, provenance: REPORT_PROVENANCE };
+}
+
+/** Host-only execution lookup for the session-owned proposal's grant. */
+export function readWorkerExecutionIdByProposal(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+): string | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const g = db
+    .prepare(
+      "SELECT session_id, execution_id FROM trial_grants WHERE proposal_id=?",
+    )
+    .get(pid) as { session_id: string; execution_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  return g.execution_id;
 }
 
 /** Pure report read by proposal (null before a grant/report exists). */

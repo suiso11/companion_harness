@@ -68,8 +68,8 @@ const SCHEMA_VERSION = 1;
 const MATERIALIZATION_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_DEPENDENCY_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 256 * 1024;
-const MAX_SOURCE_BYTES = 256 * 1024 * 1024;
-const MAX_FILES = 20_000;
+export const MAX_SOURCE_BYTES = 256 * 1024 * 1024;
+export const MAX_FILES = 20_000;
 /** Guest observation file is generated scratch, never a source change. The
  * sealed bridge collects it from the work tree and must exclude it from the
  * candidate diff (same declaration the standalone real-pi fixture uses). */

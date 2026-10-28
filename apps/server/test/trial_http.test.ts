@@ -7,8 +7,9 @@
 // replay on same key/body with 409 on drift, and GETs that never
 // expire/mutate. Plus config parsing and the pure trial card model.
 
-import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,6 +37,7 @@ function trialConfigJson(): string {
     mandatoryChecks: ["lint"],
     configFingerprint: FP,
     sourceRevision: REV,
+    sourceRepoPath: "/synthetic/source",
     currentModel: "test-model",
     disclosedWholeRepoRead: true,
     timeoutMs: 60000,
@@ -83,7 +85,10 @@ interface Fixture extends CreatedServerApp {
   close: () => void;
 }
 
-async function makeApp(withTrial: boolean): Promise<Fixture> {
+async function makeApp(
+  withTrial: boolean,
+  trialJson?: string,
+): Promise<Fixture> {
   const handle = openKernelDatabase(":memory:");
   await migrateKernelDatabase({ db: handle.raw });
   const repo = createKernelRepository(handle.raw);
@@ -98,7 +103,7 @@ async function makeApp(withTrial: boolean): Promise<Fixture> {
     COMPANION_LOG_LEVEL: "debug",
   };
   if (withTrial) {
-    env.COMPANION_AUTONOMY_JSON = trialConfigJson();
+    env.COMPANION_AUTONOMY_JSON = trialJson ?? trialConfigJson();
     env.COMPANION_MODEL_JSON = trialModelJson();
   }
   const config = loadServerConfig(env);
@@ -888,6 +893,188 @@ describe("trial HTTP proposal lifecycle", () => {
   });
 });
 
+describe("trial candidate HTTP surface", () => {
+  it("serves a verified diff and 404s when no artifact is stored", async () => {
+    const root = mkdtempSync(join(tmpdir(), "companion-candidate-http-"));
+    const repoPath = join(root, "source");
+    mkdirSync(join(repoPath, "apps"), { recursive: true });
+    const git = (args: string[]) =>
+      execFileSync("git", ["-C", repoPath, ...args], {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: root,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
+      }).trim();
+    git(["init", "-q"]);
+    writeFileSync(join(repoPath, "apps/a.ts"), "one\n");
+    git(["add", "-A"]);
+    git([
+      "-c",
+      "user.email=t@example.invalid",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-q",
+      "-m",
+      "base",
+    ]);
+    const revision = git(["rev-parse", "HEAD"]);
+    const stateDir = join(root, "state");
+    const operatorPath = join(root, "operator.json");
+    writeFileSync(operatorPath, JSON.stringify({ stateDir }));
+    const cfg = JSON.parse(trialConfigJson()) as Record<string, unknown>;
+    cfg.sourceRevision = revision;
+    cfg.sourceRepoPath = repoPath;
+    (cfg.runner as Record<string, unknown>).bridgeConfigTemplatePath =
+      operatorPath;
+    const fixture = await makeApp(true, JSON.stringify(cfg));
+    try {
+      const { app } = fixture;
+      const rawDb = fixture.db.raw as unknown as {
+        prepare: (sql: string) => {
+          run: (...args: unknown[]) => void;
+          get: (...args: unknown[]) => unknown;
+        };
+      };
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(fixture.repo, sessionId, "c1");
+      const base = `/api/sessions/${sessionId}/trials`;
+      const staged = await post(
+        app,
+        base,
+        stageBody(taskId, { literalPatchPaths: ["apps/a.ts"] }),
+        randomUUID(),
+      );
+      expect(staged.status).toBe(201);
+      const proposalId = (staged.body as { id: string }).id;
+      const approved = await post(
+        app,
+        `${base}/${proposalId}/approve`,
+        {},
+        randomUUID(),
+      );
+      expect(approved.status).toBe(201);
+      const executionId = (approved.body as { executionId: string })
+        .executionId;
+      const grant = rawDb
+        .prepare(
+          "SELECT approved_profile_json FROM trial_grants WHERE execution_id=?",
+        )
+        .get(executionId) as { approved_profile_json: string };
+      const frozenProfile = JSON.parse(grant.approved_profile_json) as Record<
+        string,
+        unknown
+      >;
+      frozenProfile.allowedPaths = ["apps"];
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=? WHERE execution_id=?",
+        )
+        .run(JSON.stringify(frozenProfile), executionId);
+      const runDir = join(stateDir, "runs", executionId);
+      mkdirSync(join(runDir, "candidate/apps"), { recursive: true });
+      writeFileSync(join(runDir, "candidate/apps/a.ts"), "two\n");
+      const artifact = Buffer.from(
+        `${JSON.stringify({
+          schemaVersion: 2,
+          executionId,
+          taskHash: "f".repeat(64),
+          baseManifestDigest: "d".repeat(64),
+          profileFingerprint: FP,
+          sourceRevision: revision,
+          changeCount: 1,
+          changes: [
+            {
+              path: "apps/a.ts",
+              kind: "modify",
+              baseSha256:
+                "929b1c4a2a6b1e2d7c3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+              baseMode: 0o100644,
+              candidateSha256: "0".repeat(64),
+              candidateMode: 0o100644,
+              size: 4,
+            },
+          ],
+        })}\n`,
+      );
+      // Use the real hashes the server will recompute.
+      const hash = (value: string) =>
+        createHash("sha256").update(value).digest("hex");
+      const doc = JSON.parse(artifact.toString("utf8")) as {
+        changes: Record<string, unknown>[];
+      };
+      const change = doc.changes[0];
+      if (change === undefined) throw new Error("fixture change missing");
+      change.baseSha256 = hash("one\n");
+      change.candidateSha256 = hash("two\n");
+      const artifactBytes = Buffer.from(`${JSON.stringify(doc)}\n`);
+      writeFileSync(join(runDir, "artifact.json"), artifactBytes);
+      rawDb
+        .prepare(
+          "INSERT INTO trial_worker_reports (execution_id, session_id, summary, findings_json, unresolved_json, host_diagnostics_json, checks_json, artifact_json, verified, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          executionId,
+          sessionId,
+          "done",
+          "[]",
+          "[]",
+          "[]",
+          "[]",
+          JSON.stringify({
+            sha256: hash(artifactBytes.toString("utf8")),
+            entryCount: 1,
+          }),
+          1,
+          1,
+        );
+      const candidate = await get(app, `${base}/${proposalId}/candidate`);
+      expect(candidate.status).toBe(200);
+      expect(candidate.body).toMatchObject({
+        available: true,
+        truncated: false,
+        changes: [
+          { path: "apps/a.ts", kind: "modify", size: 4, modeChanged: false },
+        ],
+      });
+      expect((candidate.body as { diff: string }).diff).toContain("+two");
+      // A frozen scope that does not cover the change must fail closed even
+      // though the current template allows it.
+      frozenProfile.allowedPaths = ["packages"];
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=? WHERE execution_id=?",
+        )
+        .run(JSON.stringify(frozenProfile), executionId);
+      const outOfScope = await get(app, `${base}/${proposalId}/candidate`);
+      expect(outOfScope.status).toBe(200);
+      expect(outOfScope.body).toMatchObject({
+        available: false,
+        code: "candidate_unavailable",
+      });
+      // Legacy grants (null frozen profile) fall back to the current template.
+      rawDb
+        .prepare(
+          "UPDATE trial_grants SET approved_profile_json=NULL WHERE execution_id=?",
+        )
+        .run(executionId);
+      const legacy = await get(app, `${base}/${proposalId}/candidate`);
+      expect(legacy.body).toMatchObject({ available: true });
+      rawDb
+        .prepare("DELETE FROM trial_worker_reports WHERE execution_id=?")
+        .run(executionId);
+      const missing = await get(app, `${base}/${proposalId}/candidate`);
+      expect(missing.status).toBe(404);
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
 describe("trial config parsing", () => {
   function baseEnv(dbPath: string): NodeJS.ProcessEnv {
     return {
@@ -937,6 +1124,15 @@ describe("trial config parsing", () => {
         COMPANION_MODEL_JSON: trialModelJson(),
       }),
     ).toThrow(ServerConfigError);
+    // The sealed snapshot root must be a platform-absolute path.
+    const relativeSource = { ...full, sourceRepoPath: "relative/source" };
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AUTONOMY_JSON: JSON.stringify(relativeSource),
+        COMPANION_MODEL_JSON: trialModelJson(),
+      }),
+    ).toThrow("trial config source repository path is invalid");
     // No defaults for caps/checks: a missing field fails closed.
     const { timeoutMs: _drop, ...noCaps } = full;
     void _drop;

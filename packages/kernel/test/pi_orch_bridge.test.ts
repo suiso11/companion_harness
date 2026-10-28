@@ -93,6 +93,8 @@ async function makeFixture(options: {
   readonly backend?: "confined" | "offline-fixture";
   readonly maxArtifactBytes?: number;
   readonly scratchPaths?: string[];
+  /** Additional sealed source files, written before the snapshot is taken. */
+  readonly extraSources?: Record<string, string>;
   /**
    * Portable contract tests only parse the config; they must also run on
    * platforms where sealed snapshot creation fails closed (win32).
@@ -109,6 +111,9 @@ async function makeFixture(options: {
     "module.exports = 'host';\n",
   );
   write(join(source, "package.json"), '{"name":"synthetic"}\n');
+  for (const [path, content] of Object.entries(options.extraSources ?? {})) {
+    write(join(source, path), content);
+  }
 
   const snapshot =
     options.sealedSnapshot === false
@@ -1412,6 +1417,35 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(outsideResult.verified).toBe(false);
     expect(outsideResult.evidence.artifact).toBeUndefined();
     expect(outsideResult.report.summary).toContain("candidate scope violation");
+  });
+
+  it("retains base bytes for a large deleted file beyond the artifact budget", async () => {
+    // 300 KiB: larger than the 64 KiB artifact cap, so base retention must use
+    // the source budget rather than the (much smaller) artifact budget.
+    const big = `// ${"x".repeat(300 * 1024)}\n`;
+    const fixture = await makeFixture({
+      extraSources: { "src/big.ts": big },
+      executorBody:
+        "import { unlinkSync } from 'node:fs';\nunlinkSync('src/big.ts');\n",
+    });
+    const request = makeRequest(fixture, { mode: "write" });
+    const run = await runBridge(fixture, request);
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    expect(result.status).toBe("done");
+    expect(result.report.findings).toContain("delete src/big.ts");
+    expect(result.evidence.artifact?.entryCount).toBe(1);
+
+    const retained = join(
+      fixture.config.stateDir,
+      "runs",
+      request.executionId,
+      "base",
+      "src",
+      "big.ts",
+    );
+    expect(existsSync(retained)).toBe(true);
+    expect(readFileSync(retained, "utf8")).toBe(big);
   });
 
   it("rejects a check that mutates the candidate inside an allowed path after validation", async () => {

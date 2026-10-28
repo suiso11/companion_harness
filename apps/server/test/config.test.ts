@@ -311,6 +311,7 @@ describe("legacy trial config deploy compatibility (#167)", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "b".repeat(64),
       sourceRevision: "a".repeat(40),
+      sourceRepoPath: "/synthetic/source",
       currentModel: "test-model",
       disclosedWholeRepoRead: true,
       timeoutMs: 60_000,
@@ -345,6 +346,28 @@ describe("legacy trial config deploy compatibility (#167)", () => {
     expect(() => parseTrialConfig(JSON.stringify(legacyTrial()))).toThrow(
       "trial config allowed paths are invalid",
     );
+  });
+
+  it("treats a missing source repository path as legacy and disables trials", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const complete: Record<string, unknown> = {
+        ...legacyTrial(),
+        allowedPaths: ["apps", "packages"],
+        modelRoute: "local",
+      };
+      delete complete.sourceRepoPath;
+      const config = loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AUTONOMY_JSON: JSON.stringify(complete),
+      });
+      expect(config.trial).toBeNull();
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringContaining("legacy trial config"),
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("starts with trials disabled instead of crashing the server", () => {
@@ -946,6 +969,7 @@ describe("autodispatch caps defaults fit the trial runner", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "b".repeat(64),
       sourceRevision: "a".repeat(40),
+      sourceRepoPath: "/synthetic/source",
       currentModel: "test-model",
       disclosedWholeRepoRead: true,
       timeoutMs: 60_000,

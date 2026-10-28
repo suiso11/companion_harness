@@ -577,6 +577,63 @@ function readVerifiedCandidateBytes(workRoot, change, maxBytes) {
   }
 }
 
+// Retain the verified base bytes for changes whose diff needs them. Completed
+// policy trials delete the heavy sealed snapshot at quiescence, so the review
+// surface must have a retained copy to verify baseSha256 after that cleanup.
+// Best effort: a base copy never fails an otherwise successful trial.
+function retainBaseChanges(snapshotRoot, changes, destination, maxBytes) {
+  let total = 0;
+  for (const change of changes) {
+    if (change.kind === "create" || change.baseSha256 === null) continue;
+    let bytes;
+    try {
+      const source = join(snapshotRoot, ...change.path.split("/"));
+      const fd = openSync(
+        source,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+      try {
+        const opened = fstatSync(fd);
+        if (!opened.isFile() || opened.size > maxBytes) continue;
+        bytes = Buffer.allocUnsafe(opened.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const read = readSync(fd, bytes, offset, bytes.length - offset, null);
+          if (read <= 0) throw new Error("base changed while retaining");
+          offset += read;
+        }
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      continue;
+    }
+    if (sha256(bytes) !== change.baseSha256) continue;
+    if (total + bytes.length > maxBytes) continue;
+    try {
+      const target = join(destination, ...change.path.split("/"));
+      mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
+      const targetFd = openSync(
+        target,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      try {
+        writeSync(targetFd, bytes, 0, bytes.length, 0);
+      } finally {
+        closeSync(targetFd);
+      }
+      chmodSync(target, 0o600);
+      total += bytes.length;
+    } catch {
+      // A failed base retention only degrades review, never the trial result.
+    }
+  }
+}
+
 function retainCandidateChanges(
   workRoot,
   changes,
@@ -1359,6 +1416,18 @@ async function main() {
                           config.profile.limits.maxArtifactBytes,
                           config.storage.maxArtifactBytes,
                         ),
+                      );
+                      // Base evidence is source-sized, not artifact-sized: a
+                      // valid deletion can reference a file far larger than
+                      // the 256 KiB artifact cap. The sealed snapshot already
+                      // fits maxSourceBytes. retainBaseChanges caps each
+                      // retained base file at maxSourceBytes and the aggregate
+                      // retained bytes at that same maxSourceBytes budget.
+                      retainBaseChanges(
+                        snapshot.snapshotRoot,
+                        changes,
+                        join(runDir, "base"),
+                        config.profile.limits.maxSourceBytes,
                       );
                     } catch {
                       throw new Error("candidate retention invalid");

@@ -211,6 +211,7 @@ describe("disableTrialEnv", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "0".repeat(64),
       sourceRevision: "0".repeat(40),
+      sourceRepoPath: "/opt/source-snapshot",
       currentModel: "local-chat",
       disclosedWholeRepoRead: true,
       timeoutMs: 60_000,
@@ -459,6 +460,7 @@ describe("autodispatch config shape (real parser)", () => {
       mandatoryChecks: ["lint"],
       configFingerprint: "0".repeat(64),
       sourceRevision: "0".repeat(40),
+      sourceRepoPath: "/synthetic/source",
       currentModel: resolveCurrentModel({
         COMPANION_MODEL_JSON: JSON.stringify({ model: "local-chat" }),
       }),
@@ -690,6 +692,16 @@ describe("companion-deploy.sh trial-operator ordering", () => {
 
 describe("build-trial-operator frozen profile fields", () => {
   const source = readFileSync(join(HERE, "build-trial-operator.mts"), "utf8");
+
+  it("includes the required sourceRepoPath before parsing trialRaw", () => {
+    const start = source.indexOf("const trialRaw = {");
+    const parseAt = source.indexOf(
+      "parseTrialConfig(JSON.stringify(trialRaw))",
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(parseAt).toBeGreaterThan(start);
+    expect(source.slice(start, parseAt)).toContain("sourceRepoPath: SRC");
+  });
 
   it("copies the frozen allowedPaths and modelRoute into autonomy JSON", () => {
     expect(source).toContain("allowedPaths: [...config.profile.allowedPaths]");
