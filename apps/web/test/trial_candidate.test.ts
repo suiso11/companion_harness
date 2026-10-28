@@ -31,6 +31,24 @@ describe("retained candidate mapping", () => {
     expect(parsed.view.diff).not.toContain("<pre");
   });
 
+  it("keeps every supported change instead of dropping past 1,000", () => {
+    const changes = Array.from({ length: 1001 }, (_, index) => ({
+      path: `apps/${index}.ts`,
+      kind: "delete" as const,
+      size: 0,
+      modeChanged: false,
+    }));
+    const parsed = readTrialCandidate({
+      available: true,
+      changes,
+      diff: "",
+      truncated: false,
+    });
+    expect(parsed.available).toBe(true);
+    if (!parsed.available) return;
+    expect(parsed.view.changes).toHaveLength(1001);
+  });
+
   it("maps fixed error codes to Japanese messages", () => {
     expect(trialCandidateErrorText("candidate_unavailable")).toContain(
       "保持されていません",

@@ -337,6 +337,34 @@ describe("loadTrialCandidate", () => {
     expect(view.changes).toHaveLength(1001);
   });
 
+  it("reviewes create-only candidates after the snapshot is cleaned", () => {
+    const fixture = makeFixture({ kind: "create", candidate: "new\n" });
+    roots.push(fixture.root);
+    // Policy trials delete the heavy sealed snapshot at quiescence.
+    rmSync(fixture.repoPath, { recursive: true, force: true });
+    const view = load(fixture);
+    expect(view.changes[0]?.kind).toBe("create");
+    expect(view.diff).toContain("+new");
+  });
+
+  it("uses retained base bytes after the snapshot is cleaned", () => {
+    const fixture = makeFixture();
+    roots.push(fixture.root);
+    const baseDir = join(
+      fixture.root,
+      "state",
+      "runs",
+      EXECUTION_ID,
+      "base",
+      "apps",
+    );
+    mkdirSync(baseDir, { recursive: true });
+    writeFileSync(join(baseDir, "a.ts"), "one\n");
+    rmSync(fixture.repoPath, { recursive: true, force: true });
+    const view = load(fixture);
+    expect(view.diff).toContain("-one");
+  });
+
   it("reads base bytes from the snapshot even when a git export is absent", () => {
     const fixture = makeFixture();
     roots.push(fixture.root);

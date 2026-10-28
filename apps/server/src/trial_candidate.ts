@@ -475,13 +475,29 @@ export function loadTrialCandidate(
   if (artifact.sourceRevision !== expectedRevision) {
     throw new TrialCandidateError("candidate_unavailable");
   }
-  // Prefer the frozen source root persisted for this execution. Legacy rows
-  // have no frozen root and fall back to the currently published template.
-  const frozenSource = input.frozenSourceRepoPath;
-  const snapshotRoot = realDirectory(
-    resolve(frozenSource ?? input.trial.sourceRepoPath),
-    frozenSource === undefined ? "base_mismatch" : "candidate_unavailable",
-  );
+  // Base bytes are retained with the run so completed policy trials can still
+  // be reviewed after their heavy sealed snapshot is cleaned. The frozen
+  // source root remains the fallback for older artifacts. Resolve it lazily so
+  // create-only candidates never require a snapshot (which may be gone).
+  const retainedBaseRoot = join(runDir, "base");
+  let snapshotRoot: string | null = null;
+  const resolveSnapshotRoot = (): string => {
+    if (snapshotRoot !== null) return snapshotRoot;
+    const frozenSource = input.frozenSourceRepoPath;
+    const resolved = realDirectory(
+      resolve(frozenSource ?? input.trial.sourceRepoPath),
+      frozenSource === undefined ? "base_mismatch" : "candidate_unavailable",
+    );
+    snapshotRoot = resolved;
+    return resolved;
+  };
+  const findBaseBytes = (path: string): Buffer | null => {
+    try {
+      return readBeneath(retainedBaseRoot, path, MAX_SOURCE_BYTES);
+    } catch {
+      return baseBytes(resolveSnapshotRoot(), path);
+    }
+  };
   // Deletion-only artifacts retain no candidate tree; the bridge never creates
   // `candidate` when every entry is a deletion.
   const candidateRoot = artifact.changes.some(
@@ -503,7 +519,7 @@ export function loadTrialCandidate(
     }
     let base: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     if (change.kind !== "create") {
-      const bytes = baseBytes(snapshotRoot, change.path);
+      const bytes = findBaseBytes(change.path);
       if (bytes === null) throw new TrialCandidateError("base_mismatch");
       if (sha256(bytes) !== change.baseSha256) {
         throw new TrialCandidateError("base_mismatch");

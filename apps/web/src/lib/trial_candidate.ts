@@ -51,7 +51,7 @@ export function readTrialCandidate(value: unknown): TrialCandidateResponse {
     return { available: false, code: "candidate_unavailable" };
   }
   const changes: TrialCandidateChange[] = [];
-  for (const raw of record.changes.slice(0, 1000)) {
+  for (const raw of record.changes) {
     if (typeof raw !== "object" || raw === null) continue;
     const item = raw as Record<string, unknown>;
     if (
