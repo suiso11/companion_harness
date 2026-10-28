@@ -456,10 +456,14 @@ function minimalNamespaceBindings(): string[] {
 // Runs the REAL guest script in a minimal bwrap namespace with a fake OMP that
 // captures the rendered prompt. /work does not exist on the host, so the
 // process-level guest parse path needs a private workspace bind.
-function runGuestJob(objective: string): {
+function runGuestJob(
+  objective: string,
+  eventsOverride?: unknown[],
+): {
   readonly status: number | null;
   readonly stderr: string;
   readonly prompt: string;
+  readonly observation: unknown;
 } {
   const dir = tempRoot("guest-parse");
   const workRoot = join(dir, "work");
@@ -468,32 +472,34 @@ function runGuestJob(objective: string): {
   mkdirSync(bin, { recursive: true });
   const omp = join(bin, "omp");
   const guestPromptPath = "/work/captured-prompt.txt";
-  const events = [
-    {
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [
-          {
-            type: "toolCall",
-            id: "t1",
-            name: "read",
-            arguments: { path: "src/app.ts" },
-          },
-          { type: "text", text: "ok" },
-        ],
+  const events = (
+    eventsOverride ?? [
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "t1",
+              name: "read",
+              arguments: { path: "src/app.ts" },
+            },
+            { type: "text", text: "ok" },
+          ],
+        },
       },
-    },
-    {
-      type: "message_end",
-      message: {
-        role: "toolResult",
-        toolName: "read",
-        toolCallId: "t1",
-        isError: false,
+      {
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolName: "read",
+          toolCallId: "t1",
+          isError: false,
+        },
       },
-    },
-  ]
+    ]
+  )
     .map((event) => JSON.stringify(event))
     .join("\n");
   write(
@@ -575,7 +581,18 @@ function runGuestJob(objective: string): {
   } catch {
     // Rejected jobs never invoke the fake OMP.
   }
-  return { status: run.status, stderr: run.stderr ?? "", prompt };
+  let observation: unknown = null;
+  try {
+    observation = JSON.parse(
+      readFileSync(
+        join(workRoot, ".companion-observation", "guest.json"),
+        "utf8",
+      ),
+    );
+  } catch {
+    // A rejected job writes no observation.
+  }
+  return { status: run.status, stderr: run.stderr ?? "", prompt, observation };
 }
 
 // Runs the REAL guest in the real-pi branch with a fake pinned OMP binary that
@@ -1212,6 +1229,92 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(result.report.findings.join("\n")).toContain(
       "guest recovered from 1 failed tool call(s) (unattested)",
     );
+  });
+
+  it("forwards bounded guest tool error text as a labelled finding", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          {
+            name: "edit",
+            args: { path: "src/app.ts" },
+            result: "error",
+            error: `Edit failed: the search text was not found in src/app.ts; Bearer dummy-bearer-secret ${"x".repeat(500)}`,
+          },
+          { name: "edit", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    const findings = result.report.findings.filter((entry) =>
+      entry.startsWith("guest tool error (unattested): edit: "),
+    );
+    expect(findings).toHaveLength(1);
+    const finding = findings[0] as string;
+    expect(finding).toContain("the search text was not found");
+    expect(finding).not.toContain("dummy-bearer-secret");
+    expect(finding).toContain("[redacted]");
+    // Label + name prefix (37 chars) then at most 160 characters of error text.
+    expect(finding.length).toBeLessThanOrEqual(37 + 160);
+    // The recovered observation is still reported alongside it.
+    expect(result.report.findings.join("\n")).toContain(
+      "guest recovered from 1 failed tool call(s) (unattested)",
+    );
+  });
+
+  it("forwards at most three guest tool error findings", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          ...Array.from({ length: 5 }, (_, index) => ({
+            name: "edit",
+            args: { path: `src/f${index}.ts` },
+            result: "error",
+            error: `Edit failed: failure ${index}`,
+          })),
+          { name: "edit", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    const findings = result.report.findings.filter((entry) =>
+      entry.startsWith("guest tool error (unattested): "),
+    );
+    expect(findings).toHaveLength(3);
+  });
+
+  it("keeps the result line within maxOutputBytes with guest tool errors", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          {
+            name: "edit",
+            args: { path: "src/app.ts" },
+            result: "error",
+            error: `Edit failed: the search text was not found ${"y".repeat(800)}`,
+          },
+          { name: "edit", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const request = makeRequest(fixture, {
+      budget: { timeoutMs: 10_000, maxOutputBytes: 4096 },
+    });
+    const run = await runBridge(fixture, request);
+    expect(run.status).toBe(0);
+    expect(Buffer.byteLength(run.stdout, "utf8")).toBeLessThanOrEqual(4096);
+    const lines = run.stdout.split("\n").filter((line) => line.length > 0);
+    expect(lines).toHaveLength(1);
+    const result = JSON.parse(lines[0] as string) as TrialWireResultShape;
+    expect(result.status).toBe("done");
+    expect(result.verified).toBe(true);
   });
 
   it("downgrades a guest whose last tool call failed after a recovery", async () => {
@@ -1948,6 +2051,102 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
       expect(tooLong.prompt).toBe("");
     },
     30_000,
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "records a bounded, redacted error text for a failed guest tool call",
+    () => {
+      const bwrap = "/usr/bin/bwrap";
+      const probe = spawnSync(bwrap, ["--version"], { encoding: "utf8" });
+      expect(
+        probe.status,
+        `bwrap probe failed: ${probe.error?.message ?? ""} ${probe.stderr ?? ""}`,
+      ).toBe(0);
+      const errorText = `Edit failed: the search text was not found in src/app.ts. Expected \`const limit = args.limit ?? 2000;\` near line 89. sk-abcdef0123456789\u0007 ${"detail ".repeat(200)}`;
+      const events = [
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "e1",
+                name: "edit",
+                arguments: {
+                  path: "src/app.ts",
+                  oldText: "SECRET_OLD_CONTENT",
+                  newText: "SECRET_NEW_CONTENT",
+                },
+              },
+            ],
+          },
+        },
+        {
+          type: "message_end",
+          message: {
+            role: "toolResult",
+            toolName: "edit",
+            toolCallId: "e1",
+            isError: true,
+            content: [{ type: "text", text: errorText }],
+          },
+        },
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "r1",
+                name: "read",
+                arguments: { path: "src/app.ts" },
+              },
+              { type: "text", text: "recovered" },
+            ],
+          },
+        },
+        {
+          type: "message_end",
+          message: {
+            role: "toolResult",
+            toolName: "read",
+            toolCallId: "r1",
+            isError: false,
+            content: [{ type: "text", text: "ok" }],
+          },
+        },
+      ];
+      const run = runGuestJob("inspect src/app.ts", events);
+      expect(run.status, run.stderr).toBe(0);
+      const observation = run.observation as {
+        tools: {
+          name: string;
+          args: Record<string, unknown>;
+          result: string;
+          error?: string;
+        }[];
+      };
+      const failed = observation.tools[0];
+      if (failed === undefined) throw new Error("missing failed tool entry");
+      expect(failed.name).toBe("edit");
+      expect(failed.result).toBe("error");
+      // The error head names the cause and never the file contents.
+      expect(failed.error).toContain("the search text was not found");
+      expect(failed.error).not.toContain("SECRET_OLD_CONTENT");
+      expect(failed.error).not.toContain("SECRET_NEW_CONTENT");
+      expect(failed.error).not.toContain("sk-abcdef");
+      expect(failed.error).toContain("[redacted]");
+      expect(failed.error).not.toContain("\u0007");
+      expect((failed.error as string).length).toBeLessThanOrEqual(240);
+      // Only key names plus a relative, bounded path are retained.
+      expect(failed.args.path).toBe("src/app.ts");
+      expect(failed.args.keys).toEqual(["path", "oldText", "newText"]);
+      expect(failed.args).not.toHaveProperty("oldText");
+      expect(failed.args).not.toHaveProperty("newText");
+    },
+    60_000,
   );
 
   it.skipIf(process.platform !== "linux")(
