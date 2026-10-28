@@ -190,6 +190,7 @@ import {
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
+import { pruneTrialAdoptionWorktrees } from "./trial_adoption.js";
 import {
   narrowTrialModelRelayCaps,
   TrialModelRelay,
@@ -3210,6 +3211,24 @@ export async function startServer(
       };
     }
 
+    // Adoption crash recovery: this process owns no adoption attempt, so any
+    // row still 'pending' was orphaned by a previous process (its temp
+    // worktree is gone with the OS tmp cleanup). Settle it as a fixed
+    // 'interrupted' failure and prune leftover worktree metadata. Best
+    // effort: recovery never blocks or fails startup.
+    const adoptionConfig = config.trial?.adoption ?? null;
+    if (adoptionConfig !== null) {
+      try {
+        const interrupted = repo.recoverInterruptedTrialAdoptions(now());
+        if (interrupted > 0) {
+          logger.warn("trial.adoption.recovered", {});
+        }
+      } catch {
+        logger.warn("trial.adoption.recover_failed", {});
+      }
+      await pruneTrialAdoptionWorktrees(adoptionConfig.repoPath);
+    }
+
     // Slice (b) remote session wiring (enabled only): the SHA-256 token
     // store lives in the migrated kernel DB (table `remote_sessions`,
     // migration 0023 — tokens themselves are never stored); the verifier
@@ -3666,6 +3685,13 @@ export async function startServer(
         // `sending` until lease recovery. Bounded by the transport timeout.
         try {
           await controls.drainAgoraSends();
+        } catch {
+          // Best effort: never block the graceful shutdown report.
+        }
+        // Started adoptions finish their DB write after the push/PR; await
+        // them for the same reason as AGORA sends.
+        try {
+          await controls.drainTrialAdoptions();
         } catch {
           // Best effort: never block the graceful shutdown report.
         }

@@ -151,6 +151,12 @@ import {
 import type { RunDeltaSource } from "./sse.js";
 import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
 import {
+  executeTrialAdoption,
+  TrialAdoptionError,
+  type TrialAdoptionErrorCode,
+} from "./trial_adoption.js";
+import {
+  loadTrialAdoptionFiles,
   loadTrialCandidate,
   TrialCandidateError,
   type TrialCandidateErrorCode,
@@ -486,6 +492,14 @@ export interface ServerControls {
   beginAgoraSend(): () => void;
   /** Refuse new AGORA browser sends, then await every admitted one. */
   drainAgoraSends(): Promise<void>;
+  /**
+   * Register ONE started adoption attempt. Returns an idempotent completion
+   * hook the handler MUST call in `finally`. Bootstrap awaits all started
+   * attempts before closing the kernel DB (no post-close finishTrialAdoption).
+   */
+  beginTrialAdoption(): () => void;
+  /** Refuse new adoption attempts, then await every started one. */
+  drainTrialAdoptions(): Promise<void>;
 }
 
 export interface CreatedServerApp {
@@ -1451,6 +1465,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // drain them explicitly BEFORE the AGORA SQLite store closes on shutdown.
   const inFlightAgoraSends = new Set<Promise<void>>();
   let admitAgoraSends = true;
+  // Trial adoption handlers are direct HTTP handlers too: they finish the
+  // adoption row after the push/PR, so the DB must stay open until they end.
+  const inFlightTrialAdoptions = new Set<Promise<void>>();
+  let admitTrialAdoptions = true;
   const controls: ServerControls = {
     get draining() {
       return draining;
@@ -1477,6 +1495,27 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       admitAgoraSends = false;
       while (inFlightAgoraSends.size > 0) {
         await Promise.all([...inFlightAgoraSends]);
+      }
+    },
+    beginTrialAdoption: () => {
+      if (!admitTrialAdoptions) {
+        // Drain already began; the route's `draining` check rejects the
+        // request. Nothing to track for this unreachable race.
+        return () => undefined;
+      }
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+      });
+      inFlightTrialAdoptions.add(done);
+      return () => {
+        if (inFlightTrialAdoptions.delete(done)) resolveDone();
+      };
+    },
+    drainTrialAdoptions: async () => {
+      admitTrialAdoptions = false;
+      while (inFlightTrialAdoptions.size > 0) {
+        await Promise.all([...inFlightTrialAdoptions]);
       }
     },
   };
@@ -5351,7 +5390,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         session.id,
         proposal.id,
       );
-      return c.json({ ...found, outcome, report }, 200);
+      const adoption = repo.readTrialAdoption(session.id, proposal.id);
+      return c.json({ ...found, outcome, report, adoption }, 200);
     } catch (error) {
       return mapDomainError(c, error);
     }
@@ -5439,6 +5479,214 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return c.json({ available: false, code }, 200);
       }
       return mapDomainError(c, error);
+    }
+  });
+
+  // Human-only adoption of a verified write-trial candidate into a DRAFT PR.
+  // Same UUID/idempotency gates as approve; the body binds the reviewed
+  // artifact digest. Adoption config is optional: absent => 409 disabled.
+  // Nothing here runs on a timer, and the base branch is never pushed.
+  app.post("/api/sessions/:sessionId/trials/:proposalId/adopt", async (c) => {
+    const started = now();
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) return session.response;
+    const proposal = requireUuid(c, c.req.param("proposalId"), "proposalId");
+    if ("response" in proposal) return proposal.response;
+    const keyed = requireIdempotencyKey(c);
+    if ("response" in keyed) return keyed.response;
+    if (!strictQuery(c, []).ok) return validationError(c);
+    const raw = await readJsonBody(c);
+    if (!raw.ok) return validationError(c);
+    const body = raw.value as Record<string, unknown> | null;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 1 ||
+      typeof body.artifactSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.artifactSha256)
+    ) {
+      return validationError(c);
+    }
+    const trial = config.trial;
+    const adoption = trial?.adoption ?? null;
+    if (trial === null || adoption === null) {
+      return c.json(
+        {
+          error: {
+            code: "adoption_disabled",
+            message: "trial adoption is disabled",
+          },
+        },
+        409,
+      );
+    }
+    if (draining) return shuttingDown(c);
+    const adoptionError = (
+      code: TrialAdoptionErrorCode | "not_verified" | "artifact_mismatch",
+    ): Response =>
+      c.json(
+        {
+          error: { code, message: `trial adoption failed: ${code}` },
+        },
+        409,
+      );
+    const endAdoption = controls.beginTrialAdoption();
+    try {
+      const found = repo.readTrial(session.id, proposal.id);
+      const report = repo.readTrialWorkerReportByProposal(
+        session.id,
+        proposal.id,
+      );
+      const outcome = repo.readTrialWorkerOutcomeByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (
+        report === null ||
+        report.artifact === null ||
+        report.verified !== true ||
+        outcome === null ||
+        outcome.status !== "consumed"
+      ) {
+        return adoptionError("not_verified");
+      }
+      if (report.artifact.sha256 !== body.artifactSha256) {
+        return adoptionError("artifact_mismatch");
+      }
+      // Replay a durable terminal adoption BEFORE requiring the retained
+      // candidate files: retention may already have pruned them, but the
+      // stored branch/PR result must stay replayable.
+      const durable = repo.readTrialAdoption(session.id, proposal.id);
+      if (durable !== null && durable.status === "done") {
+        return c.json(durable, 200);
+      }
+      const executionId = repo.readTrialExecutionIdByProposal(
+        session.id,
+        proposal.id,
+      );
+      if (executionId === null) return adoptionError("not_verified");
+      const literalPatchPaths = Array.isArray(found.literalPatchPaths)
+        ? found.literalPatchPaths.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+      const roots = repo.readTrialCandidateRoots(session.id, executionId);
+      let files: Awaited<ReturnType<typeof loadTrialAdoptionFiles>>["files"];
+      try {
+        files = loadTrialAdoptionFiles({
+          executionId,
+          trial,
+          expectedArtifactSha256: report.artifact.sha256,
+          literalPatchPaths,
+          ...(roots.stateDir !== null
+            ? { frozenStateDir: roots.stateDir }
+            : {}),
+          ...(roots.sourceDir !== null
+            ? { frozenSourceRepoPath: roots.sourceDir }
+            : {}),
+          ...(roots.sourceRevision !== null
+            ? { frozenSourceRevision: roots.sourceRevision }
+            : {}),
+          ...(roots.frozenAllowedPaths !== null
+            ? { frozenAllowedPaths: roots.frozenAllowedPaths }
+            : {}),
+        }).files;
+      } catch (error) {
+        if (error instanceof TrialCandidateError) {
+          return adoptionError(
+            error.code === "candidate_digest_mismatch"
+              ? "artifact_mismatch"
+              : error.code === "base_mismatch"
+                ? "base_changed"
+                : "not_verified",
+          );
+        }
+        throw error;
+      }
+      const claim = repo.beginTrialAdoption(
+        session.id,
+        proposal.id,
+        executionId,
+        report.artifact.sha256,
+        now(),
+      );
+      if (claim === null) {
+        return apiError(c, 404, "not_found", "resource not found");
+      }
+      if (claim.state === "done") {
+        return c.json(claim.adoption, 200);
+      }
+      if (claim.state === "pending") {
+        // Another click is already running; never start a second push.
+        return c.json(claim.adoption, 202);
+      }
+      try {
+        const result = await executeTrialAdoption({
+          config: adoption,
+          executionId,
+          artifactSha256: report.artifact.sha256,
+          objective: found.objective,
+          files,
+          baseSha: claim.baseSha,
+          onBaseSha: (baseSha) => {
+            repo.recordTrialAdoptionBaseSha(proposal.id, baseSha, now());
+          },
+        });
+        const saved = repo.finishTrialAdoption(
+          proposal.id,
+          {
+            status: "done",
+            branch: result.branch,
+            prUrl: result.prUrl,
+            commitSha: result.commitSha,
+            errorCode: null,
+          },
+          now(),
+        );
+        logger.info("http.trials.adopt", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: "done",
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(saved, 201);
+      } catch (error) {
+        const code: TrialAdoptionErrorCode =
+          error instanceof TrialAdoptionError ? error.code : "git_failed";
+        const saved = repo.finishTrialAdoption(
+          proposal.id,
+          {
+            status: "failed",
+            branch: null,
+            prUrl: null,
+            commitSha: null,
+            errorCode: code,
+          },
+          now(),
+        );
+        logger.info("http.trials.adopt", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          status: "failed",
+          reason: code,
+          durationMs: Math.max(now() - started, 0),
+        });
+        return c.json(
+          {
+            error: {
+              code,
+              message: `trial adoption failed: ${code}`,
+            },
+            adoption: saved,
+          },
+          code === "git_failed" || code === "gh_failed" ? 502 : 409,
+        );
+      }
+    } catch (error) {
+      return mapDomainError(c, error);
+    } finally {
+      endAdoption();
     }
   });
 

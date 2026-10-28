@@ -1535,6 +1535,20 @@ export interface TrialConfig {
   readonly modelRoute: "local" | "synthetic-local" | "external";
   /** Required root-side runner host config (no defaults, absolute paths). */
   readonly runner: TrialRunnerHostConfig;
+  /** Optional human-only adoption target (repo checkout + GitHub remote).
+   * Absent means adoption is disabled. */
+  readonly adoption: TrialAdoptionConfig | null;
+}
+
+export interface TrialAdoptionConfig {
+  /** Absolute path to the git checkout adoption pushes from. */
+  readonly repoPath: string;
+  /** Git remote name (validated, default 'origin'). */
+  readonly remote: string;
+  /** Base ref to branch from (validated, default 'origin/master'). */
+  readonly baseRef: string;
+  /** Branch namespace for adopted trial branches (default 'trial/'). */
+  readonly branchPrefix: string;
 }
 
 const TRIAL_CHECK_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -1568,6 +1582,64 @@ function requireRunnerInt(
     throw configError(what);
   }
   return value;
+}
+
+const ADOPTION_REMOTE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const ADOPTION_REF_PATTERN = /^[A-Za-z0-9._/-]{1,256}$/;
+const ADOPTION_PREFIX_PATTERN = /^[A-Za-z0-9._/-]{1,64}\//;
+
+/** Strict optional adoption config. Unknown keys fail closed; absent means
+ * adoption disabled (no defaults invented by the server). */
+function parseAdoptionConfig(raw: unknown): TrialAdoptionConfig {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw configError("trial adoption config is invalid");
+  }
+  for (const key of Object.keys(raw)) {
+    if (
+      key !== "repoPath" &&
+      key !== "remote" &&
+      key !== "baseRef" &&
+      key !== "branchPrefix"
+    ) {
+      throw configError("trial adoption config has an unknown key");
+    }
+  }
+  const record = raw as Record<string, unknown>;
+  const repoPath = requireRunnerAbsolutePath(record.repoPath);
+  const remote = record.remote;
+  const baseRef = record.baseRef;
+  const branchPrefix = record.branchPrefix;
+  if (
+    typeof remote !== "string" ||
+    !ADOPTION_REMOTE_PATTERN.test(remote) ||
+    remote.includes("..")
+  ) {
+    throw configError("trial adoption remote is invalid");
+  }
+  if (
+    typeof baseRef !== "string" ||
+    !ADOPTION_REF_PATTERN.test(baseRef) ||
+    baseRef.includes("..") ||
+    baseRef.startsWith("/") ||
+    baseRef.endsWith("/") ||
+    baseRef.endsWith(".")
+  ) {
+    throw configError("trial adoption base ref is invalid");
+  }
+  if (
+    typeof branchPrefix !== "string" ||
+    !ADOPTION_PREFIX_PATTERN.test(branchPrefix) ||
+    branchPrefix.includes("..") ||
+    branchPrefix.startsWith("/")
+  ) {
+    throw configError("trial adoption branch prefix is invalid");
+  }
+  return Object.freeze({
+    repoPath,
+    remote,
+    baseRef,
+    branchPrefix,
+  });
 }
 
 function parseTrialRunnerConfig(raw: unknown): TrialRunnerHostConfig {
@@ -2317,7 +2389,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
       key !== "workspaceAlias" &&
       key !== "allowedPaths" &&
       key !== "modelRoute" &&
-      key !== "runner"
+      key !== "runner" &&
+      key !== "adoption"
     ) {
       throw configError("trial config has an unknown key");
     }
@@ -2337,6 +2410,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     allowedPaths?: unknown;
     modelRoute?: unknown;
     runner?: unknown;
+    adoption?: unknown;
   };
   if (typeof record.available !== "boolean") {
     throw configError("trial config availability is invalid");
@@ -2466,6 +2540,8 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     throw configError("trial config runner is required");
   }
   const runner = parseTrialRunnerConfig(record.runner);
+  const adoption =
+    record.adoption === undefined ? null : parseAdoptionConfig(record.adoption);
   return Object.freeze({
     available: record.available,
     enabled: record.enabled,
@@ -2481,6 +2557,7 @@ export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
     allowedPaths: Object.freeze(allowedPaths),
     modelRoute: record.modelRoute,
     runner,
+    adoption,
   });
 }
 

@@ -62,6 +62,15 @@ export interface TrialCandidateView {
   readonly truncated: boolean;
 }
 
+/** Verified candidate file with the exact bytes retained by the bridge.
+ * Only the adoption executor uses this: it never leaves the host. */
+export interface TrialAdoptionFile {
+  readonly path: string;
+  readonly kind: "create" | "modify" | "delete";
+  readonly baseSha256: string | null;
+  readonly candidateBytes: Buffer | null;
+}
+
 interface ArtifactChange {
   readonly path: string;
   readonly kind: "create" | "modify" | "delete";
@@ -454,6 +463,22 @@ export interface LoadTrialCandidateInput {
 export function loadTrialCandidate(
   input: LoadTrialCandidateInput,
 ): TrialCandidateView {
+  return verifyTrialCandidate(input).view;
+}
+
+/** Verify the retained candidate and return its bytes for adoption. The
+ * caller must already have proven a human click; nothing here writes. */
+export function loadTrialAdoptionFiles(input: LoadTrialCandidateInput): {
+  view: TrialCandidateView;
+  files: readonly TrialAdoptionFile[];
+} {
+  return verifyTrialCandidate(input);
+}
+
+function verifyTrialCandidate(input: LoadTrialCandidateInput): {
+  view: TrialCandidateView;
+  files: TrialAdoptionFile[];
+} {
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       input.executionId,
@@ -530,6 +555,7 @@ export function loadTrialCandidate(
   // retroactively authorize (or reject) bytes the human never approved.
   const allowedPaths = input.frozenAllowedPaths ?? input.trial.allowedPaths;
   const changes: TrialCandidateChangeView[] = [];
+  const files: TrialAdoptionFile[] = [];
   const parts: string[] = [];
   let truncated = false;
   let remaining = TRIAL_DIFF_MAX_BYTES;
@@ -567,6 +593,12 @@ export function loadTrialCandidate(
       }
       candidate = bytes;
     }
+    files.push({
+      path: change.path,
+      kind: change.kind,
+      baseSha256: change.baseSha256,
+      candidateBytes: change.kind === "delete" ? null : candidate,
+    });
     changes.push({
       path: change.path,
       kind: change.kind,
@@ -598,5 +630,8 @@ export function loadTrialCandidate(
     }
     if (rendered.truncated) truncated = true;
   }
-  return { changes, diff: parts.join(""), truncated };
+  return {
+    view: { changes, diff: parts.join(""), truncated },
+    files,
+  };
 }

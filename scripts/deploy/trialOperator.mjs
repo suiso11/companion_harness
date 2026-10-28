@@ -66,6 +66,7 @@ const INPUT_KEYS = [
   "limits",
   "runner",
   "runtime",
+  "adoption",
 ];
 
 // Validate the small host input file. Unknown keys are rejected so host
@@ -125,6 +126,22 @@ export function validateTrialOperatorInput(raw) {
     "runtime",
     RUNTIME_KEYS,
   );
+  // Optional human adoption target. Present => enabled; absent => disabled.
+  let adoption = null;
+  if (input.adoption !== undefined) {
+    const raw = needObject(input.adoption, "adoption");
+    for (const key of Object.keys(raw)) {
+      if (!["repoPath", "remote", "baseRef", "branchPrefix"].includes(key)) {
+        fail(`adoption has an unknown key: ${key}`);
+      }
+    }
+    adoption = {
+      repoPath: needString(raw.repoPath, "adoption.repoPath", ABS_RE),
+      remote: needString(raw.remote, "adoption.remote"),
+      baseRef: needString(raw.baseRef, "adoption.baseRef"),
+      branchPrefix: needString(raw.branchPrefix, "adoption.branchPrefix"),
+    };
+  }
   return {
     workspaceAlias,
     sourceRepo,
@@ -229,6 +246,7 @@ export function validateTrialOperatorInput(raw) {
       pollMs: needInt(runner.pollMs, "runner.pollMs", 1, 60_000),
     },
     runtime,
+    adoption,
   };
 }
 

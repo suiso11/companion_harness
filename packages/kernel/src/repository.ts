@@ -365,10 +365,12 @@ import {
 import {
   approveTrialProposal,
   authorityDeadlineMs,
+  beginTrialAdoption as beginTrialAdoptionFn,
   claimTrialGrant,
   clearAliasFence,
   expireTrialProposal,
   fenceUnknownExecution,
+  finishTrialAdoption as finishTrialAdoptionFn,
   hashTrialRequest,
   issueLaunchPermit,
   listClaimedTrialWorkers,
@@ -377,6 +379,7 @@ import {
   type QueuedTrialGrantCursor,
   readLaunchPermit,
   readQueuedTrialGrantHorizon,
+  readTrialAdoption as readTrialAdoptionFn,
   readTrialCandidateRoots as readTrialCandidateRootsFn,
   readTrialIntent,
   readTrialProposal,
@@ -387,7 +390,9 @@ import {
   readWorkerReportByProposal,
   reconcileTrialExpiry,
   recordQuiescence,
+  recordTrialAdoptionBaseSha as recordTrialAdoptionBaseShaFn,
   recordWorkerResult,
+  recoverInterruptedTrialAdoptions as recoverInterruptedTrialAdoptionsFn,
   registerWorkerBoot,
   stageTrialProposal,
   type TrialWorkerReportInput,
@@ -7576,6 +7581,57 @@ export function createKernelRepository(
     return readTrialCandidateRootsFn(db, sessionId, executionId);
   }
 
+  function beginTrialAdoption(
+    sessionId: string,
+    proposalId: string,
+    executionId: string,
+    artifactSha256: string,
+    now: number,
+  ) {
+    return beginTrialAdoptionFn(
+      db,
+      sessionId,
+      proposalId,
+      executionId,
+      artifactSha256,
+      now,
+    );
+  }
+
+  function finishTrialAdoption(
+    proposalId: string,
+    result: {
+      status: "done" | "failed";
+      branch: string | null;
+      prUrl: string | null;
+      commitSha: string | null;
+      errorCode: string | null;
+    },
+    now: number,
+  ) {
+    return finishTrialAdoptionFn(db, proposalId, result, now);
+  }
+
+  function recordTrialAdoptionBaseSha(
+    proposalId: string,
+    baseSha: string,
+    now: number,
+  ) {
+    return recordTrialAdoptionBaseShaFn(db, proposalId, baseSha, now);
+  }
+
+  function readTrialAdoption(
+    sessionId: string,
+    proposalId: string,
+    now?: number,
+  ) {
+    return readTrialAdoptionFn(db, sessionId, proposalId, now);
+  }
+
+  function recoverInterruptedTrialAdoptions(now?: number) {
+    return recoverInterruptedTrialAdoptionsFn(db, now);
+  }
+
   /** Internal proof read only: owned, revoked, never claimed/launched grant.
    * Missing/foreign => false; DB errors propagate; no mutation. */
   function isNeverLaunchedRevokedTrialGrant(
@@ -8112,6 +8168,11 @@ export function createKernelRepository(
     hashTrialLaunchRequest,
     readTrialLaunchIntent,
     readTrialCandidateRoots,
+    readTrialAdoption,
+    recoverInterruptedTrialAdoptions,
+    beginTrialAdoption,
+    finishTrialAdoption,
+    recordTrialAdoptionBaseSha,
     isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,

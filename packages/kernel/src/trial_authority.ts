@@ -2863,6 +2863,237 @@ export function readWorkerReportByProposal(
   return readWorkerReport(db, session, g.execution_id);
 }
 
+export type TrialAdoptionStatus = "pending" | "done" | "failed";
+
+/** Fixed error code for an attempt orphaned by a crash/restart. */
+export const TRIAL_ADOPTION_INTERRUPTED = "interrupted";
+/** A pending row older than this is treated as orphaned on read/next click. */
+export const TRIAL_ADOPTION_PENDING_STALE_MS = 15 * 60 * 1000;
+
+export interface TrialAdoptionView {
+  status: TrialAdoptionStatus;
+  branch: string | null;
+  prUrl: string | null;
+  commitSha: string | null;
+  errorCode: string | null;
+}
+
+export interface TrialAdoptionClaim {
+  /** started: caller owns execution; pending: another attempt is running;
+   * done: replay of the same proposal result. */
+  state: "started" | "pending" | "done";
+  adoption: TrialAdoptionView;
+  /** Base commit recorded by the attempt that created the adoption commit;
+   * a retry must rebuild and validate the expected tree against it. */
+  baseSha: string | null;
+}
+
+function readAdoptionBaseSha(
+  db: Database.Database,
+  proposalId: string,
+): string | null {
+  const row = db
+    .prepare("SELECT base_sha FROM trial_adoptions WHERE proposal_id=?")
+    .get(proposalId) as { base_sha: string | null } | undefined;
+  return row?.base_sha ?? null;
+}
+
+/** Persist the original base commit before the adoption commit is created so
+ * a retry after the base branch advanced resumes against the same snapshot. */
+export function recordTrialAdoptionBaseSha(
+  db: Database.Database,
+  proposalId: string,
+  baseSha: string,
+  now: number,
+): void {
+  const pid = requireId(proposalId, "proposalId");
+  if (!/^[0-9a-f]{40,64}$/.test(baseSha)) {
+    throw new RangeError("baseSha must be 40-64 lowercase hex");
+  }
+  db.prepare(
+    "UPDATE trial_adoptions SET base_sha=?, updated_at=? WHERE proposal_id=? AND status='pending'",
+  ).run(baseSha, now, pid);
+}
+
+function readAdoptionRow(
+  db: Database.Database,
+  proposalId: string,
+): TrialAdoptionView | null {
+  const row = db
+    .prepare(
+      "SELECT status, branch, pr_url, commit_sha, error_code FROM trial_adoptions WHERE proposal_id=?",
+    )
+    .get(proposalId) as
+    | {
+        status: TrialAdoptionStatus;
+        branch: string | null;
+        pr_url: string | null;
+        commit_sha: string | null;
+        error_code: string | null;
+      }
+    | undefined;
+  return row === undefined
+    ? null
+    : {
+        status: row.status,
+        branch: row.branch,
+        prUrl: row.pr_url,
+        commitSha: row.commit_sha,
+        errorCode: row.error_code,
+      };
+}
+
+/** Settle a pending row left behind by a crash: the process that claimed it
+ * is gone, so a stale pending row is a terminal failure, never a live push. */
+function settleStaleAdoption(
+  db: Database.Database,
+  proposalId: string,
+  now: number,
+): void {
+  db.prepare(
+    "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending' AND updated_at<=?",
+  ).run(
+    TRIAL_ADOPTION_INTERRUPTED,
+    now,
+    proposalId,
+    now - TRIAL_ADOPTION_PENDING_STALE_MS,
+  );
+}
+
+/** Boot recovery: this process owns no attempt, so every pending row was
+ * orphaned by a previous process. Returns how many rows were settled. */
+export function recoverInterruptedTrialAdoptions(
+  db: Database.Database,
+  now: number = Date.now(),
+): number {
+  const result = db
+    .prepare(
+      "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=?, updated_at=? WHERE status='pending'",
+    )
+    .run(TRIAL_ADOPTION_INTERRUPTED, now);
+  return typeof result.changes === "number" ? result.changes : 0;
+}
+
+/** Read the proposal's adoption state (null before the first attempt).
+ * A pending row older than the staleness window is settled as interrupted
+ * before it is returned. Foreign/missing proposals return null (HTTP 404). */
+export function readTrialAdoption(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+  now: number = Date.now(),
+): TrialAdoptionView | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const g = db
+    .prepare("SELECT session_id FROM trial_grants WHERE proposal_id=?")
+    .get(pid) as { session_id: string } | undefined;
+  if (!g || g.session_id !== session) return null;
+  settleStaleAdoption(db, pid, now);
+  return readAdoptionRow(db, pid);
+}
+
+/**
+ * Claim one human-only adoption attempt. Idempotent by proposal: a done row
+ * returns the recorded result, a pending row blocks concurrent attempts, and
+ * a failed row may be retried (reset to pending by this same call).
+ * Foreign/missing proposals return null.
+ */
+export function beginTrialAdoption(
+  db: Database.Database,
+  sessionId: string,
+  proposalId: string,
+  executionId: string,
+  artifactSha256: string,
+  now: number,
+): TrialAdoptionClaim | null {
+  const session = requireId(sessionId, "sessionId");
+  const pid = requireId(proposalId, "proposalId");
+  const exec = requireId(executionId, "executionId");
+  if (!/^[0-9a-f]{64}$/.test(artifactSha256)) {
+    throw new RangeError("artifactSha256 must be 64 lowercase hex");
+  }
+  const claim = db.transaction((): TrialAdoptionClaim | null => {
+    const g = db
+      .prepare(
+        "SELECT session_id, execution_id FROM trial_grants WHERE proposal_id=?",
+      )
+      .get(pid) as { session_id: string; execution_id: string } | undefined;
+    if (!g || g.session_id !== session || g.execution_id !== exec) return null;
+    // A stale pending row must never block a later human click.
+    settleStaleAdoption(db, pid, now);
+    const existing = readAdoptionRow(db, pid);
+    if (existing !== null) {
+      // Preserve the base recorded by the earlier attempt: a retry must
+      // rebuild the expected tree against that same snapshot even when the
+      // base branch has advanced since the push.
+      const baseSha = readAdoptionBaseSha(db, pid);
+      if (existing.status === "done" || existing.status === "pending") {
+        return { state: existing.status, adoption: existing, baseSha };
+      }
+      db.prepare(
+        "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",
+      ).run(exec, artifactSha256, now, pid);
+      return {
+        state: "started",
+        adoption: {
+          status: "pending",
+          branch: null,
+          prUrl: null,
+          commitSha: null,
+          errorCode: null,
+        },
+        baseSha,
+      };
+    }
+    db.prepare(
+      "INSERT INTO trial_adoptions (proposal_id, execution_id, artifact_sha256, status, branch, pr_url, commit_sha, error_code, created_at, updated_at) VALUES (?,?,?, 'pending', NULL, NULL, NULL, NULL, ?, ?)",
+    ).run(pid, exec, artifactSha256, now, now);
+    return {
+      state: "started",
+      adoption: {
+        status: "pending",
+        branch: null,
+        prUrl: null,
+        commitSha: null,
+        errorCode: null,
+      },
+      baseSha: null,
+    };
+  });
+  return claim();
+}
+
+/** Record the terminal result of a pending adoption (idempotent update). */
+export function finishTrialAdoption(
+  db: Database.Database,
+  proposalId: string,
+  result: {
+    status: "done" | "failed";
+    branch: string | null;
+    prUrl: string | null;
+    commitSha: string | null;
+    errorCode: string | null;
+  },
+  now: number,
+): TrialAdoptionView {
+  const pid = requireId(proposalId, "proposalId");
+  db.prepare(
+    "UPDATE trial_adoptions SET status=?, branch=?, pr_url=?, commit_sha=?, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending'",
+  ).run(
+    result.status,
+    result.branch,
+    result.prUrl,
+    result.commitSha,
+    result.errorCode,
+    now,
+    pid,
+  );
+  const row = readAdoptionRow(db, pid);
+  if (row === null) throw new RangeError("adoption row missing");
+  return row;
+}
+
 /**
  * Record a trusted validated worker result. The result proof (taskHash,
  * exitCode, exact check list vs the frozen requiredChecks, outputMatched,
