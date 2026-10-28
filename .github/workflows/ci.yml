@@ -207,6 +207,82 @@ jobs:
       - name: Install Playwright chromium (with OS deps)
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Install Linux native containment runtime (autodispatch sealed bridge)
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap apparmor dbus-user-session
+
+          # Same reviewed provisioning as the check job. The autodispatch
+          # browser suite runs the REAL sealed bridge, so it needs the same
+          # AppArmor admission for unprivileged bwrap.
+          profile=""
+          for candidate in \
+            /etc/apparmor.d/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap; do
+            if [ -f "${candidate}" ]; then
+              profile="${candidate}"
+              break
+            fi
+          done
+          restrict="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+          if [ -n "${profile}" ]; then
+            sudo apparmor_parser --replace "${profile}"
+            echo "Loaded distro AppArmor profile: ${profile}"
+          elif [ "${restrict}" = "1" ]; then
+            vendored="${GITHUB_WORKSPACE}/.github/apparmor/bwrap-userns-restrict"
+            if [ ! -f "${vendored}" ]; then
+              echo "::error::Ubuntu user namespaces are restricted, no distro /usr/bin/bwrap profile exists, and the vendored ABI4 fallback is missing."
+              exit 1
+            fi
+            sudo apparmor_parser --replace \
+              -I /etc/apparmor.d \
+              --base /etc/apparmor.d \
+              "${vendored}"
+            echo "Loaded CI-only ABI4 fallback AppArmor profile: ${vendored}"
+          else
+            echo "Unprivileged user-namespace restriction is inactive; no /usr/bin/bwrap profile load is needed."
+          fi
+
+          if ! /usr/bin/bwrap --ro-bind / / --unshare-net /bin/true; then
+            echo "::error::Native /usr/bin/bwrap containment preflight failed."
+            uname -a || true
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+            ls -l /usr/bin/bwrap 2>/dev/null || true
+            sudo aa-status 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Start user systemd bus (autodispatch sealed scope)
+        shell: bash
+        run: |
+          user="$(id -un)"
+          uid="$(id -u)"
+          runtime="/run/user/${uid}"
+          bus="unix:path=${runtime}/bus"
+          sudo loginctl enable-linger "${user}"
+          sudo systemctl start "user@${uid}.service" || true
+          echo "XDG_RUNTIME_DIR=${runtime}" >> "${GITHUB_ENV}"
+          echo "DBUS_SESSION_BUS_ADDRESS=${bus}" >> "${GITHUB_ENV}"
+          export XDG_RUNTIME_DIR="${runtime}"
+          export DBUS_SESSION_BUS_ADDRESS="${bus}"
+
+          # Never fake systemd: require a real user manager + transient scope
+          # before the suite starts, and fail with diagnostics instead.
+          for attempt in $(seq 1 30); do
+            if [ -S "${runtime}/bus" ] &&
+               systemd-run --user --scope --quiet -p MemoryMax=64M true; then
+              echo "user systemd scope ready for uid ${uid}"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::User systemd bus/scope unavailable on this runner."
+          loginctl show-user "${user}" || true
+          ls -ld "${runtime}" "${runtime}/bus" 2>/dev/null || true
+          sudo journalctl -u "user@${uid}.service" --no-pager -n 100 || true
+          exit 1
+
       - name: E2E typecheck (harness + spec + config)
         run: pnpm typecheck:e2e
 
@@ -227,6 +303,19 @@ jobs:
           COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
           COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
         run: pnpm --filter @companion/server test:e2e
+
+      - name: Auto-dispatch browser E2E (CI executor substitute, not installed pi-orch)
+        env:
+          COMPANION_E2E_AUTODISPATCH: "1"
+          COMPANION_AD_E2E_MODE: "ci"
+        run: |
+          # Real server/UI/planner/materializer/TrialRunner/sealed bridge,
+          # real systemd-user+bwrap confinement, real model relay. Only the
+          # installed pi-orch/OMP executor is replaced by the repo-contained
+          # scripts/pi-orch-bridge/ci-executor.mjs. Never evidence for the
+          # installed binaries; local runs keep real-pi.
+          timeout --signal=TERM --kill-after=30s 900s \
+            pnpm --filter @companion/server test:e2e
 
       - name: Upload E2E failure artifacts (no production data)
         if: failure()

@@ -4,8 +4,13 @@
 // normal chat turn, enables ONE standing policy from that exact selected
 // user turn, resumes global autonomy on the existing surface, then sends a
 // concrete request. The production intake plans it and the EXISTING
-// TrialRunner materializes + runs the ACTUAL installed pi-orch launcher with
-// a real child Pi worker. Only the model is synthetic (loopback gateway).
+// TrialRunner materializes + runs the executor. Locally that is the ACTUAL
+// installed pi-orch launcher with a real child Pi worker (real-pi mode).
+// With COMPANION_AD_E2E_MODE=ci it is the repo-contained
+// scripts/pi-orch-bridge/ci-executor.mjs substitute, which drives the same
+// real sealed model relay with plain read/write/opencode_task calls. CI mode
+// is explicitly NOT evidence for the installed pi-orch/OMP binaries. Only
+// the model is synthetic (loopback gateway).
 //
 // Also proves: enable never auto-resumes; discussion/negation creates no
 // execution; an unresolved decision stays needs_decision; panel STOP during
@@ -34,6 +39,15 @@ const README_TEXT =
   "# Synthetic Acceptance\n\nThe child worker read this exact synthetic README.\n";
 const WRITE_CANDIDATE_TEXT =
   "# Synthetic Acceptance\n\nWritten by the real child worker as a scoped candidate.\n";
+
+// CI mode (GitHub-hosted runner) swaps ONLY the installed pi-orch/OMP
+// executor for the repo-contained ci-executor.mjs. The describe title makes
+// that visible in Playwright output so a CI pass is never read as evidence
+// for the installed binaries.
+const CI_MODE = process.env.COMPANION_AD_E2E_MODE === "ci";
+const SUITE_TITLE = CI_MODE
+  ? "standing-policy auto dispatch [ci-executor: not the installed pi-orch]"
+  : "standing-policy auto dispatch";
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -166,7 +180,7 @@ async function enablePolicy(page: Page): Promise<void> {
   );
 }
 
-test.describe("standing-policy auto dispatch", () => {
+test.describe(SUITE_TITLE, () => {
   test.beforeEach(async ({ page, request }) => {
     await pauseAutonomy(request);
     const res = await request.post(`${AUTODISPATCH_CONTROL_ORIGIN}/reset`);
@@ -183,7 +197,7 @@ test.describe("standing-policy auto dispatch", () => {
     await expect(page.locator("#composer")).toBeVisible();
   });
 
-  test("normal chat -> policy -> real planner -> actual pi-orch child -> on_ready evidence", async ({
+  test("normal chat -> policy -> real planner -> executor child -> on_ready evidence", async ({
     page,
     request,
   }) => {
@@ -257,7 +271,10 @@ test.describe("standing-policy auto dispatch", () => {
       "本番反映済み",
     );
 
-    // Actual model route reached the real pi-orch parent and child tools.
+    // Actual model route reached the executor parent and child tools. The
+    // installed launcher and the CI substitute both use the oc-<pid> worker
+    // id shape, so this assertion stays strict in both modes (CI mode is
+    // labelled in the describe title and fixture output).
     await expect
       .poll(async () => (await controlStatus(request)).workerIds.length, {
         timeout: 30_000,
