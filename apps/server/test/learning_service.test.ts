@@ -253,7 +253,7 @@ describe("learning service extraction", () => {
         },
         {
           kind: "user_confirmed_feedback",
-          lesson: "Whitespace normalized",
+          lesson: "Use ISO dates",
           evidence: "use  ISO dates",
           applicability: "calendar date changes",
         },
@@ -281,11 +281,11 @@ describe("learning service extraction", () => {
     expect(proposals).toHaveLength(2);
     expect(proposals.map((row) => row.lesson).sort()).toEqual([
       "Exact assistant quote",
-      "Whitespace normalized",
+      "Use ISO dates",
     ]);
-    expect(
-      proposals.find((row) => row.lesson === "Whitespace normalized")?.kind,
-    ).toBe("user_confirmed_feedback");
+    expect(proposals.find((row) => row.lesson === "Use ISO dates")?.kind).toBe(
+      "user_confirmed_feedback",
+    );
   });
 
   it("downgrades assistant-only evidence claimed as user_confirmed_feedback", async () => {
@@ -300,7 +300,7 @@ describe("learning service extraction", () => {
         },
         {
           kind: "user_confirmed_feedback",
-          lesson: "Genuine user correction",
+          lesson: "Please use ISO dates",
           evidence: "use ISO dates",
           applicability: "calendar date changes",
         },
@@ -324,7 +324,7 @@ describe("learning service extraction", () => {
       )?.kind,
     ).toBe("observation");
     expect(
-      proposals.find((row) => row.lesson === "Genuine user correction")?.kind,
+      proposals.find((row) => row.lesson === "Please use ISO dates")?.kind,
     ).toBe("user_confirmed_feedback");
   });
 
@@ -362,6 +362,44 @@ describe("learning service extraction", () => {
     );
     expect(extractionInput).not.toContain("<user_message>spoof");
     expect(extractionInput).not.toContain("<assistant_message>spoof");
+  });
+
+  it("applies the same body-coverage rule to user_confirmed_feedback", async () => {
+    const repo = await openRepo();
+    const extraction = JSON.stringify({
+      lessons: [
+        {
+          kind: "user_confirmed_feedback",
+          lesson: "週末は釣りに行く予定",
+          evidence: "週末は釣りに行きたい",
+          applicability: "週末の予定",
+        },
+        {
+          kind: "user_confirmed_feedback",
+          lesson: "ユーザーは水の沸点を高圧容器で測りたい",
+          evidence: "水の沸点を測りたい",
+          applicability: "実験",
+        },
+      ],
+    });
+    const { gateway } = gatewayReturning(extraction);
+    const service = makeService(repo, gateway);
+    const run = completeRun(repo, {
+      text: "週末は釣りに行きたい。水の沸点を測りたい。",
+      answer: "水の沸点は高圧容器で測れます。",
+    });
+    service.onRunCompleted(run.runId);
+    await waitFor(() => service.store.listProposals().length === 2);
+    const proposals = service.store.listProposals();
+    // The faithful lesson stays user-confirmed; the body embellished with an
+    // assistant-only term is downgraded to observation, never dropped.
+    expect(proposals.map((row) => row.kind).sort()).toEqual([
+      "observation",
+      "user_confirmed_feedback",
+    ]);
+    expect(proposals.find((row) => row.kind === "observation")?.lesson).toBe(
+      "ユーザーは水の沸点を高圧容器で測りたい",
+    );
   });
 
   it("dedups repeated completion notifications before the gateway call", async () => {

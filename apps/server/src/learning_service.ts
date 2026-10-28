@@ -32,6 +32,7 @@ import {
 } from "./background_resource.js";
 import {
   escapeExtractionDelimiters,
+  extractionBodyDowngrade,
   isGroundedExtractionQuote,
 } from "./extraction_grounding.js";
 import type { ServerLogger } from "./logger.js";
@@ -365,11 +366,13 @@ export function completedAnswerText(result: unknown): string {
  * Ground one parsed lesson against the two speaker turns.
  *
  * `user_confirmed_feedback` is accepted ONLY when its evidence is a verbatim
- * (NFKC + whitespace-normalized) quote from the user's own turn. A claim whose
- * evidence exists only in the assistant answer can NEVER be user-confirmed:
- * it is downgraded to `observation` (kept, never dropped) so it can no longer
- * masquerade as something the user said. Evidence not grounded in either
- * speaker is dropped (the prompt excludes ungrounded lessons).
+ * (NFKC + whitespace-normalized) quote from the user's own turn AND the lesson
+ * body is covered by the user's own words (extraction_grounding.ts). A claim
+ * whose evidence exists only in the assistant answer can NEVER be
+ * user-confirmed: it is downgraded to `observation` (kept, never dropped) so
+ * it can no longer masquerade as something the user said. Evidence not
+ * grounded in either speaker is dropped (the prompt excludes ungrounded
+ * lessons).
  */
 function resolveGroundedLessonKind(
   item: ParsedLesson,
@@ -378,7 +381,11 @@ function resolveGroundedLessonKind(
 ): LearningKind | null {
   if (item.kind === "user_confirmed_feedback") {
     if (isGroundedExtractionQuote(item.evidence, turnText)) {
-      return "user_confirmed_feedback";
+      // Same body check as memory user_fact: a real quote does not prove the
+      // lesson body is covered by the user's own words.
+      return extractionBodyDowngrade(item.lesson, turnText, answerText) === null
+        ? "user_confirmed_feedback"
+        : "observation";
     }
     return isGroundedExtractionQuote(item.evidence, answerText)
       ? "observation"

@@ -139,6 +139,9 @@ export interface ServerLogFields {
   readonly durationMs?: number;
   readonly attempt?: number;
   readonly port?: number;
+  /** Fixed body-grounding downgrade counts (no content). */
+  readonly downgraded_by_coverage?: number;
+  readonly downgraded_by_assistant_terms?: number;
   /**
    * Closed-vocabulary reason code (sanitized via sanitizeLogStatus, so only
    * allowlisted members survive): permit-denied reasons, bridge signals,
@@ -295,6 +298,16 @@ function sanitizeFields(fields: ServerLogFields | undefined): ServerLogFields {
   const port = sanitizeNumber(fields.port);
   if (port !== undefined) {
     out.port = port;
+  }
+  const downgradedByCoverage = sanitizeNumber(fields.downgraded_by_coverage);
+  if (downgradedByCoverage !== undefined) {
+    out.downgraded_by_coverage = downgradedByCoverage;
+  }
+  const downgradedByAssistantTerms = sanitizeNumber(
+    fields.downgraded_by_assistant_terms,
+  );
+  if (downgradedByAssistantTerms !== undefined) {
+    out.downgraded_by_assistant_terms = downgradedByAssistantTerms;
   }
   if (typeof fields.reason === "string") {
     const reason = sanitizeLogReason(fields.reason);
