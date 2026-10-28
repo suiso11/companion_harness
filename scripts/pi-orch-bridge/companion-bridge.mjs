@@ -530,6 +530,11 @@ function evaluateGuestExecution(observation, realPiRequired) {
     if (!tool || typeof tool !== "object" || typeof tool.name !== "string") {
       return { ok: false, missing: true };
     }
+    // Only an explicit failure can be recovered from. A pending or malformed
+    // result is missing completion evidence, so it keeps the downgrade.
+    if (tool.result !== "ok" && tool.result !== "error") {
+      return { ok: false, missing: false };
+    }
   }
   // A failed tool call that the guest recovered from is normal agent
   // behavior. This gate is only a reliability downgrade, never authority:
@@ -544,7 +549,7 @@ function evaluateGuestExecution(observation, realPiRequired) {
   return {
     ok: true,
     missing: false,
-    failedToolCalls: observation.tools.filter((tool) => tool.result !== "ok")
+    failedToolCalls: observation.tools.filter((tool) => tool.result === "error")
       .length,
   };
 }

@@ -1222,6 +1222,25 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     );
   });
 
+  it("downgrades a guest with a pending tool call before a success", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          { name: "edit", args: { path: "src/app.ts" }, result: "pending" },
+          { name: "read", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    // Pending means missing completion evidence, not a recovered failure.
+    expect(result.status).toBe("error");
+    expect(result.verified).toBe(false);
+    expect(result.evidence.artifact).toBeUndefined();
+  });
+
   it("requires at least one observed tool call for real-pi execution", async () => {
     const fixture = await makeFixture({
       executorBody: guestReportBody(undefined, "", undefined, { tools: [] }),
