@@ -11,6 +11,7 @@ import { validateChatRequest } from "@companion/model-local";
 import { describe, expect, it } from "vitest";
 import { createCollectingLogger } from "../src/logger.js";
 import {
+  TRIAL_RELAY_PRESENCE_PENALTY,
   TrialModelRelay,
   type TrialModelRelayCaps,
 } from "../src/trial_model_relay.js";
@@ -303,6 +304,8 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
         sock,
         chatBody({
           max_tokens: 512,
+          // Guest-sent sampling must never override the fixed trial penalty.
+          presence_penalty: 0.2,
           tools: [
             {
               type: "function",
@@ -325,6 +328,9 @@ describe.skipIf(process.platform === "win32")("trial_model_relay", () => {
       expect(fwd.tools?.[0]?.name).toBe("capsule.read");
       // maxOutputTokens = min(request 512, profile cap 1024).
       expect(fwd.maxOutputTokens).toBe(512);
+      // Fixed relay-owned presence penalty, ignoring the guest value.
+      expect(fwd.presencePenalty).toBe(TRIAL_RELAY_PRESENCE_PENALTY);
+      expect(fwd.presencePenalty).toBe(1);
       // Per-call response cap equals the gateway 1MiB ceiling (validated, never clamped).
       expect(seen.maxResponseBytes).toBe(1 * 1024 * 1024);
       // Round-trip: gateway "capsule.read" back to guest "read".

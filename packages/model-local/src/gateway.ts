@@ -731,6 +731,19 @@ export function validateChatRequest(request: ChatRequest): void {
       );
     }
   }
+  if (request.presencePenalty !== undefined) {
+    if (
+      typeof request.presencePenalty !== "number" ||
+      !Number.isFinite(request.presencePenalty) ||
+      request.presencePenalty < -2 ||
+      request.presencePenalty > 2
+    ) {
+      throw new ModelLocalError(
+        "invalid_request",
+        "model request carries an invalid presence penalty",
+      );
+    }
+  }
   if (request.reasoning !== undefined && request.reasoning !== "off") {
     throw new ModelLocalError(
       "invalid_request",

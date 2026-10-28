@@ -367,6 +367,9 @@ export function createOpenAICompatibleGateway(
       if (request.maxOutputTokens !== undefined) {
         body.max_tokens = request.maxOutputTokens;
       }
+      if (request.presencePenalty !== undefined) {
+        body.presence_penalty = request.presencePenalty;
+      }
       if (request.reasoning === "off") {
         body.chat_template_kwargs = { enable_thinking: false };
       } else if (request.reasoningBudgetTokens !== undefined) {
@@ -443,6 +446,9 @@ async function streamOpenAIChat(options: {
   };
   if (request.maxOutputTokens !== undefined) {
     body.max_tokens = request.maxOutputTokens;
+  }
+  if (request.presencePenalty !== undefined) {
+    body.presence_penalty = request.presencePenalty;
   }
   if (request.reasoning === "off") {
     body.chat_template_kwargs = { enable_thinking: false };

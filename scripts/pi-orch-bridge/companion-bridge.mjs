@@ -155,6 +155,13 @@ function readGuestObservation(workRoot) {
       parsed.engine !== "pi-orch-omp-json"
     )
       return null;
+    // The observation is guest-owned and untrusted: bound and redact the
+    // optional assistant stream tail here, before any consumer sees it.
+    if (typeof parsed.lastAssistantTail === "string") {
+      parsed.lastAssistantTail = redactDiagnostic(
+        parsed.lastAssistantTail,
+      ).slice(-MAX_ASSISTANT_TAIL_CHARS);
+    }
     return parsed;
   } catch {
     return null;
@@ -164,6 +171,7 @@ function readGuestObservation(workRoot) {
 // The journal protocol caps each report entry at 1024 characters (which is
 // also <= 2048 bytes), so bounded heads must fit that tighter entry limit.
 const DIAGNOSTIC_HEAD_BYTES = 1024;
+const MAX_ASSISTANT_TAIL_CHARS = 512;
 const DIAGNOSTIC_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
 
 function redactDiagnostic(value) {
@@ -208,6 +216,17 @@ function executorFailureDiagnostics(workRoot, run) {
     diagnostics.push(
       boundedDiagnostic(
         `diagnostic: guest observation engine=${observation.engine} executorKind=${observation.executorKind} ompExitCode=${observation.ompExitCode ?? "unknown"} timedOut=${observation.timedOut === true} signal=${typeof observation.signal === "string" ? observation.signal : "none"} toolCount=${observedTools.length} toolErrors=${toolErrors} error=${errorKind}`,
+      ),
+    );
+  }
+  if (
+    observation !== null &&
+    typeof observation.lastAssistantTail === "string" &&
+    observation.lastAssistantTail.length > 0
+  ) {
+    diagnostics.push(
+      boundedDiagnostic(
+        `diagnostic: guest assistant tail: ${observation.lastAssistantTail}`,
       ),
     );
   }
