@@ -873,22 +873,21 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "disables only the OMP assistant-prose loop guard in the sealed guest config",
+    "disables the OMP loop guard in the sealed guest config",
     () => {
       // A finished guest on eb92119 restated its completion report (a
-      // 416-char cycle x3) after making the exact requested edit. The pinned
-      // OMP loop guard treated that as a stream stall and exited 1, so the
-      // bridge never reached host checks. Calls (maxOutputTokens 1024) and the
-      // run (maxModelCalls 64 + timeoutMs) are already capped, so prose
-      // scanning must stay off while loopGuard stays available for thinking.
+      // 416-char cycle x3) after making the exact requested edit. On 40bc410
+      // trial 96f19690 repeated a ~600-char cycle after 14 model calls: the
+      // guard still exited 1, so the bridge never reached host checks.
+      // Calls (maxOutputTokens 1024) and the run (maxModelCalls 64 +
+      // timeoutMs) are already capped, so the guard must be off entirely.
       const run = runRealPiGuestJob("write");
       expect(run.status, run.stderr).toBe(0);
       expect(run.config).toContain("model:");
       expect(run.config).toMatch(
-        /model:\n {2}loopGuard:\n {4}checkAssistantContent: false\n/,
+        /model:\n {2}loopGuard:\n {4}enabled: false\n/,
       );
-      // Only the prose scan is disabled; do not switch thinking loop guard off.
-      expect(run.config).not.toContain("loopGuard:\n    enabled: false");
+      expect(run.config).not.toContain("checkAssistantContent");
     },
   );
 
