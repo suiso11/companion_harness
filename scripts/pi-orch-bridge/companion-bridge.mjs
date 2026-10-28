@@ -530,9 +530,23 @@ function evaluateGuestExecution(observation, realPiRequired) {
     if (!tool || typeof tool !== "object" || typeof tool.name !== "string") {
       return { ok: false, missing: true };
     }
-    if (tool.result !== "ok") return { ok: false, missing: false };
   }
-  return { ok: true, missing: false };
+  // A failed tool call that the guest recovered from is normal agent
+  // behavior. This gate is only a reliability downgrade, never authority:
+  // host checks and artifact hashes remain the proof. Pass when at least one
+  // call succeeded and the LAST call succeeded, so a run is downgraded only
+  // for a trailing failure the guest did not recover from.
+  const lastTool = observation.tools[observation.tools.length - 1];
+  if (lastTool.result !== "ok") return { ok: false, missing: false };
+  if (!observation.tools.some((tool) => tool.result === "ok")) {
+    return { ok: false, missing: false };
+  }
+  return {
+    ok: true,
+    missing: false,
+    failedToolCalls: observation.tools.filter((tool) => tool.result !== "ok")
+      .length,
+  };
 }
 
 // Retain the exact candidate bytes that the final validation hashed. The file
@@ -1400,12 +1414,17 @@ async function main() {
                       outcome.raw.report.findings = reportFindings(observation);
                     }
                   } else {
-                    const findings = reportFindings(
-                      observation,
-                      changes
-                        .slice(0, 8)
-                        .map((change) => `${change.kind} ${change.path}`),
-                    );
+                    // A recovered guest failure stays visible as an
+                    // unverified observation, never as host attestation.
+                    const evidenceLines = changes
+                      .slice(0, 8)
+                      .map((change) => `${change.kind} ${change.path}`);
+                    if (guestExecutionEvidence.failedToolCalls > 0) {
+                      evidenceLines.unshift(
+                        `guest recovered from ${guestExecutionEvidence.failedToolCalls} failed tool call(s) (unattested)`,
+                      );
+                    }
+                    const findings = reportFindings(observation, evidenceLines);
                     try {
                       retainCandidateChanges(
                         workRoot,

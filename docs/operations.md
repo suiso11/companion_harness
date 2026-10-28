@@ -4426,6 +4426,10 @@ redacted `lastAssistantTail` so such aborts stay diagnosable.
   injected list: `read,grep,glob` for read-only jobs and
   `read,grep,glob,write` for write jobs. Coordinator delegation tools
   (`task`, `wait`, `opencode_*`) are never exposed to the sealed guest.
+- A guest that recovered from failed tool calls still completes when at
+  least one call and the final call succeeded; the report records
+  `guest recovered from N failed tool call(s) (unattested)`, while a
+  trailing failure still downgrades the run to error.
 - The bridge is launched with the approved write scopes and route; if it
   exits nonzero before writing a journal report (e.g. wire validation),
   the runner keeps a bounded (≤2048-byte) UTF-8-safe redacted stderr head
