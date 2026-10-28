@@ -900,6 +900,23 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
+    "pins exact-replacement edit mode for the sealed guest",
+    () => {
+      // OMP defaults to edit.mode=hashline, a line-anchored patch DSL the
+      // local model misused on 01f40da (#188): "CUT 2362*" resolved a
+      // single-line block, "PUT 25,26.=:" had no preceding hunk header, and
+      // the first edit failed in nearly every write case. replace (exact
+      // old/new text) is the variant local models handle best.
+      const run = runRealPiGuestJob("write");
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.config).toMatch(/^edit:\n {2}mode: replace\n/m);
+      expect(run.ompEnv.PI_EDIT_VARIANT).toBe("replace");
+      expect(run.prompt).toContain("copy the exact existing text");
+      expect(run.prompt).toContain("no CUT/PUT");
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
     "disables the OMP loop guard in the sealed guest config",
     () => {
       // A finished guest on eb92119 restated its completion report (a
@@ -1552,6 +1569,17 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(failedResult.verified).toBe(false);
     expect(failedResult.evidence.artifact).toBeUndefined();
     expect(failedResult.report.summary).toContain("check failed");
+    // The failure finding is host-observed and carries the check name, exit
+    // code, and a bounded head of the check's combined output.
+    const checkFindings = failedResult.report.findings.filter((entry) =>
+      entry.includes("operator check synthetic-check failed"),
+    );
+    expect(checkFindings).toHaveLength(1);
+    expect(checkFindings[0]).toContain("exit 1");
+    expect(checkFindings[0]).toContain("check-failed");
+    expect(
+      Buffer.byteLength(checkFindings[0] as string, "utf8"),
+    ).toBeLessThanOrEqual(400);
 
     const outOfScope = await makeFixture({
       executorBody: guestReportBody(
