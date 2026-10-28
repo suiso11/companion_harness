@@ -19,6 +19,7 @@ import {
   parseGraphData,
   withTopicHubs,
 } from "../../server/src/ui/graph.js";
+import { formatMemoryDetailText } from "../../server/src/ui/memory_detail.js";
 import { returnToBrowseGenerations } from "../../server/src/ui/memory_list_actions.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import {
@@ -665,6 +666,7 @@ async function openDetail(target: string, handle: string): Promise<void> {
       revision?: unknown;
       source?: unknown;
       createdAt?: unknown;
+      evidence?: unknown;
     };
     stale?: unknown;
   };
@@ -682,10 +684,10 @@ async function openDetail(target: string, handle: string): Promise<void> {
     typeof body.current?.kind === "string" ? body.current.kind : "";
   const currentSource =
     typeof body.current?.source === "string" ? body.current.source : "";
-  const recordedAt =
-    typeof body.current?.createdAt === "string"
-      ? formatRecordedAt(body.current.createdAt)
-      : null;
+  const currentCreatedAt =
+    typeof body.current?.createdAt === "string" ? body.current.createdAt : "";
+  const currentEvidence =
+    typeof body.current?.evidence === "string" ? body.current.evidence : null;
   const stale = body.stale === true;
   // A draft typed for another target never carries over.
   if (
@@ -701,11 +703,19 @@ async function openDetail(target: string, handle: string): Promise<void> {
     canvas?.setSelected(handle);
   }
   detailVisible = true;
-  detailBody =
-    `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
-    (recordedAt === null ? "" : `記録日時: ${recordedAt}\n`) +
-    `現在 [${currentStatus} rev.${currentRevision} ${currentKind} ${currentSource}]\n${currentBody}` +
-    (stale ? "\n---\n状態が変わっています。再検索してください" : "");
+  detailBody = formatMemoryDetailText({
+    snapshot: { handle, snippet: snapshotSnippet, status: snapshotStatus },
+    current: {
+      body: currentBody,
+      kind: currentKind,
+      status: currentStatus,
+      revision: currentRevision,
+      source: currentSource,
+      createdAt: currentCreatedAt,
+      evidence: currentEvidence,
+    },
+    stale,
+  });
   opStatus = stale ? "stale: 引用時から状態が変化" : "";
   actionsDisabled = stale;
 }

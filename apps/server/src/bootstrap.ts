@@ -1722,6 +1722,8 @@ export async function startServer(
         scope: memoryConfig.scope,
         recallLimit: memoryConfig.recallLimit,
         idleMs: memoryConfig.idleMs,
+        // remind#41 evidence quote; false is the older-remind escape hatch.
+        sendEvidence: memoryConfig.sendEvidence,
         // SEPARATE extraction model-call budget (never the CLI timeoutMs).
         extractTimeoutMs: memoryConfig.extractTimeoutMs,
         repo: baseRepo,

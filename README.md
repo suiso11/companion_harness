@@ -1343,11 +1343,14 @@ the current 12-test green; the historical green above does not close
 
 Unset `COMPANION_MEMORY_JSON` (default) means fully memoryless. When
 set, it must be a strict JSON object with only `{ executable, entry,
-config, scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs? }`
+config, scope, timeoutMs?, maxResponseBytes?, recallLimit?, idleMs?,
+sendEvidence? }`
 (all paths absolute; `scope` 1-256 chars, no controls;
 `timeoutMs` 500-30000 default 5000; `maxResponseBytes` 4096-1048576
 default 65536; `recallLimit` 1-8 default 5; `idleMs` 5000-300000
-default 30000). The remind CLI child is the only remind interface
+default 30000; `sendEvidence` boolean default true, which an older remind
+may reject (BAD_REQUEST): the quote is then retried once without evidence and
+latched off for the process). The remind CLI child is the only remind interface
 (`shell: false`, exact `[entry, --config, config]`); Companion never
 opens the remind DB. Durable state lives in Companion-owned
 `memory_outbox`/`memory_exposures`/`memory_grants` with stable

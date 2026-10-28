@@ -370,7 +370,7 @@ connector instance owns **all** configured roots.
   preserved exactly).
 - When set, the value must be a strict JSON object with only
   `{ executable, entry, config, scope, timeoutMs?, maxResponseBytes?,
-  recallLimit?, idleMs? }`. Example:
+  recallLimit?, idleMs?, sendEvidence? }`. Example:
   `{"executable":"/usr/bin/node","entry":"/srv/remind/dist/src/cli.js","config":"/srv/remind/mem.json","scope":"personal"}`.
   `executable`/`entry`/`config` must be absolute paths (no shell, no
   lookup: the child is spawned with `shell: false` and exactly
@@ -380,7 +380,13 @@ connector instance owns **all** configured roots.
   `timeoutMs` default `5000` (bounds `500..30000`),
   `maxResponseBytes` default `65536` (bounds `4096..1048576`),
   `recallLimit` default `5` (bounds `1..8`),
-  `idleMs` default `30000` (bounds `5000..300000`).
+  `idleMs` default `30000` (bounds `5000..300000`),
+  `sendEvidence` default `true` (send remind#41 quotes; set `false` to skip
+  them up front for an older remind build). An older build is also handled
+  automatically: a `record.remember` with a quote answered BAD_REQUEST is
+  retried once without it (same idempotency key) and `evidence` is latched
+  off for the process, so later remembers still store the user fact (just
+  without the original words) and no per-remember errors repeat.
   Unknown keys, scalars, and malformed JSON are rejected fail-closed at
   startup with a fixed safe message (no paths, scopes, or values logged).
 - The remind CLI child is the ONLY remind interface: Companion never
@@ -406,8 +412,15 @@ connector instance owns **all** configured roots.
   verbatim quote from the user turn (NFKC + whitespace-normalized
   substring). Missing, paraphrased, or assistant-only evidence downgrades
   the item to `model_inference` (the memory is kept, never dropped, and
-  never presented as a user fact); `evidence` is grounding input only and
-  is never persisted. `summary`/`model_inference` may omit it. Prompt rule:
+  never presented as a user fact). A GROUNDED user_fact now also sends the
+  normalized quote (NFC + trim, control-free, <= 400 code points) as the
+  optional remind#41 `record.remember` `evidence`; downgraded kinds never
+  send it. Recall/detail carry `evidence: string | null`, and the memory
+  prompt shows it on user_fact lines as `（元の発言:「...」）` (at most 200
+  code points). Set `sendEvidence: false` while running a remind build
+  that predates remind#41; the runtime BAD_REQUEST retry/latch above also
+  keeps such a build working without the quote.
+  `summary`/`model_inference` may omit it. Prompt rule:
   assistant-only suggestions, assumptions, and inferences are never
   restated as user facts. Recall already carries each item's kind and
   renders it as `- mN [kind]: ...`, with only `user_fact` labeled as a
@@ -463,10 +476,11 @@ connector instance owns **all** configured roots.
    scheduling proof only), and graceful shutdown with a reaped child.
    Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
    workflow checks out the pinned remind source
-   (`suiso11/remind@3a0afdcae71d11ada65239dfae2bb1b25bac4b6c`,
+   (`suiso11/remind@a1f6cedd086963e09e1eba21e20a551fc7f798ec`,
    remind master incl. remind#16 recall fields + remind#19 privacy support
-   + remind#28 graph ops + remind#29 topic/auto-association;
-   remind#29 merge commit 3a0afdc) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   + remind#28 graph ops + remind#29 topic/auto-association
+   + remind#41 user_fact evidence quotes; remind#41 head a1f6cedd) into
+   `.ci/remind`, builds it (`npm ci` + `npm run build`,
    no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
    `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
    Limits: synthetic gateway only
