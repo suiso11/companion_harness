@@ -3688,6 +3688,13 @@ export async function startServer(
         } catch {
           // Best effort: never block the graceful shutdown report.
         }
+        // Started adoptions finish their DB write after the push/PR; await
+        // them for the same reason as AGORA sends.
+        try {
+          await controls.drainTrialAdoptions();
+        } catch {
+          // Best effort: never block the graceful shutdown report.
+        }
         // Close the opt-in AGORA private store before the main DB; a failure
         // is best-effort and never blocks the graceful shutdown report.
         closeAgora();

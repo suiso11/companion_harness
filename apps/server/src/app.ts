@@ -492,6 +492,14 @@ export interface ServerControls {
   beginAgoraSend(): () => void;
   /** Refuse new AGORA browser sends, then await every admitted one. */
   drainAgoraSends(): Promise<void>;
+  /**
+   * Register ONE started adoption attempt. Returns an idempotent completion
+   * hook the handler MUST call in `finally`. Bootstrap awaits all started
+   * attempts before closing the kernel DB (no post-close finishTrialAdoption).
+   */
+  beginTrialAdoption(): () => void;
+  /** Refuse new adoption attempts, then await every started one. */
+  drainTrialAdoptions(): Promise<void>;
 }
 
 export interface CreatedServerApp {
@@ -1457,6 +1465,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // drain them explicitly BEFORE the AGORA SQLite store closes on shutdown.
   const inFlightAgoraSends = new Set<Promise<void>>();
   let admitAgoraSends = true;
+  // Trial adoption handlers are direct HTTP handlers too: they finish the
+  // adoption row after the push/PR, so the DB must stay open until they end.
+  const inFlightTrialAdoptions = new Set<Promise<void>>();
+  let admitTrialAdoptions = true;
   const controls: ServerControls = {
     get draining() {
       return draining;
@@ -1483,6 +1495,27 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       admitAgoraSends = false;
       while (inFlightAgoraSends.size > 0) {
         await Promise.all([...inFlightAgoraSends]);
+      }
+    },
+    beginTrialAdoption: () => {
+      if (!admitTrialAdoptions) {
+        // Drain already began; the route's `draining` check rejects the
+        // request. Nothing to track for this unreachable race.
+        return () => undefined;
+      }
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+      });
+      inFlightTrialAdoptions.add(done);
+      return () => {
+        if (inFlightTrialAdoptions.delete(done)) resolveDone();
+      };
+    },
+    drainTrialAdoptions: async () => {
+      admitTrialAdoptions = false;
+      while (inFlightTrialAdoptions.size > 0) {
+        await Promise.all([...inFlightTrialAdoptions]);
       }
     },
   };
@@ -5498,8 +5531,16 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         },
         409,
       );
+    const endAdoption = controls.beginTrialAdoption();
     try {
       const found = repo.readTrial(session.id, proposal.id);
+      // Replay a durable terminal adoption BEFORE loading/verifying the
+      // retained artifact. Retention may already have pruned the candidate,
+      // but the stored branch/PR result must stay replayable.
+      const durable = repo.readTrialAdoption(session.id, proposal.id);
+      if (durable !== null && durable.status === "done") {
+        return c.json(durable, 200);
+      }
       const report = repo.readTrialWorkerReportByProposal(
         session.id,
         proposal.id,
@@ -5638,6 +5679,8 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
     } catch (error) {
       return mapDomainError(c, error);
+    } finally {
+      endAdoption();
     }
   });
 

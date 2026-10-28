@@ -265,6 +265,56 @@ describe("executeTrialAdoption", () => {
     writeFileSync(join(checkout, ".git", "info", "exclude"), "");
   });
 
+  it("commits candidate bytes even when a clean filter rewrites content", async () => {
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/11\\n'\n",
+      { mode: 0o755 },
+    );
+    // Worktree-local attributes: every .txt file goes through a clean filter
+    // that would rewrite the staged bytes if `git add` were used.
+    writeFileSync(
+      join(checkout, ".git", "info", "attributes"),
+      "*.txt filter=rewrite\n",
+    );
+    git(checkout, "config", "filter.rewrite.clean", "tr a-z A-Z");
+    const probe = join(root, "filter-probe.txt");
+    writeFileSync(probe, CANDIDATE_BYTES);
+    try {
+      const filtered = git(
+        checkout,
+        "hash-object",
+        "--path=app.txt",
+        probe,
+      ).trim();
+      const raw = git(checkout, "hash-object", "--no-filters", probe).trim();
+      expect(filtered).not.toBe(raw);
+      const executionId = "12121212-3434-4545-8565-676767676767";
+      const result = await executeTrialAdoption({
+        config: config(),
+        executionId,
+        artifactSha256: ARTIFACT_SHA,
+        objective: "filter proof",
+        files: files(),
+      });
+      const branch = `trial/${executionId.slice(0, 8)}`;
+      expect(result.branch).toBe(branch);
+      // Bypassing filters means the committed blob is the reviewed byte
+      // sequence, not the clean-filter output.
+      expect(git(remote, "show", `${branch}:${BASE_FILE}`)).toBe("candidate\n");
+      expect(git(remote, "show", `${branch}:new.txt`)).toBe("new\n");
+      expect(() => git(remote, "show", `${branch}:${DELETE_FILE}`)).toThrow();
+    } finally {
+      rmSync(probe, { force: true });
+      rmSync(join(checkout, ".git", "info", "attributes"), { force: true });
+      try {
+        git(checkout, "config", "--unset", "filter.rewrite.clean");
+      } catch {
+        // Already absent.
+      }
+    }
+  });
+
   it("resumes PR creation after a successful push without re-pushing", async () => {
     const executionId = "55555555-3333-4333-8333-333333333333";
     writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });

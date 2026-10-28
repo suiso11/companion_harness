@@ -9,7 +9,14 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1308,6 +1315,89 @@ describe("trial adoption HTTP surface", () => {
         errorCode: null,
       });
     } finally {
+      fixture.close();
+    }
+  });
+
+  it("replays a done adoption after retention pruned the artifact", async () => {
+    const fixture = await makeApp(true, adoptionCfg());
+    try {
+      const { base, proposalId, executionId, artifactSha } =
+        await prepareAdoptable(fixture, "ad3");
+      const key = randomUUID();
+      const first = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        key,
+      );
+      expect(first.status).toBe(201);
+      // Retention is pruned after done: the durable adoption row must still
+      // replay without loading or verifying the now-missing artifact.
+      rmSync(join(root, "state", "runs", executionId), {
+        recursive: true,
+        force: true,
+      });
+      const replay = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        key,
+      );
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual(first.body);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("drains a started adoption before the DB can close", async () => {
+    const fixture = await makeApp(true, adoptionCfg());
+    const marker = join(root, "slow-gh-started");
+    try {
+      const { base, proposalId, artifactSha } = await prepareAdoptable(
+        fixture,
+        "ad4",
+      );
+      writeFileSync(
+        join(bin, "gh"),
+        `#!/bin/sh\ntouch '${marker}'\nsleep 0.5\nprintf 'https://github.com/example/repo/pull/42\\n'\n`,
+        { mode: 0o755 },
+      );
+      const pending = post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        randomUUID(),
+      );
+      const deadline = Date.now() + 5000;
+      while (!existsSync(marker)) {
+        if (Date.now() > deadline) throw new Error("adoption never started");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      let drained = false;
+      const drain = fixture.controls.drainTrialAdoptions().then(() => {
+        drained = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The push/PR is still in flight, so drain must not resolve yet.
+      expect(drained).toBe(false);
+      const adopted = await pending;
+      expect(adopted.status).toBe(201);
+      await drain;
+      expect(drained).toBe(true);
+      // The handler's DB finish happened before drain returned.
+      const detail = await get(fixture.app, `${base}/${proposalId}`);
+      expect(
+        (detail.body as { adoption: { status: string } }).adoption.status,
+      ).toBe("done");
+    } finally {
+      rmSync(marker, { force: true });
+      writeFileSync(
+        join(bin, "gh"),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${ghCalls}'\nprintf 'https://github.com/example/repo/pull/42\\n'\n`,
+        { mode: 0o755 },
+      );
       fixture.close();
     }
   });

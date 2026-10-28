@@ -373,17 +373,74 @@ export async function executeTrialAdoption(
       }
 
     if (!resumed) {
-      // Stage exactly the verified paths with ignore overrides, then confirm
-      // the staged tree matches: an ignored candidate must never be dropped.
+      // Stage exactly the verified bytes. `git add` would let clean/smudge/eol
+      // filters rewrite content on the way into the index, so write each blob
+      // with filters disabled and update the index directly. Ignore rules are
+      // bypassed too: an ignored candidate must never be dropped.
       const verifiedPaths = input.files.map((file) => file.path);
-      const added2 = await git(worktree, [
-        "add",
-        "--all",
-        "--force",
-        "--",
-        ...verifiedPaths,
-      ]);
-      if (added2.code !== 0) throw new TrialAdoptionError("git_failed");
+      for (const file of input.files) {
+        const segments = safeRelativePath(file.path);
+        const target = join(worktree, ...segments);
+        if (file.kind === "delete") {
+          const removed = await git(worktree, [
+            "update-index",
+            "--remove",
+            "--",
+            file.path,
+          ]);
+          if (removed.code !== 0) throw new TrialAdoptionError("git_failed");
+          continue;
+        }
+        const candidateBytes = file.candidateBytes;
+        if (candidateBytes === null) {
+          throw new TrialAdoptionError("not_verified");
+        }
+        // Re-read the materialized file: filters must never see a different
+        // byte sequence than the one the human reviewed.
+        if (sha256(readFileSync(target)) !== sha256(candidateBytes)) {
+          throw new TrialAdoptionError("git_failed");
+        }
+        const baseMode =
+          file.kind === "modify" ? statSync(target).mode & 0o777 : 0o644;
+        const mode = (baseMode & 0o111) === 0 ? "100644" : "100755";
+        const hashed = await git(worktree, [
+          "hash-object",
+          "-w",
+          "--no-filters",
+          "--",
+          file.path,
+        ]);
+        const oid = hashed.stdout.trim();
+        if (hashed.code !== 0 || !/^[0-9a-f]{40,64}$/.test(oid)) {
+          throw new TrialAdoptionError("git_failed");
+        }
+        const updated = await git(worktree, [
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `${mode},${oid},${file.path}`,
+        ]);
+        if (updated.code !== 0) throw new TrialAdoptionError("git_failed");
+        // Prove the index points at the blob we just hashed with filters off.
+        const stagedEntry = await git(worktree, [
+          "ls-files",
+          "--stage",
+          "--",
+          file.path,
+        ]);
+        const entry = /^([0-7]{6}) ([0-9a-f]{40,64}) 0\t/.exec(
+          stagedEntry.stdout,
+        );
+        if (
+          stagedEntry.code !== 0 ||
+          entry === null ||
+          entry[1] !== mode ||
+          entry[2] !== oid
+        ) {
+          throw new TrialAdoptionError("git_failed");
+        }
+      }
+      // Confirm the staged path set matches exactly (deletes included).
       const staged = await git(worktree, [
         "diff",
         "--cached",
