@@ -194,6 +194,26 @@ describe("loadTrialCandidate", () => {
     expect(() => load(fixture)).toThrow(/base_mismatch/);
   });
 
+  it("reviews a deletion-only artifact with no retained candidate tree", () => {
+    const fixture = makeFixture({ kind: "delete" });
+    roots.push(fixture.root);
+    rmSync(join(fixture.root, "state", "runs", EXECUTION_ID, "candidate"), {
+      recursive: true,
+      force: true,
+    });
+    const view = load(fixture);
+    expect(view.changes[0]?.kind).toBe("delete");
+    expect(view.diff).toContain("-one");
+  });
+
+  it("truncates by UTF-8 bytes, not UTF-16 length", () => {
+    const fixture = makeFixture({ candidate: `${"あ".repeat(30_000)}\n` });
+    roots.push(fixture.root);
+    const view = load(fixture);
+    expect(view.truncated).toBe(true);
+    expect(Buffer.byteLength(view.diff, "utf8")).toBeLessThanOrEqual(64 * 1024);
+  });
+
   it("fails closed when the frozen snapshot base file is missing", () => {
     const fixture = makeFixture();
     roots.push(fixture.root);

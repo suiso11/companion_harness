@@ -337,16 +337,42 @@ function unifiedDiff(
     });
     const result = spawnSync(
       "git",
-      ["diff", "--no-index", "--no-color", "--unified=3", aPath, bPath],
+      [
+        "-c",
+        "diff.external=",
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--unified=3",
+        aPath,
+        bPath,
+      ],
       {
         encoding: "utf8",
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: TRIAL_DIFF_MAX_BYTES * 4,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: tmpdir(),
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
     );
-    let text = typeof result.stdout === "string" ? result.stdout : "";
+    // `git diff --no-index` exits 1 when the files differ. Anything else means
+    // no trustworthy rendering was produced; fail closed instead of returning
+    // an empty diff.
+    if (
+      result.error !== undefined ||
+      (result.status !== 0 && result.status !== 1) ||
+      typeof result.stdout !== "string"
+    ) {
+      throw new TrialCandidateError("candidate_unavailable");
+    }
+    let text = result.stdout;
     text = text.replaceAll(aPath, `/${path}`).replaceAll(bPath, `/${path}`);
-    if (text.length > maxBytes) {
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
       const buf = Buffer.from(text, "utf8").subarray(0, maxBytes);
       let end = buf.length;
       while (end > 0 && ((buf[end - 1] ?? 0) & 0xc0) === 0x80) end -= 1;
@@ -413,10 +439,13 @@ export function loadTrialCandidate(
     resolve(input.trial.sourceRepoPath),
     "base_mismatch",
   );
-  const candidateRoot = realDirectory(
-    join(runDir, "candidate"),
-    "candidate_unavailable",
-  );
+  // Deletion-only artifacts retain no candidate tree; the bridge never creates
+  // `candidate` when every entry is a deletion.
+  const candidateRoot = artifact.changes.some(
+    (change) => change.kind !== "delete",
+  )
+    ? realDirectory(join(runDir, "candidate"), "candidate_unavailable")
+    : null;
 
   const changes: TrialCandidateChangeView[] = [];
   const parts: string[] = [];
@@ -440,6 +469,9 @@ export function loadTrialCandidate(
     }
     let candidate: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     if (change.kind !== "delete") {
+      if (candidateRoot === null) {
+        throw new TrialCandidateError("candidate_unavailable");
+      }
       const bytes = readBeneath(
         candidateRoot,
         change.path,
@@ -457,10 +489,12 @@ export function loadTrialCandidate(
       path: change.path,
       kind: change.kind,
       size: change.size,
+      // Compare executable status, not the confinement-normalized private
+      // copy mode (0644 -> 0600), which is not a deliverable mode change.
       modeChanged:
         change.baseMode !== null &&
         change.candidateMode !== null &&
-        change.baseMode !== change.candidateMode,
+        (change.baseMode & 0o111) !== (change.candidateMode & 0o111),
     });
     if (remaining <= 0) {
       truncated = true;
