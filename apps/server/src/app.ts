@@ -5534,13 +5534,6 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     const endAdoption = controls.beginTrialAdoption();
     try {
       const found = repo.readTrial(session.id, proposal.id);
-      // Replay a durable terminal adoption BEFORE loading/verifying the
-      // retained artifact. Retention may already have pruned the candidate,
-      // but the stored branch/PR result must stay replayable.
-      const durable = repo.readTrialAdoption(session.id, proposal.id);
-      if (durable !== null && durable.status === "done") {
-        return c.json(durable, 200);
-      }
       const report = repo.readTrialWorkerReportByProposal(
         session.id,
         proposal.id,
@@ -5560,6 +5553,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
       if (report.artifact.sha256 !== body.artifactSha256) {
         return adoptionError("artifact_mismatch");
+      }
+      // Replay a durable terminal adoption BEFORE requiring the retained
+      // candidate files: retention may already have pruned them, but the
+      // stored branch/PR result must stay replayable.
+      const durable = repo.readTrialAdoption(session.id, proposal.id);
+      if (durable !== null && durable.status === "done") {
+        return c.json(durable, 200);
       }
       const executionId = repo.readTrialExecutionIdByProposal(
         session.id,
