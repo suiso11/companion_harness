@@ -1176,6 +1176,71 @@ posixDescribe("sealed pi-orch bridge", { timeout: 30_000 }, () => {
     expect(result.evidence.artifact).toBeDefined();
   });
 
+  it("accepts a guest that recovered from a failed tool call", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          { name: "grep", args: { path: "src" }, result: "ok" },
+          { name: "edit", args: { path: "src/app.ts" }, result: "error" },
+          { name: "edit", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    // A recovered failure is normal agent behavior and is not authority; the
+    // host checks plus revalidated artifact still verify the run.
+    expect(result.status).toBe("done");
+    expect(result.verified).toBe(true);
+    expect(result.evidence.artifact).toBeDefined();
+    expect(result.report.findings.join("\n")).toContain(
+      "guest recovered from 1 failed tool call(s) (unattested)",
+    );
+  });
+
+  it("downgrades a guest whose last tool call failed after a recovery", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          { name: "read", args: { path: "src/app.ts" }, result: "ok" },
+          { name: "edit", args: { path: "src/app.ts" }, result: "error" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    // A trailing unrecovered failure is still a reliability downgrade.
+    expect(result.status).toBe("error");
+    expect(result.verified).toBe(false);
+    expect(result.evidence.artifact).toBeUndefined();
+    expect(result.report.unresolved).toContain(
+      "blocked: guest execution did not complete reliably (guest-reported, unattested)",
+    );
+  });
+
+  it("downgrades a guest with a pending tool call before a success", async () => {
+    const fixture = await makeFixture({
+      executorBody: guestReportBody(undefined, "", undefined, {
+        tools: [
+          { name: "edit", args: { path: "src/app.ts" }, result: "pending" },
+          { name: "read", args: { path: "src/app.ts" }, result: "ok" },
+        ],
+      }),
+      scratchPaths: [".companion-observation"],
+    });
+    const run = await runBridge(fixture, makeRequest(fixture));
+    expect(run.status).toBe(0);
+    const result = resultOf(run);
+    // Pending means missing completion evidence, not a recovered failure.
+    expect(result.status).toBe("error");
+    expect(result.verified).toBe(false);
+    expect(result.evidence.artifact).toBeUndefined();
+  });
+
   it("requires at least one observed tool call for real-pi execution", async () => {
     const fixture = await makeFixture({
       executorBody: guestReportBody(undefined, "", undefined, { tools: [] }),
