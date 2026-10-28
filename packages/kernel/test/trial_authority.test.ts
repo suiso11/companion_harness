@@ -922,3 +922,96 @@ describe("trial authority", () => {
     }
   });
 });
+
+describe("trial adoption crash recovery", () => {
+  async function adoptable() {
+    const made = await makeRepo();
+    const { task } = goalTask(made.repo, made.sessionId);
+    const st = made.repo.stageTrial(made.sessionId, stageInput(task.id), {
+      key: randomUUID(),
+      now: NOW + 4,
+      profile: profile(),
+      workspaceAlias: "ws",
+    });
+    const ap = made.repo.approveTrial(made.sessionId, st.body.id, {
+      key: randomUUID(),
+      now: NOW + 5,
+      profile: profile(),
+      workspaceAlias: "ws",
+    });
+    return {
+      ...made,
+      proposalId: st.body.id,
+      executionId: (ap.body as { executionId: string }).executionId,
+    };
+  }
+
+  it("settles a pending row older than 15 minutes on read and allows a retry", async () => {
+    const { handle, repo, sessionId, proposalId, executionId } =
+      await adoptable();
+    try {
+      const claim = repo.beginTrialAdoption(
+        sessionId,
+        proposalId,
+        executionId,
+        "a".repeat(64),
+        NOW + 10,
+      );
+      expect(claim?.state).toBe("started");
+      // Just inside the window: still a live claim, not an interruption.
+      expect(
+        repo.readTrialAdoption(
+          sessionId,
+          proposalId,
+          NOW + 10 + 15 * 60_000 - 1,
+        )?.status,
+      ).toBe("pending");
+      const stale = repo.readTrialAdoption(
+        sessionId,
+        proposalId,
+        NOW + 10 + 15 * 60_000,
+      );
+      expect(stale).toEqual({
+        status: "failed",
+        branch: null,
+        prUrl: null,
+        errorCode: "interrupted",
+      });
+      const retry = repo.beginTrialAdoption(
+        sessionId,
+        proposalId,
+        executionId,
+        "b".repeat(64),
+        NOW + 10 + 15 * 60_000 + 1,
+      );
+      expect(retry?.state).toBe("started");
+      expect(retry?.adoption.status).toBe("pending");
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("boot recovery settles every pending attempt of the previous process", async () => {
+    const { handle, repo, sessionId, proposalId, executionId } =
+      await adoptable();
+    try {
+      repo.beginTrialAdoption(
+        sessionId,
+        proposalId,
+        executionId,
+        "c".repeat(64),
+        NOW + 10,
+      );
+      // A fresh pending row is still orphaned at boot: this process owns none.
+      expect(repo.recoverInterruptedTrialAdoptions(NOW + 11)).toBe(1);
+      expect(repo.readTrialAdoption(sessionId, proposalId, NOW + 12)).toEqual({
+        status: "failed",
+        branch: null,
+        prUrl: null,
+        errorCode: "interrupted",
+      });
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
