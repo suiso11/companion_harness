@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createLearningStore,
+  formatLessonPromptBlock,
   type LearningCandidate,
   learningContentHash,
   RepositoryValidationError,
@@ -189,5 +190,33 @@ describe("learning store", () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe("approved lesson projection", () => {
+  it("labels every kind and only attributes user-confirmed lessons to the user", () => {
+    const snippet = (id: string, kind: string) => ({
+      id,
+      kind,
+      lesson: `${kind} lesson`,
+      evidence: `evidence for ${kind}`,
+      applicability: "when relevant",
+      provenance: `run=${id}`,
+    });
+    const block = formatLessonPromptBlock([
+      snippet("l1", "user_confirmed_feedback"),
+      snippet("l2", "observation"),
+      snippet("l3", "model_inference"),
+    ]);
+    // Each lesson keeps its kind label.
+    expect(block).toContain("[user_confirmed_feedback]");
+    expect(block).toContain("[observation]");
+    expect(block).toContain("[model_inference]");
+    // The header is explicit that only user-confirmed lessons are attributed
+    // to the user; all other kinds are unverified model observations.
+    expect(block).toContain(
+      "Only lessons labelled [user_confirmed_feedback] reflect what the user actually said",
+    );
+    expect(block).toContain("unverified model observation");
   });
 });
