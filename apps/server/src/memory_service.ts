@@ -4113,6 +4113,7 @@ export function createMemoryService(
   async function listStatsPage(
     status: string,
     until: string | null,
+    since: string | null = null,
   ): Promise<{ rows: StatsListRow[]; limit: number }> {
     for (;;) {
       const limit =
@@ -4126,6 +4127,7 @@ export function createMemoryService(
             scope,
             status,
             limit,
+            ...(since !== null ? { since } : {}),
             ...(until !== null ? { until } : {}),
           },
           undefined,
@@ -4161,18 +4163,45 @@ export function createMemoryService(
     for (;;) {
       throwIfStagingCancelled();
       const page = await listStatsPage(status, until);
-      rows.push(...page.rows);
       if (page.rows.length < page.limit) {
+        rows.push(...page.rows);
         return { rows, truncated: false };
       }
       if (rows.length >= rowCap) {
+        // A full page means older rows may remain; the cap already holds.
         return { rows, truncated: true };
       }
       const oldest = page.rows[page.rows.length - 1];
       if (oldest === undefined) {
         return { rows, truncated: false };
       }
-      until = new Date(Date.parse(oldest.createdAt) - 1).toISOString();
+      // Production writes several records with the SAME createdAt (one
+      // extraction event -> multiple memories). A full page can end inside
+      // such a group, so counting only the rows newer than the oldest
+      // timestamp and re-reading the whole group avoids skipping the rest
+      // of it on the next (strictly older) `until` page.
+      const t = oldest.createdAt;
+      const tMs = Date.parse(t);
+      for (const row of page.rows) {
+        if (Date.parse(row.createdAt) > tMs) rows.push(row);
+      }
+      if (rows.length >= rowCap) {
+        return { rows, truncated: true };
+      }
+      // `since` is inclusive and `until` exclusive in remind, so this
+      // fetches exactly the t-group. If the group itself fills a page there
+      // is no timestamp cursor to page within it: count what came back and
+      // mark the snapshot truncated rather than silently undercount.
+      const group = await listStatsPage(
+        status,
+        new Date(tMs + 1).toISOString(),
+        new Date(tMs).toISOString(),
+      );
+      rows.push(...group.rows);
+      if (group.rows.length >= group.limit || rows.length >= rowCap) {
+        return { rows, truncated: true };
+      }
+      until = new Date(tMs).toISOString();
     }
   }
 

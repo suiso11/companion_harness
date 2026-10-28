@@ -44,7 +44,12 @@ interface RecordRow {
 
 interface CliState {
   readonly rows: RecordRow[];
-  readonly calls: Array<{ status: string; limit: number; until?: string }>;
+  readonly calls: Array<{
+    status: string;
+    limit: number;
+    since?: string;
+    until?: string;
+  }>;
   readonly rejectOver?: number;
   delay?: Promise<void>;
 }
@@ -100,10 +105,12 @@ function makeCli(state: CliState): CliCall {
     }
     const limit = Number(params.limit);
     const status = String(params.status);
+    const since = typeof params.since === "string" ? params.since : undefined;
     const until = typeof params.until === "string" ? params.until : undefined;
     state.calls.push({
       status,
       limit,
+      ...(since !== undefined ? { since } : {}),
       ...(until !== undefined ? { until } : {}),
     });
     if (state.rejectOver !== undefined && limit > state.rejectOver) {
@@ -119,6 +126,7 @@ function makeCli(state: CliState): CliCall {
     }
     const items = state.rows
       .filter((row) => row.status === status)
+      .filter((row) => since === undefined || row.createdAt >= since)
       .filter((row) => until === undefined || row.createdAt < until)
       .sort((left, right) =>
         left.createdAt === right.createdAt
@@ -275,6 +283,79 @@ describe("memory content statistics", () => {
       clock = T0 + MEMORY_STATS_CACHE_TTL_MS;
       await service.getMemoryStats();
       expect(state.calls).toHaveLength(8);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("counts a same-timestamp group that straddles a page boundary", async () => {
+    const fixture = await openRepo();
+    try {
+      // 90 unique newer rows + 20 rows sharing one createdAt. The first
+      // 100-row page ends after only 10 rows of the shared group.
+      const groupAt = at(1_000);
+      const rows: RecordRow[] = [];
+      for (let index = 0; index < 90; index += 1) {
+        rows.push({
+          id: `newer-${index}`,
+          kind: "user_fact",
+          status: "active",
+          createdAt: at(2_000 + index),
+        });
+      }
+      for (let index = 0; index < 20; index += 1) {
+        rows.push({
+          id: `group-${index}`,
+          kind: "user_fact",
+          status: "active",
+          createdAt: groupAt,
+        });
+      }
+      const state: CliState = { rows, calls: [] };
+      const service = makeService(fixture.repo, makeCli(state), () => T0);
+      const stats = await service.getMemoryStats();
+      expect(stats.byStatus.active).toBe(110);
+      expect(stats.byKind.user_fact).toBe(110);
+      expect(stats.truncated).toBe(false);
+      // The group is re-read inclusively with an exclusive +1ms bound.
+      expect(state.calls).toContainEqual({
+        status: "active",
+        limit: 100,
+        since: groupAt,
+        until: at(1_001),
+      });
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("marks the snapshot truncated when a same-timestamp group fills a page", async () => {
+    const fixture = await openRepo();
+    try {
+      const groupAt = at(1_000);
+      const rows: RecordRow[] = [];
+      for (let index = 0; index < 150; index += 1) {
+        rows.push({
+          id: `group-${index}`,
+          kind: "user_fact",
+          status: "active",
+          createdAt: groupAt,
+        });
+      }
+      const state: CliState = { rows, calls: [] };
+      const service = makeService(fixture.repo, makeCli(state), () => T0);
+      const stats = await service.getMemoryStats();
+      // No timestamp cursor exists inside the group, so count the first
+      // page and never claim the remaining 50 were counted.
+      expect(stats.byStatus.active).toBe(100);
+      expect(stats.byKind.user_fact).toBe(100);
+      expect(stats.truncated).toBe(true);
+      expect(state.calls).toContainEqual({
+        status: "active",
+        limit: 100,
+        since: groupAt,
+        until: at(1_001),
+      });
     } finally {
       fixture.close();
     }
