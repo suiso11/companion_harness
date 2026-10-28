@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { TrialAdoptionConfig } from "./config.js";
 
 export type TrialAdoptionErrorCode =
@@ -171,6 +171,49 @@ function safeRelativePath(path: string): string[] {
   return segments;
 }
 
+/** Reject symlinked ancestors so a base-tree symlink can never redirect a
+ * mutation outside the temporary worktree. Missing directories are created
+ * one level at a time, re-checking each with lstat. */
+function prepareParentDirectories(
+  worktree: string,
+  segments: readonly string[],
+): void {
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const dir = join(worktree, ...segments.slice(0, i + 1));
+    const stat = lstatSync(dir, { throwIfNoEntry: false });
+    if (stat === undefined) {
+      try {
+        mkdirSync(dir, { mode: 0o755 });
+      } catch {
+        throw new TrialAdoptionError("base_changed");
+      }
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TrialAdoptionError("base_changed");
+    }
+  }
+}
+
+/** Resolve a GitHub remote URL to the owner/repo slug gh needs, so PR
+ * creation targets the configured adoption remote rather than gh's default. */
+function parseGithubRepo(url: string): string | null {
+  const normalized = url.trim().replace(/\/+$/, "");
+  const match =
+    /^(?:git@|ssh:\/\/git@|https:\/\/)([^/:]+)[/:]([^/]+)\/(.+?)(?:\.git)?$/.exec(
+      normalized,
+    );
+  if (match === null) return null;
+  const host = match[1];
+  const owner = match[2];
+  const repo = match[3];
+  if (host === undefined || owner === undefined || repo === undefined) {
+    return null;
+  }
+  if (host.toLowerCase() !== "github.com") return null;
+  return `${owner}/${repo}`;
+}
+
 function escapeRefComponent(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "-");
 }
@@ -257,80 +300,149 @@ export async function executeTrialAdoption(
       `refs/heads/${branch}`,
     ]);
     if (remoteExists.code !== 0) throw new TrialAdoptionError("git_failed");
-    if (localExists.code === 0 || remoteExists.stdout.trim().length > 0) {
-      throw new TrialAdoptionError("branch_exists");
-    }
 
-    for (const file of input.files) {
-      const segments = safeRelativePath(file.path);
-      const target = join(worktree, ...segments);
-      if (file.kind === "create") {
-        const existing = lstatSync(target, { throwIfNoEntry: false });
-        if (existing !== undefined)
-          throw new TrialAdoptionError("base_changed");
-        mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
-        writeFileSync(target, file.candidateBytes ?? Buffer.alloc(0), {
-          mode: 0o644,
-        });
-        chmodSync(target, 0o644);
-        continue;
-      }
-      const stat = lstatSync(target, { throwIfNoEntry: false });
-      if (stat === undefined || !stat.isFile()) {
-        throw new TrialAdoptionError("base_changed");
-      }
-      const baseBytes = readFileSync(target);
-      if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
-        throw new TrialAdoptionError("base_changed");
-      }
-      if (file.kind === "modify") {
-        if (file.candidateBytes === null) {
-          throw new TrialAdoptionError("not_verified");
-        }
-        const baseMode = statSync(target).mode & 0o777;
-        writeFileSync(target, file.candidateBytes);
-        // Preserve the base mode exactly; candidates never alter modes.
-        chmodSync(target, baseMode);
-      } else {
-        rmSync(target);
-      }
-    }
-
-    const added2 = await git(worktree, ["add", "-A"]);
-    if (added2.code !== 0) throw new TrialAdoptionError("git_failed");
-    const message = `trial: ${commitSubject(input.objective)}\n\nTrial-Execution: ${input.executionId}\nArtifact-Sha256: ${input.artifactSha256}`;
-    const committed = await git(worktree, [
-      "-c",
-      `user.name=${COMMIT_NAME}`,
-      "-c",
-      `user.email=${COMMIT_EMAIL}`,
-      "commit",
-      "--no-gpg-sign",
-      "-m",
-      message,
-    ]);
-    if (committed.code !== 0) throw new TrialAdoptionError("git_failed");
-
-    const pushed = await git(
-      worktree,
-      ["push", config.remote, `HEAD:refs/heads/${branch}`],
-      PUSH_TIMEOUT_MS,
-    );
-    if (pushed.code !== 0) {
-      // A rejected push is nearly always a raced branch creation.
-      const exists = await git(config.repoPath, [
-        "ls-remote",
-        "--heads",
+    // Resume is allowed only when the existing branch is provably the commit
+    // this exact execution pushed (same execution id and artifact digest), so
+    // a failure after the push can retry PR creation without re-pushing.
+    let existingRef: string | null = null;
+    if (remoteExists.stdout.trim().length > 0) {
+      const fetchedBranch = await git(worktree, [
+        "fetch",
+        "--no-tags",
         config.remote,
         `refs/heads/${branch}`,
       ]);
-      throw new TrialAdoptionError(
-        exists.code === 0 && exists.stdout.trim().length > 0
-          ? "branch_exists"
-          : "git_failed",
-      );
+      if (fetchedBranch.code !== 0) throw new TrialAdoptionError("git_failed");
+      existingRef = "FETCH_HEAD";
+    } else if (localExists.code === 0) {
+      existingRef = `refs/heads/${branch}`;
+    }
+    let resumed = false;
+    if (existingRef !== null) {
+      const log = await git(worktree, [
+        "log",
+        "-1",
+        "--format=%B",
+        existingRef,
+      ]);
+      const message = log.stdout;
+      if (
+        log.code !== 0 ||
+        !message.includes(`Trial-Execution: ${input.executionId}`) ||
+        !message.includes(`Artifact-Sha256: ${input.artifactSha256}`)
+      ) {
+        throw new TrialAdoptionError("branch_exists");
+      }
+      resumed = true;
     }
 
+    if (!resumed)
+      for (const file of input.files) {
+        const segments = safeRelativePath(file.path);
+        const target = join(worktree, ...segments);
+        prepareParentDirectories(worktree, segments);
+        if (file.kind === "create") {
+          const existing = lstatSync(target, { throwIfNoEntry: false });
+          if (existing !== undefined)
+            throw new TrialAdoptionError("base_changed");
+          writeFileSync(target, file.candidateBytes ?? Buffer.alloc(0), {
+            mode: 0o644,
+          });
+          chmodSync(target, 0o644);
+          continue;
+        }
+        const stat = lstatSync(target, { throwIfNoEntry: false });
+        if (stat === undefined || !stat.isFile()) {
+          throw new TrialAdoptionError("base_changed");
+        }
+        const baseBytes = readFileSync(target);
+        if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
+          throw new TrialAdoptionError("base_changed");
+        }
+        if (file.kind === "modify") {
+          if (file.candidateBytes === null) {
+            throw new TrialAdoptionError("not_verified");
+          }
+          const baseMode = statSync(target).mode & 0o777;
+          writeFileSync(target, file.candidateBytes);
+          // Preserve the base mode exactly; candidates never alter modes.
+          chmodSync(target, baseMode);
+        } else {
+          rmSync(target);
+        }
+      }
+
+    if (!resumed) {
+      // Stage exactly the verified paths with ignore overrides, then confirm
+      // the staged tree matches: an ignored candidate must never be dropped.
+      const verifiedPaths = input.files.map((file) => file.path);
+      const added2 = await git(worktree, [
+        "add",
+        "--all",
+        "--force",
+        "--",
+        ...verifiedPaths,
+      ]);
+      if (added2.code !== 0) throw new TrialAdoptionError("git_failed");
+      const staged = await git(worktree, [
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+      ]);
+      const stagedPaths = staged.stdout
+        .split("\0")
+        .filter((path) => path.length > 0)
+        .sort();
+      const expectedPaths = [...verifiedPaths].sort();
+      if (
+        staged.code !== 0 ||
+        stagedPaths.length !== expectedPaths.length ||
+        stagedPaths.some((path, index) => path !== expectedPaths[index])
+      ) {
+        throw new TrialAdoptionError("git_failed");
+      }
+      const message = `trial: ${commitSubject(input.objective)}\n\nTrial-Execution: ${input.executionId}\nArtifact-Sha256: ${input.artifactSha256}`;
+      const committed = await git(worktree, [
+        "-c",
+        `user.name=${COMMIT_NAME}`,
+        "-c",
+        `user.email=${COMMIT_EMAIL}`,
+        "commit",
+        "--no-gpg-sign",
+        "-m",
+        message,
+      ]);
+      if (committed.code !== 0) throw new TrialAdoptionError("git_failed");
+
+      const pushed = await git(
+        worktree,
+        ["push", config.remote, `HEAD:refs/heads/${branch}`],
+        PUSH_TIMEOUT_MS,
+      );
+      if (pushed.code !== 0) {
+        // A rejected push is nearly always a raced branch creation.
+        const exists = await git(config.repoPath, [
+          "ls-remote",
+          "--heads",
+          config.remote,
+          `refs/heads/${branch}`,
+        ]);
+        throw new TrialAdoptionError(
+          exists.code === 0 && exists.stdout.trim().length > 0
+            ? "branch_exists"
+            : "git_failed",
+        );
+      }
+    }
+
+    const remoteUrl = await git(config.repoPath, [
+      "remote",
+      "get-url",
+      config.remote,
+    ]);
+    const repoSlug =
+      remoteUrl.code === 0 ? parseGithubRepo(remoteUrl.stdout) : null;
     const title = `trial: ${commitSubject(input.objective)}`;
     const created = await run(
       "gh",
@@ -342,6 +454,7 @@ export async function executeTrialAdoption(
         baseBranch,
         "--head",
         branch,
+        ...(repoSlug === null ? [] : ["--repo", repoSlug]),
         "--title",
         title,
         "--body",

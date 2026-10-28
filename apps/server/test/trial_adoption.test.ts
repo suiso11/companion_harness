@@ -14,10 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  executeTrialAdoption,
-  TrialAdoptionError,
-} from "../src/trial_adoption.js";
+import { executeTrialAdoption } from "../src/trial_adoption.js";
 
 const EXECUTION_ID = "12345678-1234-4234-8234-123456789012";
 const ARTIFACT_SHA = "a".repeat(64);
@@ -170,17 +167,18 @@ describe("executeTrialAdoption", () => {
     expect(git(checkout, "worktree", "list", "--porcelain")).toBe(before);
   });
 
-  it("refuses an existing branch without pushing again", async () => {
-    git(checkout, "branch", `trial/${EXECUTION_ID.slice(0, 8)}`);
+  it("refuses a foreign existing branch without pushing again", async () => {
+    const executionId = "66666666-4444-4444-8444-444444444444";
+    git(checkout, "branch", `trial/${executionId.slice(0, 8)}`);
     await expect(
       executeTrialAdoption({
         config: config(),
-        executionId: EXECUTION_ID,
+        executionId,
         artifactSha256: ARTIFACT_SHA,
         objective: "existing",
         files: files(),
       }),
-    ).rejects.toBeInstanceOf(TrialAdoptionError);
+    ).rejects.toMatchObject({ code: "branch_exists" });
     expect(
       git(checkout, "worktree", "list", "--porcelain")
         .split("\n")
@@ -205,5 +203,98 @@ describe("executeTrialAdoption", () => {
         .split("\n")
         .filter((line) => line.startsWith("worktree ")),
     ).toEqual([`worktree ${checkout}`]);
+  });
+
+  it("rejects symlinked parent directories instead of writing outside", async () => {
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    execFileSync("ln", ["-s", outside, join(checkout, "linked")]);
+    git(checkout, "add", "-A");
+    git(checkout, "commit", "-m", "add symlink");
+    git(checkout, "push", "origin", "master");
+    await expect(
+      executeTrialAdoption({
+        config: config(),
+        executionId: "99999999-1111-4111-8111-111111111111",
+        artifactSha256: ARTIFACT_SHA,
+        objective: "escape",
+        files: [
+          {
+            path: "linked/new.txt",
+            kind: "create" as const,
+            baseSha256: null,
+            candidateBytes: Buffer.from("escaped\n"),
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "base_changed" });
+    expect(existsSync(join(outside, "new.txt"))).toBe(false);
+    git(checkout, "rm", "--cached", "linked");
+    git(checkout, "commit", "-m", "drop symlink");
+    git(checkout, "push", "origin", "master");
+    execFileSync("rm", ["-f", join(checkout, "linked")]);
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("commits ignored candidate files instead of dropping them", async () => {
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/8\\n'\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(join(checkout, ".git", "info", "exclude"), "ignored.txt\n");
+    const result = await executeTrialAdoption({
+      config: config(),
+      executionId: "77777777-2222-4222-8222-222222222222",
+      artifactSha256: ARTIFACT_SHA,
+      objective: "ignored",
+      files: [
+        {
+          path: "ignored.txt",
+          kind: "create" as const,
+          baseSha256: null,
+          candidateBytes: Buffer.from("kept\n"),
+        },
+      ],
+    });
+    const branch = "trial/77777777";
+    expect(result.branch).toBe(branch);
+    expect(
+      git(checkout, "show", `refs/remotes/origin/${branch}:ignored.txt`),
+    ).toBe("kept\n");
+    writeFileSync(join(checkout, ".git", "info", "exclude"), "");
+  });
+
+  it("resumes PR creation after a successful push without re-pushing", async () => {
+    const executionId = "55555555-3333-4333-8333-333333333333";
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await expect(
+      executeTrialAdoption({
+        config: config(),
+        executionId,
+        artifactSha256: ARTIFACT_SHA,
+        objective: "resume",
+        files: files(),
+      }),
+    ).rejects.toMatchObject({ code: "gh_failed" });
+    const branch = `trial/${executionId.slice(0, 8)}`;
+    const pushedBefore = git(remote, "rev-parse", `refs/heads/${branch}`);
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/9\\n'\n",
+      { mode: 0o755 },
+    );
+    const resumed = await executeTrialAdoption({
+      config: config(),
+      executionId,
+      artifactSha256: ARTIFACT_SHA,
+      objective: "resume",
+      files: files(),
+    });
+    expect(resumed).toEqual({
+      branch,
+      prUrl: "https://github.com/example/repo/pull/9",
+    });
+    expect(git(remote, "rev-parse", `refs/heads/${branch}`)).toBe(pushedBefore);
   });
 });

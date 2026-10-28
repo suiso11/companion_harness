@@ -475,7 +475,9 @@ async function refreshList(): Promise<void> {
     staged > 0
       ? "承認待ちの試行の提案があります"
       : "承認待ちの試行の提案はありません";
-  if (selected !== null) await select(selected);
+  // Re-selecting the detail must not wipe an adoption failure message that
+  // exists only in adoptionStatus (e.g. adoption_disabled: no durable row).
+  if (selected !== null) await select(selected, true);
 }
 
 /** Load the form facts (profile + actionable tasks) for this session. */
@@ -616,7 +618,10 @@ async function stageTrial(): Promise<void> {
   }
 }
 
-async function select(proposalId: string): Promise<void> {
+async function select(
+  proposalId: string,
+  preserveAdoptionStatus = false,
+): Promise<void> {
   const sessionId = getSessionId();
   if (sessionId === null) return;
   seq += 1;
@@ -631,7 +636,7 @@ async function select(proposalId: string): Promise<void> {
   const report = readTrialReport(fetched.body);
   detailReport = report;
   adoption = readTrialAdoption(fetched.body);
-  adoptionStatus = "";
+  if (!preserveAdoptionStatus) adoptionStatus = "";
   selected = proposal.id;
   candidateView = null;
   candidateError = null;
