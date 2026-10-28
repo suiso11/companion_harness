@@ -206,6 +206,19 @@ describe("loadTrialCandidate", () => {
     expect(view.diff).toContain("-one");
   });
 
+  it("truncates diffs larger than the old spawn buffer", () => {
+    // ~600 KiB of unified diff output: more than the previous 256 KiB
+    // maxBuffer, which made a valid large change fail as unavailable.
+    const fixture = makeFixture({
+      base: "x\n".repeat(150_000),
+      candidate: "y\n".repeat(150_000),
+    });
+    roots.push(fixture.root);
+    const view = load(fixture);
+    expect(view.truncated).toBe(true);
+    expect(Buffer.byteLength(view.diff, "utf8")).toBeLessThanOrEqual(64 * 1024);
+  });
+
   it("truncates by UTF-8 bytes, not UTF-16 length", () => {
     const fixture = makeFixture({ candidate: `${"あ".repeat(30_000)}\n` });
     roots.push(fixture.root);

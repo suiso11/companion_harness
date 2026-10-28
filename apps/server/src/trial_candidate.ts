@@ -351,7 +351,11 @@ function unifiedDiff(
       {
         encoding: "utf8",
         timeout: GIT_TIMEOUT_MS,
-        maxBuffer: TRIAL_DIFF_MAX_BYTES * 4,
+        // Worst case (every line changed in a max-size file): base + candidate
+        // bytes plus one prefix byte per line on each side. Keep this above
+        // that bound so an oversized diff is truncated by the 64 KiB limit
+        // below instead of failing as `candidate_unavailable`.
+        maxBuffer: CANDIDATE_FILE_MAX_BYTES * 3 + 1024 * 1024,
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           HOME: tmpdir(),
