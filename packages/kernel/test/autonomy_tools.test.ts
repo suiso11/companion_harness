@@ -288,6 +288,91 @@ describe("autonomy readonly tools", () => {
     }
   });
 
+  it("filtered-empty lists report unfilteredTotal and availableScopes", async () => {
+    const { handle, repo, broker, sessionId } = await setup();
+    try {
+      const runId = newRunningRun(repo, sessionId, T0);
+      repo.createAutonomyPurpose(
+        sessionId,
+        goalBody("stabilize the trial feature", { scope: "default" }),
+        { key: randomUUID(), now: T0 + 10 },
+      );
+      repo.createAutonomyTask(
+        sessionId,
+        {
+          scope: "default",
+          title: "show trial failure reasons",
+          kind: "task",
+          speaker: "user",
+        },
+        { key: randomUUID(), now: T0 + 11 },
+      );
+      // A model-invented scope must not read as "no records exist".
+      const purposeEmpty = await broker.invoke(
+        runId,
+        "purpose.list",
+        { scope: "personal", limit: 10 },
+        CTX,
+      );
+      expect(purposeEmpty.result.actualOutcome).toBe("succeeded");
+      const purposeOut = purposeEmpty.modelFacing as {
+        items: unknown[];
+        hasMore: boolean;
+        appliedFilters: Record<string, unknown>;
+        unfilteredTotal?: number;
+        availableScopes?: string[];
+      };
+      expect(purposeOut.items).toEqual([]);
+      expect(purposeOut.hasMore).toBe(false);
+      expect(purposeOut.appliedFilters).toEqual({ scope: "personal" });
+      expect(purposeOut.unfilteredTotal).toBe(1);
+      expect(purposeOut.availableScopes).toEqual(["default"]);
+      // A wrong kind under the RIGHT scope is still explained.
+      const kindEmpty = await broker.invoke(
+        runId,
+        "purpose.list",
+        { scope: "default", kind: "preference", limit: 10 },
+        CTX,
+      );
+      const kindOut = kindEmpty.modelFacing as {
+        items: unknown[];
+        unfilteredTotal?: number;
+      };
+      expect(kindOut.items).toEqual([]);
+      expect(kindOut.unfilteredTotal).toBe(1);
+      // task.list mirrors the same contract.
+      const taskEmpty = await broker.invoke(
+        runId,
+        "task.list",
+        { scope: "personal", limit: 10 },
+        CTX,
+      );
+      const taskOut = taskEmpty.modelFacing as {
+        items: unknown[];
+        appliedFilters: Record<string, unknown>;
+        unfilteredTotal?: number;
+        availableScopes?: string[];
+      };
+      expect(taskOut.items).toEqual([]);
+      expect(taskOut.appliedFilters).toEqual({ scope: "personal" });
+      expect(taskOut.unfilteredTotal).toBe(1);
+      expect(taskOut.availableScopes).toEqual(["default"]);
+      // With no filters the summary fields stay absent (never noise).
+      const all = await broker.invoke(
+        runId,
+        "purpose.list",
+        { limit: 20 },
+        CTX,
+      );
+      const allOut = all.modelFacing as Record<string, unknown>;
+      expect(allOut.appliedFilters).toEqual({});
+      expect("unfilteredTotal" in allOut).toBe(false);
+      expect("availableScopes" in allOut).toBe(false);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("foreign sessions are unreachable and never leak", async () => {
     const { handle, repo, broker, sessionId, otherId } = await setup();
     try {

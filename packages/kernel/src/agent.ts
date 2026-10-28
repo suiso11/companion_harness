@@ -1393,7 +1393,13 @@ export const AGENT_UUID_PATTERN =
 export const AGENT_PURPOSE_LIST_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
-    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    scope: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 128,
+      description:
+        'exact scope name such as "default"; omit to include every scope',
+    }),
     status: Object.freeze({
       type: "string",
       enum: Object.freeze(["active", "superseded", "revoked", "achieved"]),
@@ -1435,7 +1441,13 @@ export const AGENT_PURPOSE_OPEN_PARAMETERS = Object.freeze({
 export const AGENT_TASK_LIST_PARAMETERS = Object.freeze({
   type: "object",
   properties: Object.freeze({
-    scope: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    scope: Object.freeze({
+      type: "string",
+      minLength: 1,
+      maxLength: 128,
+      description:
+        'exact scope name such as "default"; omit to include every scope',
+    }),
     status: Object.freeze({
       type: "string",
       enum: Object.freeze([
