@@ -51,6 +51,7 @@ import {
   formatZonedDateTime,
   isCanonicalIsoInstant,
   type KernelRepository,
+  type MemoryMaintenanceOp,
 } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import {
@@ -1308,6 +1309,64 @@ export function createMemoryService(
     }
   };
 
+  /** Fixed failure code for the activity table (never a raw CLI message). */
+  function maintenanceErrorCode(
+    code: string | null | undefined,
+    aborted = false,
+  ): string {
+    if (aborted) {
+      return "preempted";
+    }
+    switch (code) {
+      case "TIMEOUT":
+      case "cli_timeout":
+        return "timeout";
+      case "BAD_REQUEST":
+      case "cli_bad_request":
+        return "bad_request";
+      case "LIMIT_EXCEEDED":
+      case "cli_limit":
+        return "limit_exceeded";
+      case "STORE_UNAVAILABLE":
+        return "store_unavailable";
+      case "FORBIDDEN_SCOPE":
+        return "forbidden_scope";
+      case "NOT_FOUND":
+        return "not_found";
+      case "CONFLICT":
+        return "conflict";
+      default:
+        return "cli_failed";
+    }
+  }
+
+  /**
+   * Persist one maintenance pass for the read-only browser view. Counts are
+   * the SAME fixed numeric summaries already logged; a bookkeeping failure
+   * never affects memory work.
+   */
+  function recordMaintenanceRun(input: {
+    op: MemoryMaintenanceOp;
+    startedAt: number;
+    ok: boolean;
+    errorCode?: string | null;
+    counts?: Record<string, number>;
+  }): void {
+    try {
+      repo.insertMemoryMaintenanceRun({
+        op: input.op,
+        scope,
+        startedAt: input.startedAt,
+        finishedAt: now(),
+        ok: input.ok,
+        ...(input.ok ? {} : { errorCode: input.errorCode ?? "cli_failed" }),
+        counts: input.counts ?? {},
+      });
+    } catch {
+      log("warn", "memory.activity.record_failed");
+    }
+  }
+
   function armIdleTimer(): void {
     if (!started || stopped) {
       return;
@@ -1432,6 +1491,7 @@ export function createMemoryService(
     }
     const op = request.op;
     const params = request.params as Record<string, unknown>;
+    const isDistill = op === "maintain.distill";
     // The outbox row's stable key IS the CLI key (crash-replay stability).
     let rowKey: string;
     try {
@@ -1462,6 +1522,15 @@ export function createMemoryService(
       // Aborted by foreground preemption/shutdown: NOT a failure, NOT an
       // attempt worth counting twice — bounded backoff rearm, still pending.
       if (isAborted(signal)) {
+        if (isDistill) {
+          recordMaintenanceRun({
+            op: "maintain.distill",
+            startedAt,
+            ok: false,
+            errorCode: "preempted",
+            counts: {},
+          });
+        }
         try {
           // Atomic mirror path (consistent with every other drain outcome):
           // a non-terminal rearm touches no operation row, so answer-citation
@@ -1474,6 +1543,18 @@ export function createMemoryService(
           // Best effort.
         }
         return false;
+      }
+      if (isDistill) {
+        recordMaintenanceRun({
+          op: "maintain.distill",
+          startedAt,
+          ok: false,
+          errorCode:
+            error instanceof MemoryCliError
+              ? maintenanceErrorCode(error.cliCode)
+              : "cli_unavailable",
+          counts: {},
+        });
       }
       const failure =
         error instanceof MemoryCliError ? error.cliCode : "cli_unavailable";
@@ -1531,6 +1612,17 @@ export function createMemoryService(
         // the same stable key (remind dedups, no duplicate).
         return false;
       }
+      if (isDistill) {
+        recordMaintenanceRun({
+          op: "maintain.distill",
+          startedAt,
+          ok: true,
+          counts:
+            isRecord(envelope.data) && envelope.data.degraded === true
+              ? { degraded: 1 }
+              : {},
+        });
+      }
       log("info", "memory.job_acked", { durationMs });
       return true;
     }
@@ -1554,6 +1646,15 @@ export function createMemoryService(
       }
     } catch {
       // Best effort.
+    }
+    if (isDistill) {
+      recordMaintenanceRun({
+        op: "maintain.distill",
+        startedAt,
+        ok: false,
+        errorCode: maintenanceErrorCode(envelope.code),
+        counts: {},
+      });
     }
     log("warn", "memory.job_rejected", { durationMs });
     return !transient;
@@ -2367,17 +2468,41 @@ export function createMemoryService(
     const passActive = (): boolean =>
       started && !stopped && foregroundEpoch === epoch;
     if (!topicsUnsupported && gateway !== null) {
-      const pending = await idleMaintenanceCliCall("topic.pending", {
-        scope,
-        limit: MEMORY_TOPIC_BACKFILL_LIMIT,
-      });
-      if (!passActive()) {
-        return;
-      }
-      if (pending !== null && !pending.ok && pending.code === "BAD_REQUEST") {
-        topicsUnsupported = true;
-      } else if (pending?.ok) {
-        for (const item of parseTopicPendingItems(pending.data)) {
+      const startedAt = now();
+      const counts = {
+        pending: 0,
+        processed: 0,
+        assigned: 0,
+        skipped: 0,
+        failed: 0,
+        degraded: 0,
+      };
+      let attempted = false;
+      let errorCode: string | null = null;
+      let completed = false;
+      try {
+        const pending = await idleMaintenanceCliCall("topic.pending", {
+          scope,
+          limit: MEMORY_TOPIC_BACKFILL_LIMIT,
+        });
+        if (pending === null) {
+          errorCode = "cli_failed";
+          return;
+        }
+        attempted = true;
+        if (!passActive()) {
+          return;
+        }
+        if (!pending.ok) {
+          if (pending.code === "BAD_REQUEST") {
+            topicsUnsupported = true;
+          }
+          errorCode = maintenanceErrorCode(pending.code);
+          return;
+        }
+        const items = parseTopicPendingItems(pending.data);
+        counts.pending = items.length;
+        for (const item of items) {
           if (!passActive()) {
             return;
           }
@@ -2390,8 +2515,11 @@ export function createMemoryService(
               ? null
               : background.tryAcquire(BACKGROUND_OWNER_MEMORY_IDLE_DISTILL);
           if (background !== null && reservation === null) {
+            counts.skipped += 1;
+            errorCode = "busy";
             return;
           }
+          counts.processed += 1;
           let result: Awaited<ReturnType<typeof completeTopicsViaGateway>>;
           try {
             result = await completeTopicsViaGateway(item.body);
@@ -2403,6 +2531,8 @@ export function createMemoryService(
           if (result.status === "aborted") {
             // Foreground preemption cancels the ENTIRE pass: do not start
             // the next item with a fresh controller, and do not associate.
+            counts.skipped += 1;
+            errorCode = "preempted";
             return;
           }
           if (!passActive()) {
@@ -2411,6 +2541,7 @@ export function createMemoryService(
           const topics = result.status === "ok" ? result.topics.sort() : [];
           if (topics.length === 0) {
             // No valid categories this pass: leave the item pending.
+            counts.skipped += 1;
             continue;
           }
           const key = stableMemoryJobKey("topic", item.id, item.bodyHash);
@@ -2427,10 +2558,35 @@ export function createMemoryService(
           if (!passActive()) {
             return;
           }
-          if (stored !== null && !stored.ok && stored.code === "BAD_REQUEST") {
-            topicsUnsupported = true;
-            break;
+          if (stored === null) {
+            counts.failed += 1;
+            errorCode = "cli_failed";
+            continue;
           }
+          if (!stored.ok) {
+            counts.failed += 1;
+            errorCode = maintenanceErrorCode(stored.code);
+            if (stored.code === "BAD_REQUEST") {
+              topicsUnsupported = true;
+              break;
+            }
+            continue;
+          }
+          counts.assigned += 1;
+        }
+        completed = true;
+      } finally {
+        if (!completed && errorCode === null) {
+          errorCode = "preempted";
+        }
+        if (attempted && (counts.pending > 0 || errorCode !== null)) {
+          recordMaintenanceRun({
+            op: "topic.backfill",
+            startedAt,
+            ok: errorCode === null,
+            ...(errorCode !== null ? { errorCode } : {}),
+            counts,
+          });
         }
       }
     }
@@ -2456,6 +2612,7 @@ export function createMemoryService(
       // for this one logical pass.
       const passNonce = randomUUID();
       const key = stableMemoryJobKey("associate", scope, passNonce);
+      const startedAt = now();
       const associate = await idleMaintenanceCliCall(
         "maintain.associate",
         { scope },
@@ -2466,10 +2623,22 @@ export function createMemoryService(
         return;
       }
       if (associate !== null) {
+        const remaining = associate.ok
+          ? Math.max(0, Math.floor(associateRemaining(associate.data)))
+          : 0;
+        recordMaintenanceRun({
+          op: "maintain.associate",
+          startedAt,
+          ok: associate.ok,
+          ...(associate.ok
+            ? {}
+            : { errorCode: maintenanceErrorCode(associate.code) }),
+          counts: associate.ok ? { remaining } : {},
+        });
         if (!associate.ok && associate.code === "BAD_REQUEST") {
           associateUnsupported = true;
         } else if (associate.ok) {
-          associateDirty = associateRemaining(associate.data) > 0;
+          associateDirty = remaining > 0;
           // Association may have written topics/edges: consolidation
           // clusters depend on them, so run it after associate this pass.
           consolidateDirty = true;
@@ -2485,6 +2654,7 @@ export function createMemoryService(
       // No `limit`: remind's consolidate batchMax (default 5) rejects a
       // larger limit with LIMIT_EXCEEDED, so the CLI applies its configured
       // batch size (the request MUST stay {scope} only).
+      const startedAt = now();
       const consolidate = await idleMaintenanceCliCall(
         "maintain.consolidate",
         { scope },
@@ -2500,6 +2670,13 @@ export function createMemoryService(
           (consolidate.code === "BAD_REQUEST" ||
             consolidate.code === "LIMIT_EXCEEDED")
         ) {
+          recordMaintenanceRun({
+            op: "maintain.consolidate",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(consolidate.code),
+            counts: {},
+          });
           consolidateUnsupported = true;
           consolidateDirty = false;
           if (consolidate.code === "LIMIT_EXCEEDED") {
@@ -2509,11 +2686,42 @@ export function createMemoryService(
           }
         } else if (consolidate.ok) {
           const summary = consolidateSummary(consolidate.data);
+          if (summary === null) {
+            recordMaintenanceRun({
+              op: "maintain.consolidate",
+              startedAt,
+              ok: false,
+              errorCode: "invalid_response",
+              counts: {},
+            });
+          } else {
+            recordMaintenanceRun({
+              op: "maintain.consolidate",
+              startedAt,
+              ok: true,
+              counts: {
+                applied: summary.applied,
+                written: summary.counts.written,
+                unchanged: summary.counts.unchanged,
+                no_grounded: summary.counts.no_grounded_sentences,
+                deferred: summary.counts.deferred,
+                degraded: summary.degraded ? 1 : 0,
+              },
+            });
+          }
           // Re-arm only for a real write: deferred/no_grounded clusters are
           // retried on the next remember/associate re-arm, never every tick.
           consolidateDirty = summary !== null && summary.applied > 0;
           activationDirty = true;
           logConsolidateSummary(consolidate.data);
+        } else {
+          recordMaintenanceRun({
+            op: "maintain.consolidate",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(consolidate.code),
+            counts: {},
+          });
         }
       }
     }
@@ -2528,6 +2736,7 @@ export function createMemoryService(
       // `apply: true` here until activation is explicitly tuned.
       const passNonce = randomUUID();
       const key = stableMemoryJobKey("activation", scope, passNonce);
+      const startedAt = now();
       const activation = await idleMaintenanceCliCall(
         "maintain.activation",
         { scope, limit: MEMORY_ACTIVATION_LIMIT },
@@ -2546,6 +2755,13 @@ export function createMemoryService(
           (activation.code === "BAD_REQUEST" ||
             activation.code === "LIMIT_EXCEEDED")
         ) {
+          recordMaintenanceRun({
+            op: "maintain.activation",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(activation.code),
+            counts: {},
+          });
           activationUnsupported = true;
           if (activation.code === "LIMIT_EXCEEDED") {
             log("warn", "memory.idle.activation_unsupported", {
@@ -2553,7 +2769,40 @@ export function createMemoryService(
             });
           }
         } else if (activation.ok) {
+          const summary = activationSummary(activation.data);
+          if (summary === null) {
+            recordMaintenanceRun({
+              op: "maintain.activation",
+              startedAt,
+              ok: false,
+              errorCode: "invalid_response",
+              counts: {},
+            });
+          } else {
+            recordMaintenanceRun({
+              op: "maintain.activation",
+              startedAt,
+              ok: true,
+              counts: {
+                scored: summary.scored,
+                score_failed: summary.scoreFailed,
+                retired: summary.retired,
+                reactivated: summary.reactivated,
+                would_retire: summary.wouldRetire,
+                would_reactivate: summary.wouldReactivate,
+                degraded: summary.degraded ? 1 : 0,
+              },
+            });
+          }
           logActivationSummary(activation.data);
+        } else {
+          recordMaintenanceRun({
+            op: "maintain.activation",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(activation.code),
+            counts: {},
+          });
         }
       }
     }

@@ -3282,6 +3282,7 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
+      ...(learning !== null ? { learningStore: learning.store } : {}),
       // Human STOP aborts only this service's owned in-flight intake; the
       // narrow app port never kills a worker/global process.
       ...(autodispatch !== null

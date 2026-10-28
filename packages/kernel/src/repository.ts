@@ -616,6 +616,114 @@ export interface MemoryJobRow {
   updatedAt: number;
 }
 
+/** Fixed background-maintenance operations shown in the activity view. */
+export const MEMORY_MAINTENANCE_OPS = [
+  "topic.backfill",
+  "maintain.associate",
+  "maintain.consolidate",
+  "maintain.activation",
+  "maintain.distill",
+] as const;
+export type MemoryMaintenanceOp = (typeof MEMORY_MAINTENANCE_OPS)[number];
+
+/** Fixed numeric count keys accepted per op (never bodies or model text). */
+const MEMORY_MAINTENANCE_COUNT_KEYS: Record<
+  MemoryMaintenanceOp,
+  readonly string[]
+> = {
+  "topic.backfill": [
+    "pending",
+    "processed",
+    "assigned",
+    "skipped",
+    "failed",
+    "degraded",
+  ],
+  "maintain.associate": ["remaining", "degraded"],
+  "maintain.consolidate": [
+    "applied",
+    "written",
+    "unchanged",
+    "no_grounded",
+    "deferred",
+    "degraded",
+  ],
+  "maintain.activation": [
+    "scored",
+    "score_failed",
+    "retired",
+    "reactivated",
+    "would_retire",
+    "would_reactivate",
+    "degraded",
+  ],
+  "maintain.distill": ["degraded"],
+};
+
+export const MEMORY_MAINTENANCE_RETENTION_ROWS = 2000;
+export const MEMORY_MAINTENANCE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+export type MemoryMaintenanceCounts = Readonly<Record<string, number>>;
+
+export interface MemoryMaintenanceRunInput {
+  op: MemoryMaintenanceOp;
+  scope: string;
+  startedAt: number;
+  finishedAt: number;
+  ok: boolean;
+  errorCode?: string | null;
+  counts: MemoryMaintenanceCounts;
+}
+
+export interface MemoryMaintenanceRun {
+  id: string;
+  op: MemoryMaintenanceOp;
+  scope: string;
+  startedAt: number;
+  finishedAt: number;
+  ok: boolean;
+  errorCode: string | null;
+  counts: MemoryMaintenanceCounts;
+  createdAt: number;
+}
+
+export interface MemoryMaintenanceRunListResponse {
+  items: MemoryMaintenanceRun[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface MemoryMaintenanceOpWindow {
+  runs: number;
+  failed: number;
+  counts: Record<string, number>;
+}
+
+export interface MemoryMaintenanceSummary {
+  generatedAt: number;
+  windows: {
+    last24h: {
+      runs: number;
+      failed: number;
+      ops: Record<MemoryMaintenanceOp, MemoryMaintenanceOpWindow>;
+    };
+    last7d: {
+      runs: number;
+      failed: number;
+      ops: Record<MemoryMaintenanceOp, MemoryMaintenanceOpWindow>;
+    };
+  };
+  latestByOp: Record<
+    MemoryMaintenanceOp,
+    {
+      finishedAt: number;
+      ok: boolean;
+      errorCode: string | null;
+      counts: MemoryMaintenanceCounts;
+    } | null
+  >;
+}
+
 export interface EnqueueMemoryJobOptions {
   turnId?: string;
   eventId?: string;
@@ -682,6 +790,18 @@ export interface MemoryGrantRow {
   /** Revision pinned from the same-run exposure at grant creation (I04). */
   revision: number | null;
   createdAt: number;
+}
+
+interface RawMemoryMaintenanceRun {
+  id: string;
+  op: string;
+  scope: string;
+  started_at: number;
+  finished_at: number;
+  ok: number;
+  error_code: string | null;
+  counts_json: string;
+  created_at: number;
 }
 
 interface RawMemoryJob {
@@ -852,6 +972,108 @@ export function withImmediate<T>(db: Database.Database, fn: () => T): T {
     }
     throw error;
   }
+}
+
+/** Validate fixed numeric maintenance counts (rejects text/shape drift). */
+function parseMaintenanceCounts(
+  op: MemoryMaintenanceOp,
+  counts: unknown,
+): Record<string, number> {
+  if (typeof counts !== "object" || counts === null || Array.isArray(counts)) {
+    throw new RepositoryValidationError("maintenance counts must be an object");
+  }
+  const allowed = new Set(MEMORY_MAINTENANCE_COUNT_KEYS[op]);
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(counts)) {
+    if (!allowed.has(key)) {
+      throw new RepositoryValidationError(
+        "maintenance counts contain an unknown key",
+      );
+    }
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 0
+    ) {
+      throw new RepositoryValidationError(
+        "maintenance counts must be non-negative safe integers",
+      );
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function parseMaintenanceRunRow(
+  row: RawMemoryMaintenanceRun,
+): MemoryMaintenanceRun {
+  if (
+    !MEMORY_MAINTENANCE_OPS.includes(row.op as MemoryMaintenanceOp) ||
+    (row.ok !== 0 && row.ok !== 1) ||
+    (row.ok === 1 && row.error_code !== null) ||
+    (row.ok === 0 && row.error_code === null)
+  ) {
+    throw new RepositoryValidationError("stored maintenance run is invalid");
+  }
+  const counts = parseMaintenanceCounts(
+    row.op as MemoryMaintenanceOp,
+    parseOrValidation(
+      () => JSON.parse(row.counts_json) as unknown,
+      "stored maintenance counts",
+    ),
+  );
+  return {
+    id: row.id,
+    op: row.op as MemoryMaintenanceOp,
+    scope: row.scope,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    ok: row.ok === 1,
+    errorCode: row.error_code,
+    counts,
+    createdAt: row.created_at,
+  };
+}
+
+/** Opaque newest-first keyset cursor: base64url(JSON {t, id}). */
+function encodeMaintenanceCursor(createdAt: number, id: string): string {
+  return Buffer.from(JSON.stringify({ t: createdAt, id }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeMaintenanceCursor(cursor: string): {
+  createdAt: number;
+  id: string;
+} {
+  if (
+    typeof cursor !== "string" ||
+    cursor.length === 0 ||
+    cursor.length > 512
+  ) {
+    throw new RepositoryValidationError("invalid activity cursor");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    throw new RepositoryValidationError("invalid activity cursor");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof (parsed as { t?: unknown }).t !== "number" ||
+    !Number.isSafeInteger((parsed as { t: number }).t) ||
+    (parsed as { t: number }).t < 0 ||
+    !isUuidV4((parsed as { id?: unknown }).id)
+  ) {
+    throw new RepositoryValidationError("invalid activity cursor");
+  }
+  return {
+    createdAt: (parsed as { t: number }).t,
+    id: (parsed as { id: string }).id,
+  };
 }
 
 function isBusyConstraint(error: unknown): boolean {
@@ -4417,6 +4639,194 @@ export function createKernelRepository(
    * and provenance kind are pinned here at exposure time (additive,
    * undefined = unknown); rows are immutable after creation.
    */
+  /**
+   * Record one completed background-maintenance pass. The counts are the
+   * SAME fixed numeric summaries the service logs (no bodies/text), and the
+   * retention sweep keeps the newest 2000 rows and drops anything older
+   * than 30 days in the same transaction.
+   */
+  function insertMemoryMaintenanceRun(
+    input: MemoryMaintenanceRunInput,
+  ): MemoryMaintenanceRun {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !MEMORY_MAINTENANCE_OPS.includes(input.op)
+    ) {
+      throw new RepositoryValidationError("maintenance op is invalid");
+    }
+    if (
+      typeof input.scope !== "string" ||
+      input.scope.length < 1 ||
+      input.scope.length > 128
+    ) {
+      throw new RepositoryValidationError("maintenance scope is invalid");
+    }
+    const startedAt = nowMs(input.startedAt);
+    const finishedAt = nowMs(input.finishedAt);
+    if (finishedAt < startedAt) {
+      throw new RepositoryValidationError(
+        "maintenance finishedAt precedes startedAt",
+      );
+    }
+    if (typeof input.ok !== "boolean") {
+      throw new RepositoryValidationError("maintenance ok must be a boolean");
+    }
+    const errorCode = input.errorCode ?? null;
+    if (input.ok) {
+      if (errorCode !== null) {
+        throw new RepositoryValidationError(
+          "successful maintenance run cannot carry an error code",
+        );
+      }
+    } else if (
+      typeof errorCode !== "string" ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(errorCode)
+    ) {
+      throw new RepositoryValidationError(
+        "failed maintenance run requires a fixed error code",
+      );
+    }
+    const counts = parseMaintenanceCounts(input.op, input.counts);
+    const createdAt = finishedAt;
+    const id = generateId();
+    return withImmediate(db, () => {
+      db.prepare(
+        "INSERT INTO memory_maintenance_runs (id, op, scope, started_at, finished_at, ok, error_code, counts_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        id,
+        input.op,
+        input.scope,
+        startedAt,
+        finishedAt,
+        input.ok ? 1 : 0,
+        errorCode,
+        JSON.stringify(counts),
+        createdAt,
+      );
+      db.prepare(
+        "DELETE FROM memory_maintenance_runs WHERE created_at < ?",
+      ).run(createdAt - MEMORY_MAINTENANCE_RETENTION_MS);
+      db.prepare(
+        "DELETE FROM memory_maintenance_runs WHERE id IN (SELECT id FROM memory_maintenance_runs ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)",
+      ).run(MEMORY_MAINTENANCE_RETENTION_ROWS);
+      const row = db
+        .prepare("SELECT * FROM memory_maintenance_runs WHERE id = ?")
+        .get(id) as RawMemoryMaintenanceRun;
+      return parseMaintenanceRunRow(row);
+    });
+  }
+
+  /** Newest-first bounded keyset page of completed maintenance runs. */
+  function listMemoryMaintenanceRuns(
+    query: { limit?: number; cursor?: string } = {},
+  ): MemoryMaintenanceRunListResponse {
+    const limit = query.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RepositoryValidationError("limit must be 1..100");
+    }
+    const bound =
+      query.cursor === undefined ? null : decodeMaintenanceCursor(query.cursor);
+    const rows =
+      bound === null
+        ? (db
+            .prepare(
+              "SELECT * FROM memory_maintenance_runs ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(limit + 1) as RawMemoryMaintenanceRun[])
+        : (db
+            .prepare(
+              "SELECT * FROM memory_maintenance_runs WHERE (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(
+              bound.createdAt,
+              bound.createdAt,
+              bound.id,
+              limit + 1,
+            ) as RawMemoryMaintenanceRun[]);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const items = page.map(parseMaintenanceRunRow);
+    const last = page[page.length - 1];
+    return {
+      items,
+      nextCursor:
+        hasMore && last !== undefined
+          ? encodeMaintenanceCursor(last.created_at, last.id)
+          : null,
+      hasMore,
+    };
+  }
+
+  /**
+   * Per-op totals for the last 24h/7d plus the latest run per op. Reads at
+   * most the retained 2000 rows; no unbounded scan.
+   */
+  function memoryMaintenanceSummary(at?: number): MemoryMaintenanceSummary {
+    const generatedAt = nowMs(at);
+    const rows = db
+      .prepare(
+        "SELECT * FROM memory_maintenance_runs ORDER BY created_at DESC, id DESC",
+      )
+      .all() as RawMemoryMaintenanceRun[];
+    const emptyOps = (): Record<
+      MemoryMaintenanceOp,
+      MemoryMaintenanceOpWindow
+    > => {
+      const ops = {} as Record<MemoryMaintenanceOp, MemoryMaintenanceOpWindow>;
+      for (const op of MEMORY_MAINTENANCE_OPS) {
+        ops[op] = { runs: 0, failed: 0, counts: {} };
+      }
+      return ops;
+    };
+    const last24h = {
+      runs: 0,
+      failed: 0,
+      ops: emptyOps(),
+    };
+    const last7d = {
+      runs: 0,
+      failed: 0,
+      ops: emptyOps(),
+    };
+    const latestByOp = {} as MemoryMaintenanceSummary["latestByOp"];
+    for (const op of MEMORY_MAINTENANCE_OPS) {
+      latestByOp[op] = null;
+    }
+    const cutoff24 = generatedAt - 24 * 60 * 60 * 1000;
+    const cutoff7 = generatedAt - 7 * 24 * 60 * 60 * 1000;
+    for (const raw of rows) {
+      const run = parseMaintenanceRunRow(raw);
+      if (latestByOp[run.op] === null) {
+        latestByOp[run.op] = {
+          finishedAt: run.finishedAt,
+          ok: run.ok,
+          errorCode: run.errorCode,
+          counts: run.counts,
+        };
+      }
+      for (const window of [
+        { since: cutoff24, target: last24h },
+        { since: cutoff7, target: last7d },
+      ]) {
+        if (run.createdAt < window.since) {
+          continue;
+        }
+        const bucket = window.target.ops[run.op];
+        window.target.runs += 1;
+        bucket.runs += 1;
+        if (!run.ok) {
+          window.target.failed += 1;
+          bucket.failed += 1;
+        }
+        for (const [key, value] of Object.entries(run.counts)) {
+          bucket.counts[key] = (bucket.counts[key] ?? 0) + value;
+        }
+      }
+    }
+    return { generatedAt, windows: { last24h, last7d }, latestByOp };
+  }
+
   function recordMemoryExposure(
     exposure: MemoryExposureInput,
     options: TransitionOptions = {},
@@ -8026,6 +8436,9 @@ export function createKernelRepository(
     failMemoryJob,
     countPendingMemoryJobs,
     countOutstandingMemoryJobs,
+    insertMemoryMaintenanceRun,
+    listMemoryMaintenanceRuns,
+    memoryMaintenanceSummary,
     recordMemoryExposure,
     listMemoryExposures,
     recordRunMemoryStatus,
