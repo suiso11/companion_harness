@@ -49,6 +49,27 @@ describe("retained candidate mapping", () => {
     expect(parsed.view.changes).toHaveLength(1001);
   });
 
+  it("preserves long paths that share a 512-character prefix", () => {
+    const prefix = `apps/${"a".repeat(506)}`;
+    const firstPath = `${prefix}/first.ts`;
+    const secondPath = `${prefix}/second.ts`;
+    const parsed = readTrialCandidate({
+      available: true,
+      changes: [
+        { path: firstPath, kind: "modify", size: 1, modeChanged: false },
+        { path: secondPath, kind: "modify", size: 1, modeChanged: false },
+      ],
+      diff: "",
+      truncated: false,
+    });
+    expect(parsed.available).toBe(true);
+    if (!parsed.available) return;
+    expect(parsed.view.changes.map((change) => change.path)).toEqual([
+      firstPath,
+      secondPath,
+    ]);
+  });
+
   it("maps fixed error codes to Japanese messages", () => {
     expect(trialCandidateErrorText("candidate_unavailable")).toContain(
       "保持されていません",

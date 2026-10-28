@@ -67,7 +67,9 @@ export function readTrialCandidate(value: unknown): TrialCandidateResponse {
       continue;
     }
     changes.push({
-      path: item.path.slice(0, 512),
+      // Preserve the server-validated identity: shortening here could map
+      // distinct nested paths to the same key in the candidate list.
+      path: item.path,
       kind: item.kind,
       size: item.size,
       modeChanged: item.modeChanged,
