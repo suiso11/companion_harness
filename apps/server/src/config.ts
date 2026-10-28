@@ -2359,7 +2359,7 @@ export function parseAutodispatchConfig(
     materialization,
   });
 }
-
+// Strict parser for COMPANION_AUTONOMY_JSON; trials stay disabled on any mismatch.
 export function parseTrialConfig(raw: string | undefined): TrialConfig | null {
   if (raw === undefined) {
     return null;
