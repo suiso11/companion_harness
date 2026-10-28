@@ -144,6 +144,16 @@ export const EXTRACTION_BODY_GENERIC_TERMS: readonly string[] = [
   "ある",
   "なる",
   "する",
+  "した",
+  "して",
+  "しない",
+  "され",
+  "行う",
+  "行っ",
+  "でき",
+  "なっ",
+  "おり",
+  "おる",
   "やる",
   "くる",
   "いく",
@@ -288,6 +298,10 @@ const GENERIC_NORMALIZED = EXTRACTION_BODY_GENERIC_TERMS.map(
   normalizeCoverageText,
 ).filter((term) => term.length > 0);
 
+const GENERIC_PHRASES_NORMALIZED = GENERIC_NORMALIZED.filter(
+  (term) => term.length >= 2,
+).sort((a, b) => b.length - a.length);
+
 const PARTICLES_NORMALIZED = /[はをがにでとのやもへ]/g;
 
 function stripFraming(text: string): string {
@@ -299,9 +313,25 @@ function stripFraming(text: string): string {
   return out;
 }
 
-/** Framing plus single-character particles, used for token comparison only. */
+/** Remove all multi-character generic words before token comparison. */
+function stripGenericPhrases(text: string): string {
+  let out = text;
+  for (const phrase of GENERIC_PHRASES_NORMALIZED) {
+    out = out.split(phrase).join("");
+  }
+  return out;
+}
+
+/**
+ * Token form for term/run comparison: framing, generic words and single
+ * particles are dropped so only substantive runs remain. This keeps a
+ * boundary bigram cut out of a generic phrase from looking like content.
+ */
 function compactCoverageText(text: string): string {
-  return stripFraming(text).replace(PARTICLES_NORMALIZED, "");
+  return stripGenericPhrases(stripFraming(text)).replace(
+    PARTICLES_NORMALIZED,
+    "",
+  );
 }
 
 function isGenericTerm(term: string): boolean {
@@ -388,7 +418,9 @@ function extractionAsciiTerms(text: string): Set<string> {
  */
 function extractionBigrams(stripped: string, asciiSource: string): Set<string> {
   const tokens = new Set<string>();
-  for (const match of stripped.matchAll(CJK_RUN_PATTERN)) {
+  // Fold kana so katakana/hiragana spellings of the same word ("バイト" and
+  // "ばいと") compare equal. Kanji is unaffected.
+  for (const match of foldKana(stripped).matchAll(CJK_RUN_PATTERN)) {
     const chars = Array.from(match[0]);
     for (let index = 0; index + 1 < chars.length; index += 1) {
       tokens.add(`${chars[index]}${chars[index + 1]}`);
@@ -426,18 +458,46 @@ function containsCandidate(haystack: CoverageHaystack, term: string): boolean {
 }
 
 /**
+ * True when a text still contains something beyond framing/generic words.
+ * A body that is only "ユーザーは…を依頼した" carries no topic content; the
+ * coverage floor must not fire on it just because its surface form differs
+ * from a short colloquial request.
+ */
+function hasSubstantiveCoverageTokens(text: string): boolean {
+  if (
+    /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]{2,}/u.test(
+      compactCoverageText(text),
+    )
+  ) {
+    return true;
+  }
+  for (const term of extractionAsciiTerms(text)) {
+    if (term.length >= 2 && !isGenericTerm(term)) return true;
+  }
+  return false;
+}
+
+/**
  * Fraction of body content tokens present in the user's own turn. A body with
- * no content tokens (only framing) counts as fully covered: there is nothing
- * substantive to verify and the quote check still applies.
+ * no substantive content (only framing/generic words) counts as fully covered:
+ * there is nothing to verify and the quote check still applies. A body longer
+ * than the user's turn that overlaps only on generic words is not a paraphrase
+ * either, so it scores zero instead of being lifted over the floor by a single
+ * function-word match.
  */
 export function extractionBodyCoverage(body: string, userText: string): number {
   const bodyTokens = extractionContentTokens(body);
   if (bodyTokens.size === 0) return 1;
+  if (!hasSubstantiveCoverageTokens(body)) return 1;
   const userTokens = extractionContentTokens(userText);
   let matched = 0;
+  let substantiveMatched = 0;
   for (const token of bodyTokens) {
-    if (userTokens.has(token)) matched += 1;
+    if (!userTokens.has(token)) continue;
+    matched += 1;
+    if (!isGenericTerm(token)) substantiveMatched += 1;
   }
+  if (substantiveMatched === 0 && bodyTokens.size > userTokens.size) return 0;
   return matched / bodyTokens.size;
 }
 
@@ -474,8 +534,11 @@ export function hasAssistantDerivedBodyTerms(
   const user = coverageHaystack(userText);
   const assistant = coverageHaystack(assistantText);
   const userBigrams = extractionBigrams(stripFraming(userText), userText);
+  // Parenthetical asides are explanatory additions around the user-stated
+  // core; judge the core, not the aside.
+  const coreBody = body.replace(/[（(][^）)]*[）)]/gu, "");
 
-  for (const term of extractionAsciiTerms(body)) {
+  for (const term of extractionAsciiTerms(coreBody)) {
     if (term.length < EXTRACTION_ASSISTANT_ASCII_MIN) continue;
     if (isGenericTerm(term)) continue;
     if (containsCandidate(user, term)) continue;
@@ -483,7 +546,7 @@ export function hasAssistantDerivedBodyTerms(
     return true;
   }
 
-  const compactBody = compactCoverageText(body);
+  const compactBody = compactCoverageText(coreBody);
   for (const match of compactBody.matchAll(CJK_RUN_PATTERN)) {
     const chars = Array.from(match[0]);
     const seen = new Set<string>();
