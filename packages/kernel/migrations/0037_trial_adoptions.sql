@@ -7,6 +7,7 @@ CREATE TABLE trial_adoptions (
   artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
   status TEXT NOT NULL CHECK (status IN ('pending','done','failed')),
   branch TEXT,
+  base_sha TEXT CHECK (base_sha IS NULL OR length(base_sha) BETWEEN 40 AND 64),
   pr_url TEXT,
   commit_sha TEXT,
   error_code TEXT,

@@ -13,7 +13,9 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -53,12 +55,20 @@ export interface ExecuteTrialAdoptionInput {
   readonly artifactSha256: string;
   readonly objective: string;
   readonly files: readonly TrialAdoptionFileInput[];
+  /** Base commit recorded by the attempt that pushed. When set, resume
+   * rebuilds and validates the expected tree against exactly this snapshot,
+   * never against a base ref that may have advanced since. */
+  readonly baseSha?: string | null;
+  /** Called once the base commit is fixed, before any worktree mutation, so
+   * the caller can persist it for a later resume. */
+  readonly onBaseSha?: (baseSha: string) => void;
 }
 
 export interface TrialAdoptionResult {
   readonly branch: string;
   readonly prUrl: string;
   readonly commitSha: string;
+  readonly baseSha: string;
 }
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -89,6 +99,17 @@ function minimalEnv(): NodeJS.ProcessEnv {
   }
   if (process.env.XDG_CACHE_HOME !== undefined) {
     env.XDG_CACHE_HOME = process.env.XDG_CACHE_HOME;
+  }
+  return env;
+}
+
+/** Token/host env is forwarded to the `gh` invocation only. Never pass this
+ * to git: the credentials must not leak into repository commands or logs. */
+export function ghEnvironment(): NodeJS.ProcessEnv {
+  const env = minimalEnv();
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"] as const) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
@@ -125,12 +146,13 @@ export function runCommand(
   args: readonly string[],
   cwd: string,
   timeoutMs: number,
+  env: NodeJS.ProcessEnv = minimalEnv(),
 ): Promise<ProcResult> {
   return new Promise((resolve) => {
     const child = spawn(command, [...args], {
       cwd,
       shell: false,
-      env: minimalEnv(),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
@@ -300,19 +322,33 @@ export async function executeTrialAdoption(
   try {
     const fetched = await git(config.repoPath, ["fetch", config.remote]);
     if (fetched.code !== 0) throw new TrialAdoptionError("git_failed");
+    // A resume must use the base recorded by the original attempt, not the
+    // freshly fetched tip: the base branch may have advanced after the push.
+    const requestedBase =
+      input.baseSha === undefined || input.baseSha === null
+        ? null
+        : input.baseSha;
+    if (requestedBase !== null && !/^[0-9a-f]{40,64}$/.test(requestedBase)) {
+      throw new TrialAdoptionError("git_failed");
+    }
     const baseRev = await git(config.repoPath, [
       "rev-parse",
       "--verify",
-      `${config.baseRef}^{commit}`,
+      `${requestedBase ?? config.baseRef}^{commit}`,
     ]);
     if (baseRev.code !== 0) throw new TrialAdoptionError("git_failed");
+    const baseCommit = baseRev.stdout.trim();
+    if (requestedBase !== null && baseCommit !== requestedBase) {
+      throw new TrialAdoptionError("git_failed");
+    }
+    input.onBaseSha?.(baseCommit);
 
     const added = await git(config.repoPath, [
       "worktree",
       "add",
       "--detach",
       worktree,
-      config.baseRef,
+      baseCommit,
     ]);
     if (added.code !== 0) throw new TrialAdoptionError("git_failed");
     worktreeAdded = true;
@@ -348,8 +384,50 @@ export async function executeTrialAdoption(
       existingRef = `refs/heads/${branch}`;
     }
     // Materialize the reviewed bytes in every case: a resume must rebuild the
-    // exact expected tree before it may trust an existing branch.
+    // exact expected tree before it may trust an existing branch. Deletions
+    // run first so a directory can be replaced by a file at the same path.
+    const keptDirs = new Set<string>();
     for (const file of input.files) {
+      if (file.kind === "delete") continue;
+      const segments = safeRelativePath(file.path);
+      for (let i = 1; i < segments.length; i += 1) {
+        keptDirs.add(segments.slice(0, i).join("/"));
+      }
+    }
+    for (const file of input.files) {
+      if (file.kind !== "delete") continue;
+      const segments = safeRelativePath(file.path);
+      const target = join(worktree, ...segments);
+      const stat = lstatSync(target, { throwIfNoEntry: false });
+      if (stat === undefined || !stat.isFile()) {
+        throw new TrialAdoptionError("base_changed");
+      }
+      const baseBytes = readFileSync(target);
+      if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
+        throw new TrialAdoptionError("base_changed");
+      }
+      rmSync(target);
+      // Drop ancestor directories left empty by the verified deletion, but
+      // only ancestors of verified paths and never the repository root. A
+      // directory still needed by another verified path is kept.
+      for (let i = segments.length - 1; i >= 1; i -= 1) {
+        const relative = segments.slice(0, i).join("/");
+        if (keptDirs.has(relative)) break;
+        const dir = join(worktree, ...segments.slice(0, i));
+        const dirStat = lstatSync(dir, { throwIfNoEntry: false });
+        if (
+          dirStat === undefined ||
+          dirStat.isSymbolicLink() ||
+          !dirStat.isDirectory()
+        ) {
+          break;
+        }
+        if (readdirSync(dir).length > 0) break;
+        rmdirSync(dir);
+      }
+    }
+    for (const file of input.files) {
+      if (file.kind === "delete") continue;
       const segments = safeRelativePath(file.path);
       const target = join(worktree, ...segments);
       prepareParentDirectories(worktree, segments);
@@ -371,17 +449,13 @@ export async function executeTrialAdoption(
       if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
         throw new TrialAdoptionError("base_changed");
       }
-      if (file.kind === "modify") {
-        if (file.candidateBytes === null) {
-          throw new TrialAdoptionError("not_verified");
-        }
-        const baseMode = statSync(target).mode & 0o777;
-        writeFileSync(target, file.candidateBytes);
-        // Preserve the base mode exactly; candidates never alter modes.
-        chmodSync(target, baseMode);
-      } else {
-        rmSync(target);
+      if (file.candidateBytes === null) {
+        throw new TrialAdoptionError("not_verified");
       }
+      const baseMode = statSync(target).mode & 0o777;
+      writeFileSync(target, file.candidateBytes);
+      // Preserve the base mode exactly; candidates never alter modes.
+      chmodSync(target, baseMode);
     }
 
     let commitSha: string;
@@ -513,7 +587,7 @@ export async function executeTrialAdoption(
           tipTree.code !== 0 ||
           parent.code !== 0 ||
           tipTree.stdout.trim() !== expectedTree ||
-          parent.stdout.trim() !== baseRev.stdout.trim()
+          parent.stdout.trim() !== baseCommit
         ) {
           throw new TrialAdoptionError("branch_exists");
         }
@@ -583,11 +657,12 @@ export async function executeTrialAdoption(
       ],
       worktree,
       GH_TIMEOUT_MS,
+      ghEnvironment(),
     );
     if (created.code !== 0) throw new TrialAdoptionError("gh_failed");
     const prUrl = parsePrUrl(created.stdout);
     if (prUrl === null) throw new TrialAdoptionError("gh_failed");
-    return { branch, prUrl, commitSha };
+    return { branch, prUrl, commitSha, baseSha: baseCommit };
   } finally {
     if (worktreeAdded) {
       await git(config.repoPath, ["worktree", "remove", "--force", worktree]);

@@ -5628,6 +5628,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           artifactSha256: report.artifact.sha256,
           objective: found.objective,
           files,
+          baseSha: claim.baseSha,
+          onBaseSha: (baseSha) => {
+            repo.recordTrialAdoptionBaseSha(proposal.id, baseSha, now());
+          },
         });
         const saved = repo.finishTrialAdoption(
           proposal.id,

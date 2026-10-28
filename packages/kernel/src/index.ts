@@ -839,6 +839,7 @@ export {
   readWorkerReportByProposal,
   reconcileTrialExpiry,
   recordQuiescence,
+  recordTrialAdoptionBaseSha,
   recordWorkerResult,
   recoverInterruptedTrialAdoptions,
   registerWorkerBoot,

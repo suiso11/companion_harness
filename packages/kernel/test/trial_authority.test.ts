@@ -958,6 +958,10 @@ describe("trial adoption crash recovery", () => {
         NOW + 10,
       );
       expect(claim?.state).toBe("started");
+      expect(claim?.baseSha).toBeNull();
+      // The original base is recorded before the commit is pushed; a retry
+      // must see it again even after the pending row went stale.
+      repo.recordTrialAdoptionBaseSha(proposalId, "d".repeat(40), NOW + 10);
       // Just inside the window: still a live claim, not an interruption.
       expect(
         repo.readTrialAdoption(
@@ -987,6 +991,7 @@ describe("trial adoption crash recovery", () => {
       );
       expect(retry?.state).toBe("started");
       expect(retry?.adoption.status).toBe("pending");
+      expect(retry?.baseSha).toBe("d".repeat(40));
     } finally {
       closeKernelDatabase(handle);
     }

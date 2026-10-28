@@ -390,6 +390,7 @@ import {
   readWorkerReportByProposal,
   reconcileTrialExpiry,
   recordQuiescence,
+  recordTrialAdoptionBaseSha as recordTrialAdoptionBaseShaFn,
   recordWorkerResult,
   recoverInterruptedTrialAdoptions as recoverInterruptedTrialAdoptionsFn,
   registerWorkerBoot,
@@ -7611,6 +7612,14 @@ export function createKernelRepository(
     return finishTrialAdoptionFn(db, proposalId, result, now);
   }
 
+  function recordTrialAdoptionBaseSha(
+    proposalId: string,
+    baseSha: string,
+    now: number,
+  ) {
+    return recordTrialAdoptionBaseShaFn(db, proposalId, baseSha, now);
+  }
+
   function readTrialAdoption(
     sessionId: string,
     proposalId: string,
@@ -8163,6 +8172,7 @@ export function createKernelRepository(
     recoverInterruptedTrialAdoptions,
     beginTrialAdoption,
     finishTrialAdoption,
+    recordTrialAdoptionBaseSha,
     isNeverLaunchedRevokedTrialGrant,
     registerTrialWorkerBoot,
     issueTrialLaunchPermit,

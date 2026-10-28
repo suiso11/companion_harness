@@ -66,6 +66,8 @@ beforeAll(() => {
   writeFileSync(join(checkout, BASE_FILE), BASE_BYTES);
   chmodSync(join(checkout, BASE_FILE), 0o755);
   writeFileSync(join(checkout, DELETE_FILE), DELETE_BYTES);
+  mkdirSync(join(checkout, "entry"));
+  writeFileSync(join(checkout, "entry", "old.txt"), Buffer.from("nested\n"));
   git(checkout, "add", "-A");
   git(checkout, "commit", "-m", "base");
   git(checkout, "branch", "-M", "master");
@@ -130,6 +132,7 @@ posixDescribe("executeTrialAdoption", () => {
       branch,
       prUrl: "https://github.com/example/repo/pull/7",
       commitSha: git(remote, "rev-parse", `refs/heads/${branch}`).trim(),
+      baseSha: git(checkout, "rev-parse", "HEAD").trim(),
     });
     const remoteRefs = git(remote, "show-ref", `refs/heads/${branch}`);
     expect(remoteRefs).toContain(branch);
@@ -351,6 +354,7 @@ posixDescribe("executeTrialAdoption", () => {
       branch,
       prUrl: "https://github.com/example/repo/pull/9",
       commitSha: pushedBefore.trim(),
+      baseSha: git(checkout, "rev-parse", "HEAD").trim(),
     });
     expect(git(remote, "rev-parse", `refs/heads/${branch}`)).toBe(pushedBefore);
   });
@@ -424,6 +428,140 @@ posixDescribe("executeTrialAdoption", () => {
       }),
     ).rejects.toMatchObject({ code: "branch_exists" });
     rmSync(clone, { recursive: true, force: true });
+  });
+
+  it("resumes against the original base after the base branch advanced", async () => {
+    const executionId = "15151515-3737-4848-8888-909090909090";
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    let storedBase: string | null = null;
+    await expect(
+      executeTrialAdoption({
+        config: config(),
+        executionId,
+        artifactSha256: ARTIFACT_SHA,
+        objective: "advance base",
+        files: files(),
+        onBaseSha: (sha) => {
+          storedBase = sha;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "gh_failed" });
+    expect(storedBase).toBe(git(checkout, "rev-parse", "origin/master").trim());
+    const branch = `trial/${executionId.slice(0, 8)}`;
+    const pushed = git(remote, "rev-parse", `refs/heads/${branch}`).trim();
+    // The base branch advances after the push; a naive resume would rebuild
+    // the expected tree on the new tip and reject its own branch.
+    writeFileSync(join(checkout, "later.txt"), "later\n");
+    git(checkout, "add", "later.txt");
+    git(checkout, "commit", "-m", "later");
+    git(checkout, "push", "origin", "master");
+    const advanced = git(remote, "rev-parse", "refs/heads/master").trim();
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/14\n'\n",
+      { mode: 0o755 },
+    );
+    const resumed = await executeTrialAdoption({
+      config: config(),
+      executionId,
+      artifactSha256: ARTIFACT_SHA,
+      objective: "advance base",
+      files: files(),
+      baseSha: storedBase,
+    });
+    expect(resumed).toEqual({
+      branch,
+      prUrl: "https://github.com/example/repo/pull/14",
+      commitSha: pushed,
+      baseSha: storedBase,
+    });
+    // The resumed commit still hangs off the recorded base, not the new tip.
+    expect(git(remote, "rev-parse", `${branch}^`).trim()).toBe(storedBase);
+    expect(git(remote, "rev-parse", "refs/heads/master").trim()).toBe(advanced);
+  });
+
+  it("replaces a deleted directory entry with a file at the same path", async () => {
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/15\n'\n",
+      { mode: 0o755 },
+    );
+    const executionId = "16161616-3838-4949-8989-919191919191";
+    const result = await executeTrialAdoption({
+      config: config(),
+      executionId,
+      artifactSha256: ARTIFACT_SHA,
+      objective: "dir to file",
+      files: [
+        {
+          path: "entry/old.txt",
+          kind: "delete" as const,
+          baseSha256: sha(Buffer.from("nested\n")),
+          candidateBytes: null,
+        },
+        {
+          path: "entry",
+          kind: "create" as const,
+          baseSha256: null,
+          candidateBytes: Buffer.from("now a file\n"),
+        },
+      ],
+    });
+    const branch = `trial/${executionId.slice(0, 8)}`;
+    expect(result.branch).toBe(branch);
+    expect(git(remote, "cat-file", "-t", `${branch}:entry`)).toBe("blob\n");
+    expect(git(remote, "show", `${branch}:entry`)).toBe("now a file\n");
+    expect(() => git(remote, "show", `${branch}:entry/old.txt`)).toThrow();
+  });
+
+  it("forwards gh tokens to gh only, never to git-like commands", async () => {
+    const captured = join(root, "gh-env.txt");
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\nprintf '%s|%s|%s' "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST" > '${captured}'\nprintf 'https://github.com/example/repo/pull/16\n'\n`,
+      { mode: 0o755 },
+    );
+    const dump = join(root, "dump-env.sh");
+    writeFileSync(
+      dump,
+      '#!/bin/sh\nprintf "%s|%s|%s" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST"\n',
+      { mode: 0o755 },
+    );
+    const saved = {
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GH_HOST: process.env.GH_HOST,
+    };
+    process.env.GH_TOKEN = "gh-token";
+    process.env.GITHUB_TOKEN = "github-token";
+    process.env.GH_HOST = "ghe.example";
+    try {
+      await executeTrialAdoption({
+        config: config(),
+        executionId: "17171717-3939-4040-8080-929292929292",
+        artifactSha256: ARTIFACT_SHA,
+        objective: "gh env",
+        files: [
+          {
+            path: BASE_FILE,
+            kind: "modify" as const,
+            baseSha256: sha(BASE_BYTES),
+            candidateBytes: CANDIDATE_BYTES,
+          },
+        ],
+      });
+      expect(readFileSync(captured, "utf8")).toBe(
+        "gh-token|github-token|ghe.example",
+      );
+      // The git-side bounded runner must not inherit any of them.
+      const gitLike = await runCommand(dump, [], root, 5000);
+      expect(gitLike.stdout).toBe("||");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("kills a timed-out command's whole process group", async () => {

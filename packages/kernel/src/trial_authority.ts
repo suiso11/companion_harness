@@ -2883,6 +2883,36 @@ export interface TrialAdoptionClaim {
    * done: replay of the same proposal result. */
   state: "started" | "pending" | "done";
   adoption: TrialAdoptionView;
+  /** Base commit recorded by the attempt that created the adoption commit;
+   * a retry must rebuild and validate the expected tree against it. */
+  baseSha: string | null;
+}
+
+function readAdoptionBaseSha(
+  db: Database.Database,
+  proposalId: string,
+): string | null {
+  const row = db
+    .prepare("SELECT base_sha FROM trial_adoptions WHERE proposal_id=?")
+    .get(proposalId) as { base_sha: string | null } | undefined;
+  return row?.base_sha ?? null;
+}
+
+/** Persist the original base commit before the adoption commit is created so
+ * a retry after the base branch advanced resumes against the same snapshot. */
+export function recordTrialAdoptionBaseSha(
+  db: Database.Database,
+  proposalId: string,
+  baseSha: string,
+  now: number,
+): void {
+  const pid = requireId(proposalId, "proposalId");
+  if (!/^[0-9a-f]{40,64}$/.test(baseSha)) {
+    throw new RangeError("baseSha must be 40-64 lowercase hex");
+  }
+  db.prepare(
+    "UPDATE trial_adoptions SET base_sha=?, updated_at=? WHERE proposal_id=? AND status='pending'",
+  ).run(baseSha, now, pid);
 }
 
 function readAdoptionRow(
@@ -2994,8 +3024,12 @@ export function beginTrialAdoption(
     settleStaleAdoption(db, pid, now);
     const existing = readAdoptionRow(db, pid);
     if (existing !== null) {
+      // Preserve the base recorded by the earlier attempt: a retry must
+      // rebuild the expected tree against that same snapshot even when the
+      // base branch has advanced since the push.
+      const baseSha = readAdoptionBaseSha(db, pid);
       if (existing.status === "done" || existing.status === "pending") {
-        return { state: existing.status, adoption: existing };
+        return { state: existing.status, adoption: existing, baseSha };
       }
       db.prepare(
         "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",
@@ -3009,6 +3043,7 @@ export function beginTrialAdoption(
           commitSha: null,
           errorCode: null,
         },
+        baseSha,
       };
     }
     db.prepare(
@@ -3023,6 +3058,7 @@ export function beginTrialAdoption(
         commitSha: null,
         errorCode: null,
       },
+      baseSha: null,
     };
   });
   return claim();
