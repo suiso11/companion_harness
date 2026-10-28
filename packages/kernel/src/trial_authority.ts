@@ -2874,6 +2874,7 @@ export interface TrialAdoptionView {
   status: TrialAdoptionStatus;
   branch: string | null;
   prUrl: string | null;
+  commitSha: string | null;
   errorCode: string | null;
 }
 
@@ -2890,13 +2891,14 @@ function readAdoptionRow(
 ): TrialAdoptionView | null {
   const row = db
     .prepare(
-      "SELECT status, branch, pr_url, error_code FROM trial_adoptions WHERE proposal_id=?",
+      "SELECT status, branch, pr_url, commit_sha, error_code FROM trial_adoptions WHERE proposal_id=?",
     )
     .get(proposalId) as
     | {
         status: TrialAdoptionStatus;
         branch: string | null;
         pr_url: string | null;
+        commit_sha: string | null;
         error_code: string | null;
       }
     | undefined;
@@ -2906,6 +2908,7 @@ function readAdoptionRow(
         status: row.status,
         branch: row.branch,
         prUrl: row.pr_url,
+        commitSha: row.commit_sha,
         errorCode: row.error_code,
       };
 }
@@ -2918,7 +2921,7 @@ function settleStaleAdoption(
   now: number,
 ): void {
   db.prepare(
-    "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending' AND updated_at<=?",
+    "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending' AND updated_at<=?",
   ).run(
     TRIAL_ADOPTION_INTERRUPTED,
     now,
@@ -2935,7 +2938,7 @@ export function recoverInterruptedTrialAdoptions(
 ): number {
   const result = db
     .prepare(
-      "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, error_code=?, updated_at=? WHERE status='pending'",
+      "UPDATE trial_adoptions SET status='failed', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=?, updated_at=? WHERE status='pending'",
     )
     .run(TRIAL_ADOPTION_INTERRUPTED, now);
   return typeof result.changes === "number" ? result.changes : 0;
@@ -2995,7 +2998,7 @@ export function beginTrialAdoption(
         return { state: existing.status, adoption: existing };
       }
       db.prepare(
-        "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",
+        "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",
       ).run(exec, artifactSha256, now, pid);
       return {
         state: "started",
@@ -3003,12 +3006,13 @@ export function beginTrialAdoption(
           status: "pending",
           branch: null,
           prUrl: null,
+          commitSha: null,
           errorCode: null,
         },
       };
     }
     db.prepare(
-      "INSERT INTO trial_adoptions (proposal_id, execution_id, artifact_sha256, status, branch, pr_url, error_code, created_at, updated_at) VALUES (?,?,?, 'pending', NULL, NULL, NULL, ?, ?)",
+      "INSERT INTO trial_adoptions (proposal_id, execution_id, artifact_sha256, status, branch, pr_url, commit_sha, error_code, created_at, updated_at) VALUES (?,?,?, 'pending', NULL, NULL, NULL, NULL, ?, ?)",
     ).run(pid, exec, artifactSha256, now, now);
     return {
       state: "started",
@@ -3016,6 +3020,7 @@ export function beginTrialAdoption(
         status: "pending",
         branch: null,
         prUrl: null,
+        commitSha: null,
         errorCode: null,
       },
     };
@@ -3031,14 +3036,23 @@ export function finishTrialAdoption(
     status: "done" | "failed";
     branch: string | null;
     prUrl: string | null;
+    commitSha: string | null;
     errorCode: string | null;
   },
   now: number,
 ): TrialAdoptionView {
   const pid = requireId(proposalId, "proposalId");
   db.prepare(
-    "UPDATE trial_adoptions SET status=?, branch=?, pr_url=?, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending'",
-  ).run(result.status, result.branch, result.prUrl, result.errorCode, now, pid);
+    "UPDATE trial_adoptions SET status=?, branch=?, pr_url=?, commit_sha=?, error_code=?, updated_at=? WHERE proposal_id=? AND status='pending'",
+  ).run(
+    result.status,
+    result.branch,
+    result.prUrl,
+    result.commitSha,
+    result.errorCode,
+    now,
+    pid,
+  );
   const row = readAdoptionRow(db, pid);
   if (row === null) throw new RangeError("adoption row missing");
   return row;

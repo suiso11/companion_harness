@@ -176,6 +176,7 @@ interface TrialAdoption {
   readonly status: "pending" | "done" | "failed";
   readonly branch: string | null;
   readonly prUrl: string | null;
+  readonly commitSha: string | null;
   readonly errorCode: string | null;
 }
 
@@ -198,6 +199,7 @@ function readTrialAdoption(value: unknown): TrialAdoption | null {
     status: row.status,
     branch: optionalString(row.branch),
     prUrl: optionalString(row.prUrl),
+    commitSha: optionalString(row.commitSha),
     errorCode: optionalString(row.errorCode),
   };
 }
@@ -1022,21 +1024,35 @@ $effect(() => {
           </button>
           <p id="trial-adopt-status" aria-live="polite">{adoptionStatus}</p>
         {/if}
-        {#if adoption?.status === "done"}
-          <p id="trial-adoption-result">
-            下書きPR:
-            {#if adoption.prUrl !== null}
-              <a href={adoption.prUrl}>{adoption.prUrl}</a>
-            {:else}
-              作成済み
-            {/if}
-          </p>
-        {/if}
         {#if adoption?.status === "failed" && adoptionStatus === ""}
           <p id="trial-adoption-result">
             {adoptionErrorText(adoption.errorCode)}
           </p>
         {/if}
+      </section>
+    {/if}
+    {#if adoption?.status === "done"}
+      <section id="trial-adoption" aria-label="ブランチと下書きPR">
+        <h3>ブランチと下書きPR</h3>
+        <p id="trial-adoption-result">
+          ブランチ:
+          {#if adoption.branch !== null}
+            <code>{adoption.branch}</code>
+          {:else}
+            作成済み
+          {/if}
+        </p>
+        {#if adoption.commitSha !== null}
+          <p id="trial-adoption-commit">コミット: {adoption.commitSha}</p>
+        {/if}
+        <p id="trial-adoption-pr">
+          下書きPR:
+          {#if adoption.prUrl !== null}
+            <a href={adoption.prUrl}>{adoption.prUrl}</a>
+          {:else}
+            作成済み
+          {/if}
+        </p>
       </section>
     {/if}
     {#if detailReport !== null}

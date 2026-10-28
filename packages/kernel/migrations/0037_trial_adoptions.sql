@@ -8,6 +8,7 @@ CREATE TABLE trial_adoptions (
   status TEXT NOT NULL CHECK (status IN ('pending','done','failed')),
   branch TEXT,
   pr_url TEXT,
+  commit_sha TEXT,
   error_code TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

@@ -5901,6 +5901,8 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 
 `/trials` で検証済み（`verified: true`）かつ差分が取得できた試行には「ブランチとPRを作成（下書き）」ボタンが出ます。押すと確認ダイアログの後に `POST /api/sessions/:sessionId/trials/:proposalId/adopt` を呼び、確認した `report.artifact.sha256` を本文で固定します。サーバーは凍結済み候補の全ファイル・基準バイト・スコープを再検証し、`git worktree` 上に候補バイトを書き（モードは変更しない）、固定 author/message でコミットして `trial/<executionId 先頭8桁>` を push、`gh pr create --draft` で下書きPRを作ります。マージ・base ブランチへの push・force push は決して行いません。同じ proposal は一度だけ実行され、完了済みなら同じ branch/PR を返し、実行中なら 202 を返します。
 
+成功時は push したコミット SHA を `trial_adoptions.commit_sha` に保存し、詳細画面には候補成果物が保持期限で消えた後もブランチ・コミット・下書きPRリンクを表示します。adoption は **Linux ホスト上でのみ**実行する前提です（`gh` と POSIX な git 環境が必要）。そのため adoption の HTTP/ユニットテストは `process.platform === "win32"` ではスキップされ、Windows CI は adoption を検証しません。
+
 有効化はホストの `~/.config/companion/trial-operator.json` に任意の `adoption` を追加します（未設定なら adoption は無効で、API は 409 `adoption_disabled`）。
 
 ```json

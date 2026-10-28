@@ -6,7 +6,7 @@
 // request. It never merges, never pushes to the base branch, never force
 // pushes, and never changes file modes. Every child process is spawned
 // without a shell, with fixed args, a bounded timeout, and a minimal env.
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -58,6 +58,7 @@ export interface ExecuteTrialAdoptionInput {
 export interface TrialAdoptionResult {
   readonly branch: string;
   readonly prUrl: string;
+  readonly commitSha: string;
 }
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -92,7 +93,34 @@ function minimalEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function run(
+/** Kill the whole process group: a wrapper script (or any child that forks)
+ * can leave grandchildren holding the stdout pipe open past our own child. */
+function killProcessGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/** Bounded child runner. The child is its own process-group leader so a
+ * timeout can kill every descendant; after a kill we settle on the child's
+ * "exit" (not the pipe "close") because a surviving grandchild may hold the
+ * pipes open forever. Exported for the timeout regression test. */
+export function runCommand(
   command: string,
   args: readonly string[],
   cwd: string,
@@ -104,13 +132,22 @@ function run(
       shell: false,
       env: minimalEnv(),
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
+    const settle = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    };
     const timer = setTimeout(() => {
       if (settled) return;
-      child.kill("SIGKILL");
+      timedOut = true;
+      killProcessGroup(child);
     }, timeoutMs);
     const append = (current: string, chunk: Buffer): string => {
       if (current.length >= MAX_OUTPUT_BYTES) return current;
@@ -122,18 +159,11 @@ function run(
     child.stderr.on("data", (chunk: Buffer) => {
       stderr = append(stderr, chunk);
     });
-    child.on("error", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code: null, stdout, stderr });
+    child.on("error", () => settle(null));
+    child.on("exit", (code) => {
+      if (timedOut) settle(code);
     });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr });
-    });
+    child.on("close", (code) => settle(code));
   });
 }
 
@@ -142,7 +172,7 @@ async function git(
   args: readonly string[],
   timeoutMs = GIT_TIMEOUT_MS,
 ): Promise<ProcResult> {
-  return run(
+  return runCommand(
     "git",
     ["-C", cwd, "-c", "core.hooksPath=/dev/null", ...args],
     cwd,
@@ -317,62 +347,45 @@ export async function executeTrialAdoption(
     } else if (localExists.code === 0) {
       existingRef = `refs/heads/${branch}`;
     }
-    let resumed = false;
-    if (existingRef !== null) {
-      const log = await git(worktree, [
-        "log",
-        "-1",
-        "--format=%B",
-        existingRef,
-      ]);
-      const message = log.stdout;
-      if (
-        log.code !== 0 ||
-        !message.includes(`Trial-Execution: ${input.executionId}`) ||
-        !message.includes(`Artifact-Sha256: ${input.artifactSha256}`)
-      ) {
-        throw new TrialAdoptionError("branch_exists");
+    // Materialize the reviewed bytes in every case: a resume must rebuild the
+    // exact expected tree before it may trust an existing branch.
+    for (const file of input.files) {
+      const segments = safeRelativePath(file.path);
+      const target = join(worktree, ...segments);
+      prepareParentDirectories(worktree, segments);
+      if (file.kind === "create") {
+        const existing = lstatSync(target, { throwIfNoEntry: false });
+        if (existing !== undefined)
+          throw new TrialAdoptionError("base_changed");
+        writeFileSync(target, file.candidateBytes ?? Buffer.alloc(0), {
+          mode: 0o644,
+        });
+        chmodSync(target, 0o644);
+        continue;
       }
-      resumed = true;
+      const stat = lstatSync(target, { throwIfNoEntry: false });
+      if (stat === undefined || !stat.isFile()) {
+        throw new TrialAdoptionError("base_changed");
+      }
+      const baseBytes = readFileSync(target);
+      if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
+        throw new TrialAdoptionError("base_changed");
+      }
+      if (file.kind === "modify") {
+        if (file.candidateBytes === null) {
+          throw new TrialAdoptionError("not_verified");
+        }
+        const baseMode = statSync(target).mode & 0o777;
+        writeFileSync(target, file.candidateBytes);
+        // Preserve the base mode exactly; candidates never alter modes.
+        chmodSync(target, baseMode);
+      } else {
+        rmSync(target);
+      }
     }
 
-    if (!resumed)
-      for (const file of input.files) {
-        const segments = safeRelativePath(file.path);
-        const target = join(worktree, ...segments);
-        prepareParentDirectories(worktree, segments);
-        if (file.kind === "create") {
-          const existing = lstatSync(target, { throwIfNoEntry: false });
-          if (existing !== undefined)
-            throw new TrialAdoptionError("base_changed");
-          writeFileSync(target, file.candidateBytes ?? Buffer.alloc(0), {
-            mode: 0o644,
-          });
-          chmodSync(target, 0o644);
-          continue;
-        }
-        const stat = lstatSync(target, { throwIfNoEntry: false });
-        if (stat === undefined || !stat.isFile()) {
-          throw new TrialAdoptionError("base_changed");
-        }
-        const baseBytes = readFileSync(target);
-        if (file.baseSha256 === null || sha256(baseBytes) !== file.baseSha256) {
-          throw new TrialAdoptionError("base_changed");
-        }
-        if (file.kind === "modify") {
-          if (file.candidateBytes === null) {
-            throw new TrialAdoptionError("not_verified");
-          }
-          const baseMode = statSync(target).mode & 0o777;
-          writeFileSync(target, file.candidateBytes);
-          // Preserve the base mode exactly; candidates never alter modes.
-          chmodSync(target, baseMode);
-        } else {
-          rmSync(target);
-        }
-      }
-
-    if (!resumed) {
+    let commitSha: string;
+    {
       // Stage exactly the verified bytes. `git add` would let clean/smudge/eol
       // filters rewrite content on the way into the index, so write each blob
       // with filters disabled and update the index directly. Ignore rules are
@@ -445,6 +458,7 @@ export async function executeTrialAdoption(
         "diff",
         "--cached",
         "--name-only",
+        "--no-renames",
         "-z",
       ]);
       const stagedPaths = staged.stdout
@@ -459,37 +473,87 @@ export async function executeTrialAdoption(
       ) {
         throw new TrialAdoptionError("git_failed");
       }
-      const message = `trial: ${commitSubject(input.objective)}\n\nTrial-Execution: ${input.executionId}\nArtifact-Sha256: ${input.artifactSha256}`;
-      const committed = await git(worktree, [
-        "-c",
-        `user.name=${COMMIT_NAME}`,
-        "-c",
-        `user.email=${COMMIT_EMAIL}`,
-        "commit",
-        "--no-gpg-sign",
-        "-m",
-        message,
-      ]);
-      if (committed.code !== 0) throw new TrialAdoptionError("git_failed");
-
-      const pushed = await git(
-        worktree,
-        ["push", config.remote, `HEAD:refs/heads/${branch}`],
-        PUSH_TIMEOUT_MS,
-      );
-      if (pushed.code !== 0) {
-        // A rejected push is nearly always a raced branch creation.
-        const exists = await git(config.repoPath, [
-          "ls-remote",
-          "--heads",
-          config.remote,
-          `refs/heads/${branch}`,
+      const expected = await git(worktree, ["write-tree"]);
+      const expectedTree = expected.stdout.trim();
+      if (expected.code !== 0 || !/^[0-9a-f]{40,64}$/.test(expectedTree)) {
+        throw new TrialAdoptionError("git_failed");
+      }
+      if (existingRef !== null) {
+        // Resume is allowed only when the existing tip is provably the commit
+        // this exact execution would have pushed: same trailers, same tree as
+        // the rebuilt expected tree, and the base commit as its parent. A
+        // rewritten/foreign tip with copied trailers must not pass.
+        const log = await git(worktree, [
+          "log",
+          "-1",
+          "--format=%B",
+          existingRef,
         ]);
-        throw new TrialAdoptionError(
-          exists.code === 0 && exists.stdout.trim().length > 0
-            ? "branch_exists"
-            : "git_failed",
+        const message = log.stdout;
+        const tip = await git(worktree, [
+          "rev-parse",
+          "--verify",
+          `${existingRef}^{commit}`,
+        ]);
+        const tipTree = await git(worktree, [
+          "rev-parse",
+          "--verify",
+          `${existingRef}^{tree}`,
+        ]);
+        const parent = await git(worktree, [
+          "rev-parse",
+          "--verify",
+          `${existingRef}^`,
+        ]);
+        if (
+          log.code !== 0 ||
+          !message.includes(`Trial-Execution: ${input.executionId}`) ||
+          !message.includes(`Artifact-Sha256: ${input.artifactSha256}`) ||
+          tip.code !== 0 ||
+          tipTree.code !== 0 ||
+          parent.code !== 0 ||
+          tipTree.stdout.trim() !== expectedTree ||
+          parent.stdout.trim() !== baseRev.stdout.trim()
+        ) {
+          throw new TrialAdoptionError("branch_exists");
+        }
+        commitSha = tip.stdout.trim();
+      } else {
+        const message = `trial: ${commitSubject(input.objective)}\n\nTrial-Execution: ${input.executionId}\nArtifact-Sha256: ${input.artifactSha256}`;
+        const committed = await git(worktree, [
+          "-c",
+          `user.name=${COMMIT_NAME}`,
+          "-c",
+          `user.email=${COMMIT_EMAIL}`,
+          "commit",
+          "--no-gpg-sign",
+          "-m",
+          message,
+        ]);
+        if (committed.code !== 0) throw new TrialAdoptionError("git_failed");
+
+        const pushed = await git(
+          worktree,
+          ["push", config.remote, `HEAD:refs/heads/${branch}`],
+          PUSH_TIMEOUT_MS,
         );
+        if (pushed.code !== 0) {
+          // A rejected push is nearly always a raced branch creation.
+          const exists = await git(config.repoPath, [
+            "ls-remote",
+            "--heads",
+            config.remote,
+            `refs/heads/${branch}`,
+          ]);
+          throw new TrialAdoptionError(
+            exists.code === 0 && exists.stdout.trim().length > 0
+              ? "branch_exists"
+              : "git_failed",
+          );
+        }
+        const head = await git(worktree, ["rev-parse", "--verify", "HEAD"]);
+        if (head.code !== 0) throw new TrialAdoptionError("git_failed");
+        commitSha = head.stdout.trim();
       }
     }
 
@@ -501,7 +565,7 @@ export async function executeTrialAdoption(
     const repoSlug =
       remoteUrl.code === 0 ? parseGithubRepo(remoteUrl.stdout) : null;
     const title = `trial: ${commitSubject(input.objective)}`;
-    const created = await run(
+    const created = await runCommand(
       "gh",
       [
         "pr",
@@ -523,7 +587,7 @@ export async function executeTrialAdoption(
     if (created.code !== 0) throw new TrialAdoptionError("gh_failed");
     const prUrl = parsePrUrl(created.stdout);
     if (prUrl === null) throw new TrialAdoptionError("gh_failed");
-    return { branch, prUrl };
+    return { branch, prUrl, commitSha };
   } finally {
     if (worktreeAdded) {
       await git(config.repoPath, ["worktree", "remove", "--force", worktree]);

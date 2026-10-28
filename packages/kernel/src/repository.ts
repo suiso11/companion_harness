@@ -7603,6 +7603,7 @@ export function createKernelRepository(
       status: "done" | "failed";
       branch: string | null;
       prUrl: string | null;
+      commitSha: string | null;
       errorCode: string | null;
     },
     now: number,

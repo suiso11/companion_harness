@@ -34,6 +34,10 @@ import { createCollectingLogger } from "../src/logger.js";
 import { shellHasNoInlineScript } from "../src/ui/page.js";
 import { trialProposalModel, trialStatusText } from "../src/ui/reducer.js";
 
+// Adoption tests spawn a POSIX shell fake gh and use POSIX git setup; the
+// adoption feature executes on the Linux host only.
+const posixDescribe = process.platform === "win32" ? describe.skip : describe;
+
 const FP = "b".repeat(64);
 const REV = "a".repeat(40);
 
@@ -1093,7 +1097,7 @@ describe("trial candidate HTTP surface", () => {
   });
 });
 
-describe("trial adoption HTTP surface", () => {
+posixDescribe("trial adoption HTTP surface", () => {
   let root: string;
   let remote: string;
   let checkout: string;
@@ -1286,10 +1290,16 @@ describe("trial adoption HTTP surface", () => {
       );
       expect(first.status).toBe(201);
       const branch = `trial/${executionId.slice(0, 8)}`;
+      const commitSha = execFileSync(
+        "git",
+        ["-C", remote, "rev-parse", `refs/heads/${branch}`],
+        { encoding: "utf8" },
+      ).trim();
       expect(first.body).toMatchObject({
         status: "done",
         branch,
         prUrl: "https://github.com/example/repo/pull/42",
+        commitSha,
         errorCode: null,
       });
       const second = await post(
@@ -1312,6 +1322,7 @@ describe("trial adoption HTTP surface", () => {
         status: "done",
         branch,
         prUrl: "https://github.com/example/repo/pull/42",
+        commitSha,
         errorCode: null,
       });
     } finally {

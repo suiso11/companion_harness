@@ -975,6 +975,7 @@ describe("trial adoption crash recovery", () => {
         status: "failed",
         branch: null,
         prUrl: null,
+        commitSha: null,
         errorCode: "interrupted",
       });
       const retry = repo.beginTrialAdoption(
@@ -1008,6 +1009,7 @@ describe("trial adoption crash recovery", () => {
         status: "failed",
         branch: null,
         prUrl: null,
+        commitSha: null,
         errorCode: "interrupted",
       });
     } finally {

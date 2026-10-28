@@ -8,13 +8,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { executeTrialAdoption } from "../src/trial_adoption.js";
+import { executeTrialAdoption, runCommand } from "../src/trial_adoption.js";
 
 const EXECUTION_ID = "12345678-1234-4234-8234-123456789012";
 const ARTIFACT_SHA = "a".repeat(64);
@@ -41,6 +42,10 @@ function git(cwd: string, ...args: string[]): string {
     },
   });
 }
+
+// These tests spawn POSIX shell scripts (fake gh) and use chmod/symlinks;
+// the adoption feature executes on the Linux host only.
+const posixDescribe = process.platform === "win32" ? describe.skip : describe;
 
 let root: string;
 let remote: string;
@@ -111,7 +116,7 @@ function files() {
   ];
 }
 
-describe("executeTrialAdoption", () => {
+posixDescribe("executeTrialAdoption", () => {
   it("creates a fixed commit on a pushed trial branch and preserves base modes", async () => {
     const result = await executeTrialAdoption({
       config: config(),
@@ -124,6 +129,7 @@ describe("executeTrialAdoption", () => {
     expect(result).toEqual({
       branch,
       prUrl: "https://github.com/example/repo/pull/7",
+      commitSha: git(remote, "rev-parse", `refs/heads/${branch}`).trim(),
     });
     const remoteRefs = git(remote, "show-ref", `refs/heads/${branch}`);
     expect(remoteRefs).toContain(branch);
@@ -344,7 +350,97 @@ describe("executeTrialAdoption", () => {
     expect(resumed).toEqual({
       branch,
       prUrl: "https://github.com/example/repo/pull/9",
+      commitSha: pushedBefore.trim(),
     });
     expect(git(remote, "rev-parse", `refs/heads/${branch}`)).toBe(pushedBefore);
+  });
+  it("treats an identical delete+create pair as two staged paths", async () => {
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/12\n'\n",
+      { mode: 0o755 },
+    );
+    const executionId = "13131313-3535-4646-8676-787878787878";
+    const result = await executeTrialAdoption({
+      config: config(),
+      executionId,
+      artifactSha256: ARTIFACT_SHA,
+      objective: "rename",
+      files: [
+        {
+          path: DELETE_FILE,
+          kind: "delete" as const,
+          baseSha256: sha(DELETE_BYTES),
+          candidateBytes: null,
+        },
+        {
+          path: "copy.txt",
+          kind: "create" as const,
+          baseSha256: null,
+          candidateBytes: DELETE_BYTES,
+        },
+      ],
+    });
+    const branch = `trial/${executionId.slice(0, 8)}`;
+    expect(result.branch).toBe(branch);
+    // Rename detection must not collapse the pair into one path.
+    expect(git(remote, "show", `${branch}:copy.txt`)).toBe("remove me\n");
+    expect(() => git(remote, "show", `${branch}:${DELETE_FILE}`)).toThrow();
+  });
+
+  it("rejects a rewritten tip that copies the expected trailers", async () => {
+    writeFileSync(
+      join(bin, "gh"),
+      "#!/bin/sh\nprintf 'https://github.com/example/repo/pull/13\n'\n",
+      { mode: 0o755 },
+    );
+    const executionId = "14141414-3636-4747-8787-898989898989";
+    const first = await executeTrialAdoption({
+      config: config(),
+      executionId,
+      artifactSha256: ARTIFACT_SHA,
+      objective: "amend target",
+      files: files(),
+    });
+    const branch = first.branch;
+    // Rewrite the pushed tip with the same message/trailers but another tree.
+    const clone = join(root, "amend-clone");
+    execFileSync("git", ["clone", "-q", remote, clone]);
+    git(clone, "config", "user.name", "test");
+    git(clone, "config", "user.email", "test@example.com");
+    git(clone, "checkout", "-q", branch);
+    writeFileSync(join(clone, "sneaky.txt"), "sneaky\n");
+    git(clone, "add", "sneaky.txt");
+    git(clone, "commit", "-q", "--amend", "--no-edit");
+    git(remote, "update-ref", "-d", `refs/heads/${branch}`);
+    git(clone, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    await expect(
+      executeTrialAdoption({
+        config: config(),
+        executionId,
+        artifactSha256: ARTIFACT_SHA,
+        objective: "amend target",
+        files: files(),
+      }),
+    ).rejects.toMatchObject({ code: "branch_exists" });
+    rmSync(clone, { recursive: true, force: true });
+  });
+
+  it("kills a timed-out command's whole process group", async () => {
+    const pidFile = join(root, "grandchild.pid");
+    const script = join(root, "hang.sh");
+    writeFileSync(
+      script,
+      `#!/bin/sh\nsleep 60 &\necho $! > '${pidFile}'\nwait\n`,
+      { mode: 0o755 },
+    );
+    const started = Date.now();
+    const result = await runCommand(script, [], root, 300);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(result.code).toBeNull();
+    const grandchild = Number(readFileSync(pidFile, "utf8").trim());
+    expect(grandchild).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(() => process.kill(grandchild, 0)).toThrow();
   });
 });
