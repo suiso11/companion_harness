@@ -398,6 +398,11 @@ test("refresh merges the newest page and never drops the older-page drawer", asy
   );
   const base = `/api/sessions/${sessionId}`;
   const scope = "e2e-bulk";
+  // The panel's boot read is async: wait until it has rendered the empty
+  // first page so the bulk creates never race an in-flight merge.
+  await expect(page.locator("#learning-list button")).toHaveCount(0, {
+    timeout: 15_000,
+  });
   for (let n = 0; n < 55; n += 1) {
     const created = await api(page, "POST", `${base}/learning/hypotheses`, {
       scope,
@@ -406,17 +411,43 @@ test("refresh merges the newest page and never drops the older-page drawer", asy
     });
     expect(created.status).toBe(201);
   }
+  // Count only after the click's own newest-page response settled: the
+  // list is a merge target, so counting while the request is in flight can
+  // observe a stale/partial render (CI saw 49 then an unrelated 55).
+  const newestPage = page.waitForResponse(
+    (r) =>
+      r.request().method() === "GET" &&
+      r.url().includes(`/api/sessions/${sessionId}/learning/hypotheses?`) &&
+      r.url().includes("limit=50") &&
+      !r.url().includes("cursor="),
+  );
   await page.locator("#learning-refresh").click();
+  expect((await newestPage).status()).toBe(200);
   await expect(page.locator("#learning-list button")).toHaveCount(50, {
     timeout: 15_000,
   });
   await expect(page.locator("#learning-more")).toBeVisible();
+  const olderPage = page.waitForResponse(
+    (r) =>
+      r.request().method() === "GET" &&
+      r.url().includes(`/api/sessions/${sessionId}/learning/hypotheses?`) &&
+      r.url().includes("cursor="),
+  );
   await page.locator("#learning-more").click();
+  expect((await olderPage).status()).toBe(200);
   await expect(page.locator("#learning-list button")).toHaveCount(55, {
     timeout: 15_000,
   });
   // A background refresh merges the newest page: the older page survives.
+  const mergedRefresh = page.waitForResponse(
+    (r) =>
+      r.request().method() === "GET" &&
+      r.url().includes(`/api/sessions/${sessionId}/learning/hypotheses?`) &&
+      r.url().includes("limit=50") &&
+      !r.url().includes("cursor="),
+  );
   await page.locator("#learning-refresh").click();
+  expect((await mergedRefresh).status()).toBe(200);
   await expect(page.locator("#learning-list button")).toHaveCount(55, {
     timeout: 15_000,
   });
@@ -428,7 +459,15 @@ test("refresh merges the newest page and never drops the older-page drawer", asy
   await expect(page.locator("#learning-detail")).toBeVisible();
   const shown = await page.locator("#learning-detail-body").textContent();
   expect(shown).toContain("e2e bulk row");
+  const drawerRefresh = page.waitForResponse(
+    (r) =>
+      r.request().method() === "GET" &&
+      r.url().includes(`/api/sessions/${sessionId}/learning/hypotheses?`) &&
+      r.url().includes("limit=50") &&
+      !r.url().includes("cursor="),
+  );
   await page.locator("#learning-refresh").click();
+  expect((await drawerRefresh).status()).toBe(200);
   await expect(page.locator("#learning-detail")).toBeVisible({
     timeout: 15_000,
   });
