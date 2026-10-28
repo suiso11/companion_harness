@@ -162,6 +162,22 @@ function readGuestObservation(workRoot) {
         parsed.lastAssistantTail,
       ).slice(-MAX_ASSISTANT_TAIL_CHARS);
     }
+    // Tool error heads and paths are guest-written too. Bound and redact them
+    // at the boundary so every consumer (findings, diagnostics) sees only the
+    // sanitized form.
+    for (const tool of parsed.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      if (typeof tool.error === "string")
+        tool.error = redactDiagnostic(tool.error)
+          .replace(/\p{Cc}/gu, " ")
+          .slice(0, 240);
+      if (
+        tool.args &&
+        typeof tool.args === "object" &&
+        typeof tool.args.path === "string"
+      )
+        tool.args.path = redactDiagnostic(tool.args.path).slice(0, 200);
+    }
     return parsed;
   } catch {
     return null;
@@ -336,12 +352,47 @@ function guestAnswerFindings(observation) {
   return buildGuestAnswerFindings(boundedGuestAnswer(observation));
 }
 
+// A failed tool call is evidence about the guest only, never host authority.
+// The guest retains a bounded error head; forward up to three of them so a
+// trial failure names its cause instead of collapsing to "denied".
+const MAX_TOOL_ERROR_FINDINGS = 3;
+const MAX_TOOL_ERROR_FINDING_CHARS = 160;
+
+function guestToolErrorFindings(observation) {
+  if (observation === null || !Array.isArray(observation.tools)) return [];
+  const out = [];
+  for (const tool of observation.tools) {
+    if (out.length >= MAX_TOOL_ERROR_FINDINGS) break;
+    if (
+      !tool ||
+      typeof tool !== "object" ||
+      tool.result !== "error" ||
+      typeof tool.error !== "string"
+    )
+      continue;
+    const name =
+      typeof tool.name === "string" && tool.name.length > 0
+        ? tool.name.slice(0, 64)
+        : "unknown";
+    // The observation is guest-owned and untrusted: re-bound and re-redact.
+    const text = redactDiagnostic(tool.error)
+      .replace(/\p{Cc}/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, MAX_TOOL_ERROR_FINDING_CHARS);
+    if (text.length === 0) continue;
+    out.push(`guest tool error (unattested): ${name}: ${text}`);
+  }
+  return out;
+}
+
 function reportFindings(observation, extra = []) {
   const out = [];
   const seen = new Set();
   const candidates = [
     ...guestAnswerFindings(observation),
     ...extra,
+    ...guestToolErrorFindings(observation),
     ...observationFindings(observation),
   ];
   for (const entry of candidates) {
