@@ -25,6 +25,27 @@ export const UserTextTurnInputV1Schema = z.strictObject({
 export type UserTextTurnInputV1 = z.infer<typeof UserTextTurnInputV1Schema>;
 
 /**
+ * Companion-initiated message (in-app, no external send). The companion
+ * authors the text and starts the turn itself; no Run is created and no
+ * `user_text` semantics (autonomy source, retry, memory extraction) apply.
+ * Same bounds as `user_text`.
+ */
+export const CompanionTextTurnInputV1Schema = z.strictObject({
+  kind: z.literal("companion_text"),
+  version: z.literal(1),
+  text: z
+    .string()
+    .min(1)
+    .max(MAX_USER_TEXT_LENGTH)
+    .refine((t) => t.trim().length > 0, {
+      message: "text must not be blank",
+    }),
+});
+export type CompanionTextTurnInputV1 = z.infer<
+  typeof CompanionTextTurnInputV1Schema
+>;
+
+/**
  * M5 decision TurnInput variants (§18.3, exact): both carry the proposal
  * id plus its immutable content hash, so a decision is always bound to the
  * exact hash the UI button was rendered with.
@@ -50,11 +71,12 @@ export type ActionRejectionTurnInputV1 = z.infer<
 >;
 
 /**
- * TurnInput union, version 1: `user_text` (M0) plus the two M5 decision
- * variants (`action_approval` / `action_rejection`). No other variants.
+ * TurnInput union, version 1: `user_text` (M0), `companion_text`, plus the
+ * two M5 decision variants (`action_approval` / `action_rejection`).
  */
 export const TurnInputV1Schema = z.discriminatedUnion("kind", [
   UserTextTurnInputV1Schema,
+  CompanionTextTurnInputV1Schema,
   ActionApprovalTurnInputV1Schema,
   ActionRejectionTurnInputV1Schema,
 ]);

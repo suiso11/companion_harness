@@ -150,7 +150,12 @@ import {
   remoteTokenFromCookieHeader,
 } from "./remote_session.js";
 import type { RunDeltaSource } from "./sse.js";
-import { createNotificationFeedSseResponse, createSseResponse } from "./sse.js";
+import {
+  createNotificationFeedSseResponse,
+  createPolledSseResponse,
+  createSseResponse,
+  pollCompanionMessageStep,
+} from "./sse.js";
 import {
   executeTrialAdoption,
   TrialAdoptionError,
@@ -6230,6 +6235,39 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return createNotificationFeedSseResponse(repo, session.id, cursor, {
         isDraining: () => draining,
       });
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Companion-initiated chat messages (durable Turn seq feed). Same SSE
+  // envelope/loop as the notification feed, session-owned, never terminal.
+  // A companion message is written by the companion-message CLI (or an
+  // internal caller); the open chat appends it live.
+  app.get("/api/sessions/:sessionId/companion-messages/stream", (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const gated = strictQuery(c, ["after"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const cursor = effectiveCursor(
+      gated.values.after,
+      c.req.header("last-event-id"),
+    );
+    try {
+      // Validate session ownership before streaming (foreign/missing 404).
+      repo.listCompanionMessagesForward(session.id, {
+        after: cursor,
+        limit: 1,
+      });
+      return createPolledSseResponse(
+        (next) => pollCompanionMessageStep(repo, session.id, next),
+        cursor,
+        { isDraining: () => draining },
+      );
     } catch (error) {
       return mapDomainError(c, error);
     }

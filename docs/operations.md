@@ -5933,3 +5933,25 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 ```
 
 `scripts/deploy/build-trial-operator.mts` がこの値を `autonomy.env` の `COMPANION_AUTONOMY_JSON` にそのまま引き渡します（厳格パース。未知キーは起動失敗）。`repoPath` は絶対パスの git checkout、`remote` はそのリポジトリの remote 名、`baseRef` は fetch 後の基準 ref、`branchPrefix` は `/` で終わる名前空間です。`gh` はサービス環境の `HOME`/`PATH`（必要なら `XDG_CONFIG_HOME`）で認証済みである必要があります。固定エラーは `adoption_disabled` / `not_verified` / `artifact_mismatch` / `base_changed` / `branch_exists` / `git_failed` / `gh_failed` で、`base_changed` の場合は試行をやり直してください（adoption テーブルは proposal 単位で失敗を記録し、再クリックで再試行できます）。
+
+## Companion-initiated chat messages (`companion_text`, 2026-10-29)
+
+- `pnpm --filter @companion/server message send --text "..." [--session <uuid>]`
+  writes ONE `companion_text` Turn (no Run) through the kernel repository.
+  Without `--session` the target is the most recently active session. The CLI
+  refuses a missing DB/session and stores the text as the real visible message
+  (bounded 1..32768, trimmed non-empty; no safe-text masking).
+- The history projection carries `kind: "companion_text"` with
+  `selectedRun: null`. Both chat shells (Svelte `/` and legacy `/legacy`)
+  render it as an assistant message, never as a user bubble and never as
+  「応答なし」.
+- Live delivery: `GET /api/sessions/:sessionId/companion-messages/stream?after=<turnSeq>`
+  serves `event: companion-message` with `id` = Turn seq through the shared
+  polled SSE loop (250ms poll, 15s heartbeat, backpressure grace, synchronous
+  drain gate, native `Last-Event-ID` replay). The Svelte chat opens it after
+  history hydration, seeded at the highest rendered Turn seq, and appends new
+  messages by Turn id; reload rebuilds from history. `/legacy` has no live
+  feed (reload/hydration only).
+- This kind deliberately has NO `user_text` semantics: no Run/retry, no
+  autonomy source turn, no memory extraction, no external send. It is in-app
+  only.

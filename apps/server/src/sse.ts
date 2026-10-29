@@ -402,29 +402,29 @@ export function pollNotificationFeedStep(
   return { chunks, cursor: advanced, done: false };
 }
 
+export interface PolledSseStep {
+  readonly chunks: string[];
+  readonly cursor: number;
+  readonly done: boolean;
+}
+
+export interface PolledSseOptions {
+  isDraining?: () => boolean;
+  setInterval?: typeof setInterval;
+  clearInterval?: typeof clearInterval;
+  setTimeout?: typeof setTimeout;
+}
+
 /**
- * Serve the notification feed as a Response. Same boring loop as run
- * events (250ms SQLite poll, 15s heartbeat, awaited writes with the 5s
- * backpressure grace, multi-client safe), except:
- * - ownership is session-scoped (the source read is already session-owned;
- *   no event from a foreign session can appear);
- * - the `isDraining` gate aborts the stream SYNCHRONOUSLY before any DB
- *   read (checked at the top of every tick): shutdown marks draining
- *   FIRST and only closes the DB after the engine drain, so an open feed
- *   always ends before the close and never throws a closed-DB error;
- * - abort (client disconnect) ends the loop and cleans the timers.
- * Reading the feed never acks: delivery state is untouched.
+ * Shared boring SSE loop: poll `pollStep(cursor)` on a fixed interval,
+ * write chunks with the backpressure grace, heartbeat, and end on client
+ * abort or the synchronous drain gate. `done` is intentionally ignored by
+ * the long-lived feed callers.
  */
-export function createNotificationFeedSseResponse(
-  source: NotificationFeedSource,
-  sessionId: string,
+export function createPolledSseResponse(
+  pollStep: (cursor: number) => PolledSseStep,
   cursor: number,
-  options: {
-    isDraining?: () => boolean;
-    setInterval?: typeof setInterval;
-    clearInterval?: typeof clearInterval;
-    setTimeout?: typeof setTimeout;
-  } = {},
+  options: PolledSseOptions = {},
 ): Response {
   const isDraining = options.isDraining ?? (() => false);
   const setIntervalFn = options.setInterval ?? setInterval;
@@ -520,7 +520,7 @@ export function createNotificationFeedSseResponse(
         try {
           let chunks: string[];
           try {
-            const out = pollNotificationFeedStep(source, sessionId, current);
+            const out = pollStep(current);
             chunks = [...out.chunks];
             current = out.cursor;
           } catch {
@@ -560,4 +560,91 @@ export function createNotificationFeedSseResponse(
   });
 
   return new Response(stream, { status: 200, headers: sseHeaders() });
+}
+
+/**
+ * Serve the notification feed as a Response. Same boring loop as run
+ * events (250ms SQLite poll, 15s heartbeat, awaited writes with the 5s
+ * backpressure grace, multi-client safe), except:
+ * - ownership is session-scoped (the source read is already session-owned;
+ *   no event from a foreign session can appear);
+ * - the `isDraining` gate aborts the stream SYNCHRONOUSLY before any DB
+ *   read (checked at the top of every tick): shutdown marks draining
+ *   FIRST and only closes the DB after the engine drain, so an open feed
+ *   always ends before the close and never throws a closed-DB error;
+ * - abort (client disconnect) ends the loop and cleans the timers.
+ * Reading the feed never acks: delivery state is untouched.
+ */
+export function createNotificationFeedSseResponse(
+  source: NotificationFeedSource,
+  sessionId: string,
+  cursor: number,
+  options: PolledSseOptions = {},
+): Response {
+  return createPolledSseResponse(
+    (next) => pollNotificationFeedStep(source, sessionId, next),
+    cursor,
+    options,
+  );
+}
+
+/**
+ * Companion-initiated chat message feed (session-owned, read-only, never
+ * terminal). Same loop as the notification feed; `event` is
+ * `companion-message` and `id` is the Turn seq, so native EventSource
+ * replay resumes at the right place.
+ */
+export const COMPANION_SSE_EVENT = "companion-message" as const;
+export const COMPANION_SSE_PAGE_LIMIT = 50;
+
+export interface SseCompanionMessageDto {
+  readonly turnId: string;
+  readonly seq: number;
+  readonly text: string;
+  readonly createdAt: number;
+}
+
+export interface CompanionMessageFeedSource {
+  listCompanionMessagesForward(
+    sessionId: string,
+    query: { after?: number; limit?: number },
+  ): {
+    messages: SseCompanionMessageDto[];
+    hasMore: boolean;
+  };
+}
+
+export function formatCompanionMessageSse(
+  message: SseCompanionMessageDto,
+): string {
+  const data = JSON.stringify({
+    turnId: message.turnId,
+    seq: message.seq,
+    text: message.text,
+    createdAt: message.createdAt,
+  });
+  return `id: ${message.seq}\nevent: ${COMPANION_SSE_EVENT}\ndata: ${data}\n\n`;
+}
+
+export function pollCompanionMessageStep(
+  source: CompanionMessageFeedSource,
+  sessionId: string,
+  cursor: number,
+): {
+  readonly chunks: string[];
+  readonly cursor: number;
+  readonly done: false;
+} {
+  const page = source.listCompanionMessagesForward(sessionId, {
+    after: cursor,
+    limit: COMPANION_SSE_PAGE_LIMIT,
+  });
+  const chunks = page.messages.map((message) =>
+    formatCompanionMessageSse(message),
+  );
+  const advanced =
+    page.messages.length > 0
+      ? (page.messages[page.messages.length - 1]?.seq ?? cursor)
+      : cursor;
+  return { chunks, cursor: advanced, done: false };
 }
