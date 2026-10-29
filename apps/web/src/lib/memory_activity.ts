@@ -499,3 +499,206 @@ export function parseLearningProposals(
   }
   return items;
 }
+
+/* ---------------- memory content statistics (read-only) --------------- */
+
+export type MemoryKind =
+  | "user_fact"
+  | "model_inference"
+  | "summary"
+  | "correction";
+export type MemoryStatus = "active" | "retired" | "superseded" | "archived";
+
+export const MEMORY_KIND_ORDER: readonly MemoryKind[] = [
+  "user_fact",
+  "model_inference",
+  "summary",
+  "correction",
+];
+export const MEMORY_STATUS_ORDER: readonly MemoryStatus[] = [
+  "active",
+  "retired",
+  "superseded",
+  "archived",
+];
+
+export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
+  user_fact: "ユーザーの事実",
+  model_inference: "推測",
+  summary: "要約",
+  correction: "訂正",
+};
+
+export const MEMORY_STATUS_LABELS: Record<MemoryStatus, string> = {
+  active: "有効",
+  retired: "退役",
+  superseded: "置換済み",
+  archived: "保管",
+};
+
+export interface MemoryStats {
+  readonly byKind: Readonly<Record<MemoryKind, number>>;
+  readonly byStatus: Readonly<Record<MemoryStatus, number>>;
+  readonly importance?: MemoryStatsImportance;
+  readonly computedAt: number;
+  readonly truncated: boolean;
+}
+
+export interface MemoryImportanceBucket {
+  readonly lt: number;
+  readonly count: number;
+}
+
+export interface MemoryStatsImportance {
+  readonly scored: number;
+  readonly unscored: number;
+  readonly buckets: readonly MemoryImportanceBucket[];
+}
+
+export interface MemoryImportanceBar extends MemoryStatsCard {
+  readonly percent: number;
+}
+
+/** Fixed server bucket upper bounds (last is the exclusive top). */
+const IMPORTANCE_BUCKET_LTS: readonly number[] = [0.2, 0.4, 0.6, 0.8, 1.0001];
+/** Fixed display labels for those five buckets. */
+export const MEMORY_IMPORTANCE_LABELS: readonly string[] = [
+  "0–0.2",
+  "0.2–0.4",
+  "0.4–0.6",
+  "0.6–0.8",
+  "0.8–1.0",
+];
+
+export interface MemoryStatsCard {
+  readonly key: string;
+  readonly label: string;
+  readonly value: number;
+}
+
+export interface MemoryKindBar extends MemoryStatsCard {
+  readonly percent: number;
+}
+
+function parseKindCounts(value: unknown): Record<MemoryKind, number> | null {
+  if (!isRecord(value)) return null;
+  const out = {} as Record<MemoryKind, number>;
+  for (const kind of MEMORY_KIND_ORDER) {
+    const count = value[kind];
+    if (!isNonNegativeInteger(count)) return null;
+    out[kind] = count;
+  }
+  return out;
+}
+
+function parseStatusCounts(
+  value: unknown,
+): Record<MemoryStatus, number> | null {
+  if (!isRecord(value)) return null;
+  const out = {} as Record<MemoryStatus, number>;
+  for (const status of MEMORY_STATUS_ORDER) {
+    const count = value[status];
+    if (!isNonNegativeInteger(count)) return null;
+    out[status] = count;
+  }
+  return out;
+}
+
+function parseImportance(value: unknown): MemoryStatsImportance | null {
+  if (
+    !isRecord(value) ||
+    !isNonNegativeInteger(value.scored) ||
+    !isNonNegativeInteger(value.unscored) ||
+    !Array.isArray(value.buckets) ||
+    value.buckets.length !== IMPORTANCE_BUCKET_LTS.length
+  ) {
+    return null;
+  }
+  const buckets: MemoryImportanceBucket[] = [];
+  for (let index = 0; index < value.buckets.length; index += 1) {
+    const raw = value.buckets[index];
+    if (
+      !isRecord(raw) ||
+      raw.lt !== IMPORTANCE_BUCKET_LTS[index] ||
+      !isNonNegativeInteger(raw.count)
+    ) {
+      return null;
+    }
+    buckets.push({ lt: raw.lt as number, count: raw.count });
+  }
+  return { scored: value.scored, unscored: value.unscored, buckets };
+}
+
+/** Strict parse of GET /api/memory/stats (numbers only, no bodies). */
+export function parseMemoryStats(body: unknown): MemoryStats | null {
+  if (!isRecord(body)) return null;
+  const byKind = parseKindCounts(body.byKind);
+  const byStatus = parseStatusCounts(body.byStatus);
+  const importance =
+    body.importance === undefined
+      ? undefined
+      : parseImportance(body.importance);
+  if (
+    byKind === null ||
+    byStatus === null ||
+    (body.importance !== undefined && importance === null) ||
+    !isNonNegativeInteger(body.computedAt) ||
+    typeof body.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    byKind,
+    byStatus,
+    ...(importance !== undefined && importance !== null ? { importance } : {}),
+    computedAt: body.computedAt,
+    truncated: body.truncated,
+  };
+}
+
+/** Four status cards in fixed order (active/retired/superseded/archived). */
+export function memoryStatusCards(stats: MemoryStats): MemoryStatsCard[] {
+  return MEMORY_STATUS_ORDER.map((status) => ({
+    key: status,
+    label: MEMORY_STATUS_LABELS[status],
+    value: stats.byStatus[status],
+  }));
+}
+
+/** Active-kind bars; widths are relative to the largest kind count. */
+export function memoryKindBars(stats: MemoryStats): MemoryKindBar[] {
+  const values = MEMORY_KIND_ORDER.map((kind) => stats.byKind[kind]);
+  const max = Math.max(1, ...values);
+  return MEMORY_KIND_ORDER.map((kind) => ({
+    key: kind,
+    label: MEMORY_KIND_LABELS[kind],
+    value: stats.byKind[kind],
+    percent: Math.round((stats.byKind[kind] / max) * 100),
+  }));
+}
+
+/**
+ * Importance distribution bars (five fixed buckets + unscored). Empty when
+ * the older paged fallback produced no importance data.
+ */
+export function memoryImportanceBars(
+  stats: MemoryStats,
+): MemoryImportanceBar[] {
+  const importance = stats.importance;
+  if (importance === undefined) return [];
+  const entries = importance.buckets.map((bucket, index) => ({
+    key: `importance-${index}`,
+    label: MEMORY_IMPORTANCE_LABELS[index] ?? String(bucket.lt),
+    value: bucket.count,
+  }));
+  entries.push({
+    key: "importance-unscored",
+    label: "未採点",
+    value: importance.unscored,
+  });
+  const max = Math.max(1, ...entries.map((entry) => entry.value));
+  return entries.map((entry) => ({
+    ...entry,
+    percent: Math.round((entry.value / max) * 100),
+  }));
+}

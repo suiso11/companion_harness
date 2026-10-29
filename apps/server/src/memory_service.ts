@@ -214,6 +214,25 @@ export const MEMORY_GRAPH_PAGE_LIMIT_DEFAULT = 50;
 /** Hard stop for a misbehaving remind cursor loop (fixed failure). */
 const MEMORY_GRAPH_PAGE_MAX = 100;
 export const MEMORY_GRAPH_LABEL_MAX_CP = 512;
+/**
+ * Memory-content statistics (read-only panel). `record.stats` (remind#42) is
+ * the preferred source: one read-only aggregate call with active kind/status
+ * counts plus the active importance distribution. Older remind versions
+ * reject the unknown op with BAD_REQUEST; the service then latches
+ * "stats unsupported" for the process and falls back to bounded
+ * `record.list` pages (no importance) with no further stats attempts.
+ * `record.list` has no cursor (only `until`), so each status walks
+ * newest -> oldest with a fixed row cap; reaching the cap sets `truncated`.
+ * The result is cached server-side for five minutes with single-flight so
+ * auto-refreshing views do not spawn a CLI child per request.
+ */
+export const MEMORY_STATS_CACHE_TTL_MS = 300_000;
+export const MEMORY_STATS_ACTIVE_ROW_CAP = 300;
+export const MEMORY_STATS_STATUS_ROW_CAP = 100;
+/** First requested page size; remind may answer LIMIT_EXCEEDED. */
+const MEMORY_STATS_PAGE_LIMIT_CANDIDATES: readonly number[] = [
+  100, 25, 10, 5, 1,
+];
 /** Closed extraction kinds (remind RECORD_KINDS subset we ever write). */
 const EXTRACT_KINDS: ReadonlySet<string> = new Set([
   "user_fact",
@@ -394,6 +413,54 @@ export interface MemoryServiceOptions {
   readonly sendEvidence?: boolean;
 }
 
+/** Closed kind counts for ACTIVE records (the only kinds extracted/written). */
+export interface MemoryStatsByKind {
+  readonly user_fact: number;
+  readonly model_inference: number;
+  readonly summary: number;
+  readonly correction: number;
+}
+
+/** Closed status counts (remind record statuses). */
+export interface MemoryStatsByStatus {
+  readonly active: number;
+  readonly retired: number;
+  readonly superseded: number;
+  readonly archived: number;
+}
+
+/** One importance histogram bucket from `record.stats` (`lt` exclusive). */
+export interface MemoryStatsImportanceBucket {
+  readonly lt: number;
+  readonly count: number;
+}
+
+/**
+ * Active-record importance distribution from `record.stats`. `scored` counts
+ * records whose stored importance matches the CURRENT bodyHash; `unscored`
+ * counts active records with no fresh score. Bucket counts sum to `scored`.
+ */
+export interface MemoryStatsImportance {
+  readonly scored: number;
+  readonly unscored: number;
+  readonly buckets: readonly MemoryStatsImportanceBucket[];
+}
+
+/**
+ * Aggregated memory-content statistics. Numbers only: no snippets, ids, or
+ * scopes ever leave the service. `truncated` is true when any status row cap
+ * was reached, so `byKind` is a lower bound for active records. `importance`
+ * is absent when the older paged `record.list` fallback was used.
+ */
+export interface MemoryStats {
+  readonly byKind: MemoryStatsByKind;
+  readonly byStatus: MemoryStatsByStatus;
+  readonly importance?: MemoryStatsImportance;
+  /** Epoch ms when this snapshot was collected. */
+  readonly computedAt: number;
+  readonly truncated: boolean;
+}
+
 export interface MemoryService {
   /** Pre-answer recall hook for the agent (fail-open: never throws). */
   readonly recallHook: {
@@ -432,6 +499,12 @@ export interface MemoryService {
     limit?: number;
     signal?: AbortSignal;
   }): Promise<MemorySearchResult>;
+  /**
+   * Read-only content statistics for the configured scope: active counts by
+   * kind, counts by status, cached for five minutes (single-flight). Never
+   * returns record bodies, ids, or scopes.
+   */
+  getMemoryStats(): Promise<MemoryStats>;
   /**
    * Confirmation detail for one bound handle: the immutable cited snapshot
    * (what the user/model saw) kept DISTINCT from the CURRENT
@@ -1333,6 +1406,14 @@ export function createMemoryService(
   let idleMaintenanceInFlight: Promise<void> | null = null;
   /** In-flight explicit staging count: stop() waits for zero (no post-stop writes). */
   let pendingStagings = 0;
+  /** Five-minute stats snapshot and single-flight collection promise. */
+  let statsCache: { readonly at: number; readonly value: MemoryStats } | null =
+    null;
+  let statsPending: Promise<MemoryStats> | null = null;
+  /** Remind's accepted `record.list` page size (downgraded on rejection). */
+  let statsPageLimitIndex = 0;
+  /** Latched after remind answers BAD_REQUEST for the `record.stats` op. */
+  let statsUnsupported = false;
 
   function throwIfStagingCancelled(signal?: AbortSignal): void {
     if (isAborted(signal)) {
@@ -4176,6 +4257,362 @@ export function createMemoryService(
     };
   }
 
+  /** One validated `record.list` row: metadata only (snippet is discarded). */
+  interface StatsListRow {
+    readonly kind: string;
+    readonly status: string;
+    readonly createdAt: string;
+  }
+
+  function parseStatsRows(
+    data: Record<string, unknown> | null,
+  ): StatsListRow[] | null {
+    if (!isRecord(data) || !Array.isArray(data.items)) return null;
+    const rows: StatsListRow[] = [];
+    for (const raw of data.items) {
+      if (
+        !isRecord(raw) ||
+        typeof raw.kind !== "string" ||
+        typeof raw.status !== "string" ||
+        typeof raw.createdAt !== "string" ||
+        !Number.isFinite(Date.parse(raw.createdAt))
+      ) {
+        return null;
+      }
+      rows.push({
+        kind: raw.kind,
+        status: raw.status,
+        createdAt: raw.createdAt,
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * One newest-first page of `record.list`. remind has no cursor, so the
+   * caller pages backward with `until` (exclusive). A rejected page limit
+   * (config `limits.limitMax`) is retried once at each smaller candidate;
+   * the accepted size is reused for the rest of this process.
+   */
+  async function listStatsPage(
+    status: string,
+    until: string | null,
+    since: string | null = null,
+  ): Promise<{ rows: StatsListRow[]; limit: number }> {
+    for (;;) {
+      const limit =
+        MEMORY_STATS_PAGE_LIMIT_CANDIDATES[statsPageLimitIndex] ?? 1;
+      let envelope: MemoryCliEnvelope;
+      try {
+        envelope = await cliCall(
+          address,
+          "record.list",
+          {
+            scope,
+            status,
+            limit,
+            ...(since !== null ? { since } : {}),
+            ...(until !== null ? { until } : {}),
+          },
+          undefined,
+        );
+      } catch {
+        throw new MemoryManageError("service_unavailable");
+      }
+      if (envelope.ok) {
+        const rows = parseStatsRows(envelope.data);
+        if (rows === null) {
+          throw new MemoryManageError("service_unavailable");
+        }
+        return { rows, limit };
+      }
+      if (
+        envelope.code === "LIMIT_EXCEEDED" &&
+        statsPageLimitIndex < MEMORY_STATS_PAGE_LIMIT_CANDIDATES.length - 1
+      ) {
+        statsPageLimitIndex += 1;
+        continue;
+      }
+      throw new MemoryManageError("service_unavailable");
+    }
+  }
+
+  /** Walk one status newest -> oldest, stopping at the fixed row cap. */
+  async function walkStatsStatus(
+    status: string,
+    rowCap: number,
+  ): Promise<{ rows: StatsListRow[]; truncated: boolean }> {
+    const rows: StatsListRow[] = [];
+    let until: string | null = null;
+    for (;;) {
+      throwIfStagingCancelled();
+      const page = await listStatsPage(status, until);
+      if (page.rows.length < page.limit) {
+        rows.push(...page.rows);
+        return { rows, truncated: false };
+      }
+      if (rows.length >= rowCap) {
+        // A full page means older rows may remain; the cap already holds.
+        return { rows, truncated: true };
+      }
+      const oldest = page.rows[page.rows.length - 1];
+      if (oldest === undefined) {
+        return { rows, truncated: false };
+      }
+      // Production writes several records with the SAME createdAt (one
+      // extraction event -> multiple memories). A full page can end inside
+      // such a group, so counting only the rows newer than the oldest
+      // timestamp and re-reading the whole group avoids skipping the rest
+      // of it on the next (strictly older) `until` page.
+      const t = oldest.createdAt;
+      const tMs = Date.parse(t);
+      for (const row of page.rows) {
+        if (Date.parse(row.createdAt) > tMs) rows.push(row);
+      }
+      if (rows.length >= rowCap) {
+        return { rows, truncated: true };
+      }
+      // `since` is inclusive and `until` exclusive in remind, so this
+      // fetches exactly the t-group. If the group itself fills a page there
+      // is no timestamp cursor to page within it: count what came back and
+      // mark the snapshot truncated rather than silently undercount.
+      const group = await listStatsPage(
+        status,
+        new Date(tMs + 1).toISOString(),
+        new Date(tMs).toISOString(),
+      );
+      rows.push(...group.rows);
+      if (group.rows.length >= group.limit || rows.length >= rowCap) {
+        return { rows, truncated: true };
+      }
+      until = new Date(tMs).toISOString();
+    }
+  }
+
+  /** Fixed `record.stats` bucket upper bounds (last is exclusive top). */
+  const STATS_IMPORTANCE_LT: readonly number[] = [0.2, 0.4, 0.6, 0.8, 1.0001];
+
+  function isNonNegativeInteger(value: unknown): value is number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0;
+  }
+
+  function hasExactKeys(
+    value: Record<string, unknown>,
+    expected: readonly string[],
+  ): boolean {
+    const keys = Object.keys(value);
+    return (
+      keys.length === expected.length &&
+      expected.every((key) => Object.hasOwn(value, key))
+    );
+  }
+
+  /**
+   * Strict, bounded parse of one `record.stats` payload: exact top-level and
+   * nested keys, non-negative integer counts, the configured scope, an ISO
+   * `computedAt`, and the five fixed importance buckets. Anything else is
+   * rejected (the service reports service_unavailable, never crashes).
+   */
+  function parseRecordStats(
+    data: Record<string, unknown> | null,
+  ): MemoryStats | null {
+    if (
+      !isRecord(data) ||
+      !hasExactKeys(data, [
+        "scope",
+        "byKind",
+        "byStatus",
+        "importance",
+        "computedAt",
+      ]) ||
+      data.scope !== scope ||
+      typeof data.computedAt !== "string"
+    ) {
+      return null;
+    }
+    const computedAt = Date.parse(data.computedAt);
+    if (!Number.isSafeInteger(computedAt) || computedAt < 0) return null;
+    const rawKind = data.byKind;
+    const rawStatus = data.byStatus;
+    if (
+      !isRecord(rawKind) ||
+      !hasExactKeys(rawKind, [
+        "user_fact",
+        "model_inference",
+        "summary",
+        "correction",
+      ]) ||
+      !isRecord(rawStatus) ||
+      !hasExactKeys(rawStatus, ["active", "retired", "superseded", "archived"])
+    ) {
+      return null;
+    }
+    const kindKeys = [
+      "user_fact",
+      "model_inference",
+      "summary",
+      "correction",
+    ] as const;
+    const statusKeys = ["active", "retired", "superseded", "archived"] as const;
+    const byKind = {} as Record<(typeof kindKeys)[number], number>;
+    for (const key of kindKeys) {
+      const count = rawKind[key];
+      if (!isNonNegativeInteger(count)) return null;
+      byKind[key] = count;
+    }
+    const byStatus = {} as Record<(typeof statusKeys)[number], number>;
+    for (const key of statusKeys) {
+      const count = rawStatus[key];
+      if (!isNonNegativeInteger(count)) return null;
+      byStatus[key] = count;
+    }
+    const rawImportance = data.importance;
+    if (
+      !isRecord(rawImportance) ||
+      !hasExactKeys(rawImportance, ["scored", "unscored", "buckets"]) ||
+      !isNonNegativeInteger(rawImportance.scored) ||
+      !isNonNegativeInteger(rawImportance.unscored) ||
+      !Array.isArray(rawImportance.buckets) ||
+      rawImportance.buckets.length !== STATS_IMPORTANCE_LT.length
+    ) {
+      return null;
+    }
+    const buckets: MemoryStatsImportanceBucket[] = [];
+    for (let index = 0; index < STATS_IMPORTANCE_LT.length; index += 1) {
+      const raw = rawImportance.buckets[index];
+      if (
+        !isRecord(raw) ||
+        !hasExactKeys(raw, ["lt", "count"]) ||
+        raw.lt !== STATS_IMPORTANCE_LT[index] ||
+        !isNonNegativeInteger(raw.count)
+      ) {
+        return null;
+      }
+      buckets.push({ lt: raw.lt as number, count: raw.count });
+    }
+    return {
+      byKind,
+      byStatus,
+      importance: {
+        scored: rawImportance.scored,
+        unscored: rawImportance.unscored,
+        buckets,
+      },
+      computedAt,
+      // `record.stats` is a complete single-transaction aggregate.
+      truncated: false,
+    };
+  }
+
+  async function collectMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    if (!statsUnsupported) {
+      let envelope: MemoryCliEnvelope;
+      try {
+        envelope = await cliCall(address, "record.stats", { scope }, undefined);
+      } catch {
+        // Transport failure is NOT an unsupported op: report it instead of
+        // silently switching to the expensive fallback.
+        throw new MemoryManageError("service_unavailable");
+      }
+      if (envelope.ok) {
+        const parsed = parseRecordStats(envelope.data);
+        if (parsed === null) {
+          throw new MemoryManageError("service_unavailable");
+        }
+        return parsed;
+      }
+      if (envelope.code !== "BAD_REQUEST") {
+        throw new MemoryManageError("service_unavailable");
+      }
+      // Older remind: unknown op -> BAD_REQUEST. Latch for this process so
+      // later cache misses never retry the unsupported call.
+      statsUnsupported = true;
+    }
+    const computedAt = now();
+    // Statuses are independent reads; each is bounded by its row cap.
+    const active = await walkStatsStatus("active", MEMORY_STATS_ACTIVE_ROW_CAP);
+    const retired = await walkStatsStatus(
+      "retired",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    const superseded = await walkStatsStatus(
+      "superseded",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    const archived = await walkStatsStatus(
+      "archived",
+      MEMORY_STATS_STATUS_ROW_CAP,
+    );
+    throwIfStagingCancelled();
+    const byKind = {
+      user_fact: 0,
+      model_inference: 0,
+      summary: 0,
+      correction: 0,
+    };
+    for (const row of active.rows) {
+      if (row.status !== "active") continue;
+      if (
+        row.kind === "user_fact" ||
+        row.kind === "model_inference" ||
+        row.kind === "summary" ||
+        row.kind === "correction"
+      ) {
+        byKind[row.kind] += 1;
+      }
+    }
+    return {
+      byKind,
+      byStatus: {
+        active: active.rows.length,
+        retired: retired.rows.length,
+        superseded: superseded.rows.length,
+        archived: archived.rows.length,
+      },
+      computedAt,
+      truncated:
+        active.truncated ||
+        retired.truncated ||
+        superseded.truncated ||
+        archived.truncated,
+    };
+  }
+
+  async function collectAndCacheMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    const value = await collectMemoryStats();
+    statsCache = { at: now(), value };
+    return value;
+  }
+
+  function getMemoryStats(): Promise<MemoryStats> {
+    throwIfStagingCancelled();
+    const at = now();
+    if (
+      statsCache !== null &&
+      at >= statsCache.at &&
+      at - statsCache.at < MEMORY_STATS_CACHE_TTL_MS
+    ) {
+      return Promise.resolve(statsCache.value);
+    }
+    if (statsPending !== null) {
+      return statsPending;
+    }
+    const pending = collectAndCacheMemoryStats();
+    statsPending = pending;
+    // Attach handlers so a rejection never becomes an unhandled rejection.
+    pending.then(
+      () => {
+        if (statsPending === pending) statsPending = null;
+      },
+      () => {
+        if (statsPending === pending) statsPending = null;
+      },
+    );
+    return pending;
+  }
+
   async function getMemoryDetail(input: {
     sessionId: string;
     searchId: string;
@@ -5412,6 +5849,7 @@ export function createMemoryService(
     stop,
     drainOnce: () => drainOnce(),
     searchMemories,
+    getMemoryStats,
     getMemoryDetail,
     getMemoryGraphGlobal,
     getMemoryGraphLocal,

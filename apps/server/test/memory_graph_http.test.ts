@@ -76,6 +76,9 @@ function fakeMemory(
     searchMemories: async () => {
       throw new Error("search not used by graph routes");
     },
+    getMemoryStats: async () => {
+      throw new Error("stats not used by graph routes");
+    },
     getMemoryDetail: async () => {
       throw new Error("detail not used by graph routes");
     },
