@@ -247,8 +247,55 @@ export type ActionRejectionHistoryItem = z.infer<
   typeof ActionRejectionHistoryItemSchema
 >;
 
+/**
+ * Companion-initiated chat message. The companion (server-side) authored
+ * the text; no Run is created, so `selectedRun` is always null. Rendered as
+ * an assistant message by every chat surface (history and live SSE).
+ */
+export const CompanionTextHistoryItemSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  kind: z.literal("companion_text"),
+  text: z.string().min(1).max(MAX_USER_TEXT_LENGTH),
+  createdAt: UnixMsSchema,
+  selectedRun: z.null(),
+});
+export type CompanionTextHistoryItem = z.infer<
+  typeof CompanionTextHistoryItemSchema
+>;
+
+/**
+ * Live companion-message feed item (SSE `companion-message` event and the
+ * shared forward read). Same durable fields as the history projection minus
+ * the history discriminant.
+ */
+export const CompanionMessageSchema = z.strictObject({
+  turnId: UuidSchema,
+  seq: z.number().int().min(1),
+  text: z.string().min(1).max(MAX_USER_TEXT_LENGTH),
+  createdAt: UnixMsSchema,
+});
+export type CompanionMessage = z.infer<typeof CompanionMessageSchema>;
+
+export const CompanionMessagesForwardQuerySchema = z.strictObject({
+  after: z.coerce.number().int().min(0).optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(50),
+});
+export type CompanionMessagesForwardQuery = z.infer<
+  typeof CompanionMessagesForwardQuerySchema
+>;
+
+export const CompanionMessagesForwardResponseSchema = z.strictObject({
+  messages: z.array(CompanionMessageSchema).max(50),
+  hasMore: z.boolean(),
+});
+export type CompanionMessagesForwardResponse = z.infer<
+  typeof CompanionMessagesForwardResponseSchema
+>;
+
 export const HistoryItemSchema = z.discriminatedUnion("kind", [
   UserTextHistoryItemSchema,
+  CompanionTextHistoryItemSchema,
   ActionApprovalHistoryItemSchema,
   ActionRejectionHistoryItemSchema,
 ]);

@@ -2539,6 +2539,13 @@ class ConversationApp {
     // the receipt summary renders once below it; result part TEXT is not
     // re-rendered (it would duplicate the outcome/summary) — only its fresh
     // rN citations are kept as buttons.
+    if (item.kind === "companion_text") {
+      // Companion-initiated message: assistant text with no Run, so the
+      // default branch's "応答なし" would be wrong.
+      wrap.setAttribute("data-turn-kind", "companion_text");
+      wrap.appendChild(el("p", typeof item.text === "string" ? item.text : ""));
+      return wrap;
+    }
     if (item.kind === "action_approval" || item.kind === "action_rejection") {
       const receipt = item.selectedRun?.receipt ?? null;
       const outcome =

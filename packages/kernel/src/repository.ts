@@ -29,6 +29,12 @@ import {
   AutonomyTaskListQuerySchema,
   type BuildDeadlineScheduleResponse,
   BuildDeadlineScheduleResponseSchema,
+  type CompanionMessage,
+  CompanionMessageSchema,
+  CompanionMessagesForwardQuerySchema,
+  CompanionMessagesForwardResponseSchema,
+  type CompanionTextHistoryItem,
+  CompanionTextTurnInputV1Schema,
   ConversationProposalAcceptRequestSchema,
   type ConversationProposalAcceptResponse,
   ConversationProposalAcceptResponseSchema,
@@ -2540,6 +2546,18 @@ export function createKernelRepository(
     };
     const items = page.map((row) => {
       const turn = parseTurnRow(row);
+      // Companion-initiated message: the text is the projection; no Run is
+      // ever created for this kind (like a rejection).
+      if (turn.input.kind === "companion_text") {
+        return {
+          turnId: row.id,
+          seq: row.seq,
+          kind: turn.input.kind,
+          text: turn.input.text,
+          createdAt: row.created_at,
+          selectedRun: null,
+        } satisfies CompanionTextHistoryItem;
+      }
       // C18 (§18.4): the two M5 decision kinds project as exact
       // hash-bound decision items; a rejection carries no Run ever (the
       // kind is the discriminant, selectedRun stays null).
@@ -3184,6 +3202,121 @@ export function createKernelRepository(
       );
     }
     return turnId;
+  }
+
+  /**
+   * Companion-initiated message: ONE `companion_text` Turn, no Run, no
+   * user_text semantics. The turn is the durable message (history) and the
+   * live SSE feed source. Bounded text; unknown session 404.
+   */
+  function postCompanionMessage(
+    sessionId: string,
+    text: string,
+    options: { now?: number; timeZone?: string } = {},
+  ): CompanionMessage {
+    const session = requireId(sessionId, "sessionId");
+    const now = nowMs(options.now);
+    const timeZone = options.timeZone ?? "UTC";
+    const turnInput = parseOrValidation(
+      () =>
+        CompanionTextTurnInputV1Schema.parse({
+          kind: "companion_text",
+          version: 1,
+          text,
+        }),
+      "companion message turn input",
+    );
+    return withImmediate(db, () => {
+      if (readSession(db, session) === null) {
+        throw new RepositoryNotFoundError(`session ${session} not found`);
+      }
+      const frozen = freezeDecisionContext(session, now, timeZone);
+      const turnId = allocateDecisionTurn(
+        session,
+        JSON.stringify(turnInput),
+        frozen,
+        now,
+      );
+      const row = db
+        .prepare("SELECT seq, created_at FROM turns WHERE id = ?")
+        .get(turnId) as { seq: number; created_at: number };
+      return parseOrValidation(
+        () =>
+          CompanionMessageSchema.parse({
+            turnId,
+            seq: row.seq,
+            text: turnInput.text,
+            createdAt: row.created_at,
+          }),
+        "companion message",
+      );
+    });
+  }
+
+  /**
+   * Forward read-after of companion messages (`seq > after`, oldest-first,
+   * bounded). This is the SSE replay source; session-owned and read-only.
+   */
+  function listCompanionMessagesForward(
+    sessionId: string,
+    query: { after?: number; limit?: number },
+  ): { messages: CompanionMessage[]; hasMore: boolean } {
+    const session = requireId(sessionId, "sessionId");
+    if (readSession(db, session) === null) {
+      throw new RepositoryNotFoundError(`session ${session} not found`);
+    }
+    const parsed = parseOrValidation(
+      () =>
+        CompanionMessagesForwardQuerySchema.parse({
+          after: query.after ?? 0,
+          limit: query.limit,
+        }),
+      "companion messages query",
+    );
+    const rows = db
+      .prepare(
+        `SELECT id, seq, input_json, created_at FROM turns
+         WHERE session_id = ? AND seq > ?
+           AND json_extract(input_json, '$.kind') = 'companion_text'
+         ORDER BY seq ASC LIMIT ?`,
+      )
+      .all(session, parsed.after ?? 0, parsed.limit + 1) as Array<{
+      id: string;
+      seq: number;
+      input_json: string;
+      created_at: number;
+    }>;
+    const hasMore = rows.length > parsed.limit;
+    const messages = rows.slice(0, parsed.limit).map((row) => {
+      const input = parseOrValidation(
+        () => CompanionTextTurnInputV1Schema.parse(JSON.parse(row.input_json)),
+        "companion turn input",
+      );
+      return parseOrValidation(
+        () =>
+          CompanionMessageSchema.parse({
+            turnId: row.id,
+            seq: row.seq,
+            text: input.text,
+            createdAt: row.created_at,
+          }),
+        "companion message",
+      );
+    });
+    return parseOrValidation(
+      () => CompanionMessagesForwardResponseSchema.parse({ messages, hasMore }),
+      "companion messages forward response",
+    );
+  }
+
+  /** Newest activity session; the CLI's default companion-message target. */
+  function latestSessionId(): string | null {
+    const row = db
+      .prepare(
+        "SELECT id FROM sessions ORDER BY last_active_at DESC, created_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   /** Ordered, already-completed proposals first (bounded read, no writes). */
@@ -8411,6 +8544,9 @@ export function createKernelRepository(
   return {
     createSession,
     postMessage,
+    postCompanionMessage,
+    listCompanionMessagesForward,
+    latestSessionId,
     postRetry,
     startRun,
     completeRun,
