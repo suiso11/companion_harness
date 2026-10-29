@@ -201,10 +201,28 @@ describe("stage-time frozen profile validation", () => {
     }
   });
 
-  it("maps a non-explicit goal to purpose_not_confirmed", async () => {
+  it("lets a model-created self goal stage a trial (the human approves it)", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
-      const { task } = goalTask(repo, sessionId, "s1", "user", false);
+      // A conversation-created goal is self/non-explicit; the trial approval
+      // is the single human gate, so staging must accept it.
+      const { task } = goalTask(repo, sessionId, "s1", "self", false);
+      const staged = repo.stageTrial(sessionId, stageInput(task.id), {
+        key: randomUUID(),
+        now: NOW + 4,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      expect(staged.status).toBe(201);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("still refuses an external-sourced goal", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "s1", "external", true);
       expect(
         stageCode(() =>
           repo.stageTrial(sessionId, stageInput(task.id), {
@@ -459,10 +477,10 @@ describe("trial authority", () => {
     }
   });
 
-  it("denies self/external goals, held tasks, unstructured constraints, deny rules", async () => {
+  it("denies external goals, held tasks, unstructured constraints, deny rules", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
-      const bad1 = goalTask(repo, sessionId, "s2", "self", true);
+      const bad1 = goalTask(repo, sessionId, "s2", "external", true);
       expect(() =>
         repo.stageTrial(sessionId, stageInput(bad1.task.id), {
           key: randomUUID(),

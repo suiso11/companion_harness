@@ -1082,10 +1082,10 @@ export class ToolBroker {
     if (
       reg !== undefined &&
       reg.descriptor.category !== "read" &&
-      // C17: ONLY a proposal-only registration (its handler stages a
-      // proposal; no external write, no execution tool) may pass the
-      // read-only default-deny classification. Everything else stays
-      // denied exactly as before.
+      // C17: ONLY a proposal-only registration (its handler stages or
+      // adopts a LOCAL record; no external write, no execution tool) may
+      // pass the read-only default-deny classification. Everything else
+      // stays denied exactly as before.
       reg.proposalOnly !== true
     ) {
       this.appendRequested(runId, auditTool, call, arrivalHash);

@@ -42,6 +42,7 @@ import {
   type KernelRepository,
   migrateKernelDatabase,
   openKernelDatabase,
+  ProposalCreatedToolOutputSchema,
 } from "../src/index.js";
 
 const T0 = 1_700_004_000_000;
@@ -158,7 +159,7 @@ describe("conversation proposal tools", () => {
     }
   });
 
-  it("purpose.propose stages a pending draft with server-derived source and zero authority", async () => {
+  it("purpose.propose creates one self goal with server-derived source and keeps the audit row", async () => {
     const { handle, repo, broker, sessionId } = await setup();
     try {
       const text = "I really should start running every morning";
@@ -177,36 +178,45 @@ describe("conversation proposal tools", () => {
         MODEL_CTX,
       );
       expect(out.result.actualOutcome).toBe("succeeded");
-      const staged = out.modelFacing as Record<string, unknown>;
-      expect(staged.target).toBe("purpose");
-      expect(staged.status).toBe("pending");
-      expect(staged.version).toBe(1);
+      const created = ProposalCreatedToolOutputSchema.parse(out.modelFacing);
+      expect(created.status).toBe("created");
+      expect(created.target).toBe("purpose");
+      expect(created.version).toBe(1);
+      // The goal exists immediately, with model provenance (never user).
+      const purpose = repo.getAutonomyPurpose(sessionId, created.id);
+      expect(purpose.statement).toBe("start running every morning");
+      expect(purpose.interpretation).toBe("user wants a morning running habit");
+      expect(purpose.sourceKind).toBe("self");
+      expect(purpose.explicit).toBe(false);
       // Durable server-derived trace, immutable quote + separate reading.
-      const view = repo.getConversationProposal(
-        sessionId,
-        staged.proposalId as string,
-      );
+      const listed = repo.listConversationProposals(sessionId, { limit: 10 });
+      expect(listed.items).toHaveLength(1);
+      const view = listed.items[0];
+      if (view === undefined) {
+        throw new Error("expected one stored proposal");
+      }
       expect(view.sessionId).toBe(sessionId);
+      expect(view.status).toBe("accepted");
+      expect(view.acceptedTargetId).toBe(created.id);
       expect(view.sourceKind).toBe("model");
       expect(view.sourceQuote).toBe("start running every morning");
       expect(view.interpretation).toBe("user wants a morning running habit");
       expect(view.purposeKind).toBe("goal");
       expect(view.taskKind).toBeNull();
       expect(view.parentPurposeId).toBeNull();
-      expect(view.acceptedTargetId).toBeNull();
       const run = repo.getRun(runId);
       expect(view.sourceRunId).toBe(runId);
       expect(view.sourceTurnId).toBe(run.turnId);
-      // Zero authority: no purpose/task/grant/calendar/control mutation.
-      expect(countRows(handle, "autonomy_purposes")).toBe(0);
+      // No grant, no calendar write, no control change.
+      expect(countRows(handle, "autonomy_purposes")).toBe(1);
       expect(countRows(handle, "autonomy_tasks")).toBe(0);
       expect(countRows(handle, "action_proposals")).toBe(0);
       expect(repo.getAutonomyControlState()).toEqual(controlBefore);
-      const events = repo.listConversationProposalEvents(
-        sessionId,
-        staged.proposalId as string,
-      );
-      expect(events.events.map((event) => event.event)).toEqual(["proposed"]);
+      const events = repo.listConversationProposalEvents(sessionId, view.id);
+      expect(events.events.map((event) => event.event)).toEqual([
+        "proposed",
+        "accepted",
+      ]);
     } finally {
       closeKernelDatabase(handle);
     }
@@ -231,8 +241,10 @@ describe("conversation proposal tools", () => {
         MODEL_CTX,
       );
       expect(first.result.actualOutcome).toBe("succeeded");
-      const firstId = (first.modelFacing as { proposalId: string }).proposalId;
-      // Same run, identical input: broker dedup reuses the same draft.
+      const firstId = ProposalCreatedToolOutputSchema.parse(
+        first.modelFacing,
+      ).id;
+      // Same run, identical input: broker dedup reuses the same record.
       const second = await broker.invoke(
         runId,
         "purpose.propose",
@@ -240,28 +252,33 @@ describe("conversation proposal tools", () => {
         MODEL_CTX,
       );
       expect(second.result.actualOutcome).toBe("deduplicated");
-      expect((second.modelFacing as { proposalId: string }).proposalId).toBe(
+      expect(ProposalCreatedToolOutputSchema.parse(second.modelFacing).id).toBe(
         firstId,
       );
       expect(countRows(handle, "conversation_proposals")).toBe(1);
-      // New call id, semantically identical input: core hash replays pending.
+      expect(countRows(handle, "autonomy_purposes")).toBe(1);
+      // New call id, semantically identical input: the accepted draft
+      // replays, so no second goal is created.
       const replayed = repo.stageConversationProposalFromModel(
         runId,
         { target: "purpose", ...draft },
         { key: randomUUID() },
       );
       expect(replayed.replayed).toBe(true);
-      expect(replayed.body.id).toBe(firstId);
+      expect(replayed.body.status).toBe("accepted");
+      expect(replayed.body.acceptedTargetId).toBe(firstId);
+      const firstProposalId = replayed.body.id;
       expect(countRows(handle, "conversation_proposals")).toBe(1);
+      expect(countRows(handle, "autonomy_purposes")).toBe(1);
       // Same call id with different input: idempotency conflict, no dup.
       expect(() =>
         repo.stageConversationProposalFromModel(
           runId,
           { target: "purpose", ...draft, interpretation: "changed" },
-          { key: callKeyOf(handle, firstId) },
+          { key: callKeyOf(handle, firstProposalId) },
         ),
       ).toThrow(IdempotencyConflictError);
-      // Meaningfully new source (new turn, different quote): new draft.
+      // Meaningfully new source (new turn, different quote): new record.
       const runId2 = newRunningRun(
         repo,
         sessionId,
@@ -276,10 +293,11 @@ describe("conversation proposal tools", () => {
         MODEL_CTX,
       );
       expect(third.result.actualOutcome).toBe("succeeded");
-      expect((third.modelFacing as { proposalId: string }).proposalId).not.toBe(
-        firstId,
-      );
+      expect(
+        ProposalCreatedToolOutputSchema.parse(third.modelFacing).id,
+      ).not.toBe(firstId);
       expect(countRows(handle, "conversation_proposals")).toBe(2);
+      expect(countRows(handle, "autonomy_purposes")).toBe(2);
     } finally {
       closeKernelDatabase(handle);
     }
@@ -404,14 +422,24 @@ describe("conversation proposal tools", () => {
         MODEL_CTX,
       );
       expect(ok.result.actualOutcome).toBe("succeeded");
-      const view = repo.getConversationProposal(
-        sessionId,
-        (ok.modelFacing as { proposalId: string }).proposalId,
-      );
+      const created = ProposalCreatedToolOutputSchema.parse(ok.modelFacing);
+      expect(created.target).toBe("task");
+      expect(created.status).toBe("created");
+      const task = repo.getAutonomyTask(sessionId, created.id);
+      expect(task.parentPurposeId).toBe(parent.body.id);
+      expect(task.deadline).toBeNull();
+      expect(task.speaker).toBe("self");
+      const stored = repo.listConversationProposals(sessionId, { limit: 10 });
+      expect(stored.items).toHaveLength(1);
+      const view = stored.items[0];
+      if (view === undefined) {
+        throw new Error("expected one stored proposal");
+      }
       expect(view.target).toBe("task");
       expect(view.parentPurposeId).toBe(parent.body.id);
       expect(view.expectedParentVersion).toBe(1);
-      expect(view.status).toBe("pending");
+      expect(view.status).toBe("accepted");
+      expect(view.acceptedTargetId).toBe(created.id);
     } finally {
       closeKernelDatabase(handle);
     }

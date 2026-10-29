@@ -342,7 +342,8 @@ function activeConstraints(
 
 /**
  * AUTHORITY: owned kind=task non-held/non-terminal task with same-scope
- * active applicable parent kind=goal sourceKind=user explicit=true.
+ * active applicable parent kind=goal that is not external-sourced (the
+ * human approves each trial, so a model-created self goal may parent it).
  * Owner-recorded conflict involving the goal HOLDS. Unstructured constraint
  * HOLDS. Structured rules: deny_workspace/deny_operation/deny_write_path.
  * Returns {allowed, goalId, goalVersion} or throws 404/409.
@@ -396,13 +397,14 @@ export function checkTrialAuthority(
     );
   if (g.status !== "active" || !applicable(g, frozenNow))
     throw new RepositoryValidationError(`parent goal is not active/applicable`);
-  if (g.source_kind !== "user" || g.is_explicit !== 1)
+  if (g.source_kind === "external")
     throw new TrialStageError(
       "purpose_not_confirmed",
-      "authority requires explicit user goal",
+      "authority requires a goal that is not external",
     );
-  // self/external claims never authority even explicit=true: task speaker
-  // is not consulted here beyond kind; goal provenance is decisive.
+  // Model-created (self) goals DO authorize a trial proposal: the human
+  // approves each trial, so authority comes from that click, not from the
+  // goal's provenance. External text still never authorizes anything.
   // Owner-recorded conflict involving goal HOLDS even other member external.
   const conflict = db
     .prepare(

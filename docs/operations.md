@@ -5909,9 +5909,13 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   `stateRoot`). They are NOT exposed through the trial API yet, so inspect that
   SQLite file directly for outcomes.
 
-### 会話から採用した目的の確定（人間のみ）
+### 会話から作られる目的・タスクと唯一の人間ゲート（試行承認）
 
-会話中の提案から採用された目的は `is_explicit=0 / source_kind='self'` で保存されるため、それだけでは試行権限（明示的な利用者の目的を要求）を満たしません。利用者が目的一覧の「会話から採用（未確認）」バッジ横の「自分の目的として確定」を押すと、`POST /api/sessions/:sessionId/goals/:goalId/confirm`（Idempotency-Key + `expectedVersion` CAS）がその目的を**その場で** `is_explicit=1 / source_kind='user'` に更新し、`confirmed_from='conversation_proposal'`・`confirmed_at` に確定の出所を記録します（目的イベントとして追記、行の id・scope・依存タスクは不変）。この経路は HTTP のみで、モデルツール・自動実行経路からは呼べません。退避・完了済みの目的は 409、既に明示的な目的は 200 の no-op、`expectedVersion` 不一致は 409 です。試行の提案フォームは、選択した作業の親目的が未確認のとき、この確定ボタンへの案内を表示します。
+会話中に `purpose.propose` / `task.propose` が呼ばれると、提案行（`conversation_proposals`）を残したまま**同じ呼び出しで**目的／タスクが作成されます（`status: "created"`）。保存される目的は `is_explicit=0 / source_kind='self'`、タスクは `speaker='self'` で、モデルが作ったものと分かる provenance を保ちます。同じ発話の再送は提案行の意味的リプレイで同じレコードを返し、二重作成しません。
+
+自律実行の人間ゲートは**試行の承認だけ**です。`trial.propose` は未承認の提案を残し、利用者が `/trials` で承認するまで何も起動しません。試行権限は親目的が `source_kind='external'`（外部テキスト由来）のときだけ拒否され、モデルが作った self 目的でも承認された試行は実行できます。エラーコードは従来どおり `purpose_not_confirmed` です。
+
+`POST /api/sessions/:sessionId/goals/:goalId/confirm`（Idempotency-Key + `expectedVersion` CAS）は残っており、採用済みの目的を `is_explicit=1 / source_kind='user'` に昇格させます（`confirmed_from='conversation_proposal'`・`confirmed_at` を記録、id・scope・依存タスクは不変）。試行権限の条件ではなくなったため、この確定は任意の provenance 整理として扱います。退避・完了済みの目的は 409、既に明示的な目的は 200 の no-op、`expectedVersion` 不一致は 409 です。
 
 ### 検証済み試行のブランチ・下書きPR化（人間のクリックのみ）
 

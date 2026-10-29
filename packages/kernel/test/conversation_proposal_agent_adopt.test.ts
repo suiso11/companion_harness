@@ -4,11 +4,9 @@
 // SYNTHETIC loopback ModelGateway (no model/Google/OAuth) whose first step
 // returns a NATIVE `purpose.propose` tool call quoting the OWN chat text,
 // then `answer.submit`. The REAL ToolBroker executes the proposal-only
-// registration (server-derived source, exact quote): the server stores ONE
-// pending draft and creates NO purpose/task/grant, never auto-accepts, and
-// never resumes the stop control. The explicit HUMAN adoption
-// (`acceptConversationProposal`) then completes exactly ONE SELF purpose.
-// This is the model-side half of the browser adoption vertical.
+// registration (server-derived source, exact quote): the server creates
+// exactly ONE SELF purpose immediately (the trial approval is the single
+// human gate), creates no grant, and never resumes the stop control.
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -55,7 +53,7 @@ function scriptGateway(script: ChatResult[]): ModelGateway {
 }
 
 describe("normal-agent propose to human adoption", () => {
-  it("stages exactly one pending draft via native tool, human adopts ONE purpose", async () => {
+  it("creates exactly one self goal via the native tool", async () => {
     const handle = openKernelDatabase(":memory:");
     try {
       await migrateKernelDatabase({ db: handle.raw });
@@ -139,55 +137,28 @@ describe("normal-agent propose to human adoption", () => {
       );
       expect(result.text).toBe("noted");
 
-      // Server stored ONE pending draft; nothing was auto-created and the
-      // stop control was never resumed by the model path.
+      // The tool records the goal immediately: ONE self purpose, no grant,
+      // and the stop control was never resumed by the model path.
       const listed = repo.listConversationProposals(sessionId, { limit: 50 });
       expect(listed.items).toHaveLength(1);
-      const draft = listed.items[0] as {
-        id: string;
-        status: string;
-        version: number;
-        sourceKind: string;
-        sourceQuote: string;
-        interpretation: string;
-      };
-      expect(draft.status).toBe("pending");
+      const draft = listed.items[0];
+      if (draft === undefined) {
+        throw new Error("expected one stored proposal");
+      }
+      expect(draft.status).toBe("accepted");
       expect(draft.sourceKind).toBe("model");
       expect(draft.sourceQuote).toBe("walk daily");
-      expect(
-        repo.listAutonomyPurposes(sessionId, { limit: 50 }).items,
-      ).toHaveLength(0);
+      const purposes = repo.listAutonomyPurposes(sessionId, { limit: 50 });
+      expect(purposes.items).toHaveLength(1);
+      const goal = purposes.items[0];
+      if (goal === undefined) {
+        throw new Error("expected one created goal");
+      }
+      expect(goal.statement).toBe("walk daily");
+      expect(goal.explicit).toBe(false);
+      expect(goal.sourceKind).toBe("self");
+      expect(draft.acceptedTargetId).toBe(goal.id);
       expect(repo.getAutonomyControlState().paused).toBe(true);
-
-      // Explicit HUMAN adoption completes exactly ONE SELF purpose.
-      const adopted = repo.acceptConversationProposal(
-        sessionId,
-        draft.id,
-        { expectedVersion: draft.version },
-        { key: randomUUID(), now: T0 + 100 },
-      );
-      expect(adopted.status).toBe(201);
-      const adoptedBody = adopted.body as {
-        proposal: { status: string; acceptedTargetId: string };
-        purpose: {
-          id: string;
-          statement: string;
-          explicit: boolean;
-          sourceKind: string;
-        } | null;
-        task: unknown;
-      };
-      expect(adoptedBody.proposal.status).toBe("accepted");
-      expect(adoptedBody.purpose?.statement).toBe("walk daily");
-      expect(adoptedBody.purpose?.explicit).toBe(false);
-      expect(adoptedBody.purpose?.sourceKind).toBe("self");
-      expect(adoptedBody.task).toBeNull();
-      expect(adoptedBody.proposal.acceptedTargetId).toBe(
-        adoptedBody.purpose?.id,
-      );
-      expect(
-        repo.listAutonomyPurposes(sessionId, { limit: 50 }).items,
-      ).toHaveLength(1);
       expect(AGENT_TOOL_ORIGIN).toBe("agent");
     } finally {
       closeKernelDatabase(handle);
