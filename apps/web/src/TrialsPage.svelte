@@ -410,6 +410,11 @@ let detailTitles = $state<readonly (string | undefined)[]>([]);
 let opStatus = $state("");
 let decisionVisible = $state(false);
 let selected = $state<string | null>(null);
+/** The staged proposal is read-only; the human may widen it at approval. */
+let selectedReadOnly = $state(false);
+/** Widening needs literal paths: a pathless read-only trial cannot widen. */
+let selectedPathCount = $state(0);
+let allowWrite = $state(false);
 let detailReport = $state<TrialReport | null>(null);
 let candidateView = $state<TrialCandidateView | null>(null);
 let candidateError = $state<string | null>(null);
@@ -703,6 +708,10 @@ async function select(
   detailTitles = titles;
   opStatus = model.statusText;
   decisionVisible = model.decisionVisible;
+  // A fresh selection always starts at the staged mode.
+  selectedReadOnly = proposal.readOnlyMode;
+  selectedPathCount = proposal.literalPatchPaths.length;
+  allowWrite = false;
   detailVisible = true;
 }
 
@@ -770,7 +779,7 @@ async function approve(): Promise<void> {
   try {
     const result = await postJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/approve`,
-      {},
+      allowWrite ? { allowWrite: true } : {},
       randomUuid(),
     );
     if (result.status === 201) {
@@ -1099,6 +1108,17 @@ $effect(() => {
           </ul>
         {/if}
       </section>
+    {/if}
+    {#if selectedReadOnly && selectedPathCount > 0 && decisionVisible}
+      <label for="trial-allow-write">
+        <input
+          id="trial-allow-write"
+          type="checkbox"
+          bind:checked={allowWrite}
+          disabled={mutating}
+        />
+        この試行で編集を許可する（読み取り専用 → 書き込み）
+      </label>
     {/if}
     <button
       id="trial-approve-button"

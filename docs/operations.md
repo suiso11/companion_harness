@@ -4577,7 +4577,18 @@ response is editable in the browser. The form then offers:
 Submit is a `POST /api/sessions/:id/trials` with a fresh
 `Idempotency-Key`; server error codes render as fixed Japanese notices,
 and success refreshes the list and selects the new staged proposal.
-Approval remains the separate explicit 「承認する」 button (unchanged).
+Approval remains the separate explicit 「承認する」 button.
+
+When the staged proposal is read-only, the approval area also shows
+「この試行で編集を許可する」. Checking it sends
+`POST .../approve` with `{"allowWrite": true}`; the body is strict (`{}` or
+exactly `{"allowWrite": <boolean>}`, anything else is a 400). The human
+choice is recorded on the grant (`trial_grants.allow_write`), the staged
+proposal keeps its own `read_only` value for the audit trail, and the
+claim builds the wire request with `mode: "write"` over the SAME frozen
+`literalPatchPaths` (still bounded by the approved `allowedPaths`). The
+authority and constraint checks then run as `implement`, so deny rules on
+write paths still apply.
 The legacy `/legacy` trial panel is list/approve/expire only: this
 staging form is native-only by design.
 

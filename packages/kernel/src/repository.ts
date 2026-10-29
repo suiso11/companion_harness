@@ -8032,6 +8032,8 @@ export function createKernelRepository(
     options: AutonomyKeyOptions & {
       profile: TrialProfileSnapshot;
       workspaceAlias: string;
+      /** Human opt-in to let a staged read-only trial edit its paths. */
+      allowWrite?: boolean;
     },
   ): { status: number; body: { executionId: string }; replayed: boolean } {
     const profile = parseOrValidation(
@@ -8043,6 +8045,7 @@ export function createKernelRepository(
       ...(options.now !== undefined ? { now: options.now } : {}),
       profile,
       workspaceAlias: options.workspaceAlias,
+      ...(options.allowWrite === true ? { allowWrite: true } : {}),
     });
     return { status: out.status, body: out.body, replayed: out.replayed };
   }

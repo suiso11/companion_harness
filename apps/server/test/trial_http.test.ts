@@ -746,6 +746,52 @@ describe("trial HTTP proposal lifecycle", () => {
     }
   });
 
+  it("accepts the human allowWrite opt-in and rejects unknown keys", async () => {
+    const fixture = await makeApp(true);
+    try {
+      const { app, repo, db } = fixture;
+      const created = await post(app, "/api/sessions", {}, randomUUID());
+      const sessionId = (created.body as { sessionId: string }).sessionId;
+      const { taskId } = stageAuthority(repo, sessionId, "b4");
+      const base = `/api/sessions/${sessionId}/trials`;
+      // A staged read-only trial: the human may widen it to write.
+      const staged = await post(
+        app,
+        base,
+        stageBody(taskId, {
+          operation: "investigate",
+          readOnlyMode: true,
+          literalPatchPaths: ["apps/a.ts"],
+        }),
+        randomUUID(),
+      );
+      expect(staged.status).toBe(201);
+      const proposalId = (staged.body as { id: string }).id;
+      const bad = await post(
+        app,
+        `${base}/${proposalId}/approve`,
+        { allowWrite: "yes" },
+        randomUUID(),
+      );
+      expect(bad.status).toBe(400);
+      const approved = await post(
+        app,
+        `${base}/${proposalId}/approve`,
+        { allowWrite: true },
+        randomUUID(),
+      );
+      expect(approved.status).toBe(201);
+      const executionId = (approved.body as { executionId: string })
+        .executionId;
+      const row = db.raw
+        .prepare("SELECT allow_write FROM trial_grants WHERE execution_id=?")
+        .get(executionId) as { allow_write: number };
+      expect(row.allow_write).toBe(1);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("answers 404 for foreign sessions", async () => {
     const fixture = await makeApp(true);
     try {

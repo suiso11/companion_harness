@@ -424,6 +424,143 @@ describe("pathless read-only wire scope", () => {
 });
 
 describe("trial authority", () => {
+  it("lets the human widen a staged read-only trial to write at approval", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          operation: "investigate",
+          readOnlyMode: true,
+          literalPatchPaths: ["src/a.ts"],
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      expect(st.status).toBe(201);
+      // The staged proposal stays read-only (audit of what the model asked).
+      expect(repo.readTrial(sessionId, st.body.id).readOnlyMode).toBe(true);
+      const ap = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 5,
+        profile: profile(),
+        workspaceAlias: "ws",
+        allowWrite: true,
+      });
+      const exec = (ap.body as { executionId: string }).executionId;
+      const claimed = repo.claimTrial(sessionId, exec, {
+        key: randomUUID(),
+        now: NOW + 7,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      const request = (claimed.body as { request: Record<string, unknown> })
+        .request;
+      expect(request.mode).toBe("write");
+      expect(request.relevantPaths).toEqual(["src/a.ts"]);
+      // The staged proposal is unchanged: the grant carries the human choice.
+      expect(repo.readTrial(sessionId, st.body.id).readOnlyMode).toBe(true);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("refuses to widen a pathless read-only trial", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId);
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          operation: "investigate",
+          readOnlyMode: true,
+          literalPatchPaths: [],
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 4,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      expect(st.status).toBe(201);
+      expect(() =>
+        repo.approveTrial(sessionId, st.body.id, {
+          key: randomUUID(),
+          now: NOW + 5,
+          profile: profile(),
+          workspaceAlias: "ws",
+          allowWrite: true,
+        }),
+      ).toThrow(RepositoryValidationError);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("refuses to widen when a deny-implement constraint covers the scope", async () => {
+    const { handle, repo, sessionId } = await makeRepo();
+    try {
+      const { task } = goalTask(repo, sessionId, "s9");
+      repo.createAutonomyPurpose(
+        sessionId,
+        {
+          scope: "s9",
+          statement: "no implement here",
+          kind: "constraint",
+          explicit: true,
+          sourceKind: "user",
+          constraintRule: {
+            denyWorkspace: [],
+            denyOperation: ["implement"],
+            denyWritePath: [],
+          },
+        },
+        { key: randomUUID(), now: NOW + 4 },
+      );
+      const st = repo.stageTrial(
+        sessionId,
+        stageInput(task.id, {
+          operation: "investigate",
+          readOnlyMode: true,
+          literalPatchPaths: ["src/a.ts"],
+        }),
+        {
+          key: randomUUID(),
+          now: NOW + 5,
+          profile: profile(),
+          workspaceAlias: "ws",
+        },
+      );
+      expect(st.status).toBe(201);
+      // Widening is an implement operation, so the deny rule applies.
+      expect(() =>
+        repo.approveTrial(sessionId, st.body.id, {
+          key: randomUUID(),
+          now: NOW + 6,
+          profile: profile(),
+          workspaceAlias: "ws",
+          allowWrite: true,
+        }),
+      ).toThrow(RepositoryValidationError);
+      // Without the opt-in the staged read-only trial still approves.
+      const ok = repo.approveTrial(sessionId, st.body.id, {
+        key: randomUUID(),
+        now: NOW + 7,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      expect(ok.status).toBe(201);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
   it("stages/approves/claims with one-use grant; claim replay returns replay", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
