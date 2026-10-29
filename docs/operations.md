@@ -5951,6 +5951,11 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   `~/.config/companion/env`); absent names are simply omitted. Auto-dispatch
   uses the same mechanism through
   `materialization.executor.guestEnv` in `COMPANION_AUTODISPATCH_JSON`.
+  SECURITY: forwarded values are visible to the guest model (env/`/proc`),
+  and the guest can write candidate files. Do not forward credentials,
+  tokens, or other secrets that must never appear in a candidate diff; the
+  sealed guest has no external network and does not need provider keys for
+  the local relay.
 - Sealed checks: only `lint` is runnable. The dependency closure is mounted at
   `/deps/node_modules`, which TypeScript cannot use to resolve project imports
   from `/work`, so `typecheck` is dropped loudly from the selected check set;
