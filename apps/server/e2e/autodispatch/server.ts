@@ -7,8 +7,14 @@
 //   - the REAL sealed materializer (per-execution snapshot + dependency
 //     depot + fixed executor/check profile),
 //   - the REAL TrialRunner/TrialModelRelay, and
-//   - the ACTUAL installed pi-orch launcher inside the sealed
+//   - normally the ACTUAL installed pi-orch launcher inside the sealed
 //     systemd-user + bwrap scope, with a real child Pi worker.
+//
+// COMPANION_AD_E2E_MODE=ci (GitHub-hosted runners only) keeps every item
+// above except the executor: the installed launcher/OMP pair is replaced by
+// the repo-contained scripts/pi-orch-bridge/ci-executor.mjs, which drives the
+// same sealed model relay and writes the same guest observation. That run is
+// never evidence for the installed binaries; see the CI job label.
 //
 // The only synthetic part is the model: one injected ModelGateway answers
 // foreground chat (`answer.submit`), the planner JSON, and the parent/child
@@ -65,6 +71,15 @@ const WRITE_CANDIDATE_TEXT =
 // the ACTUAL bridge run directory. Neither ever returns a host path.
 let sourceRoot = "";
 let stateDir = "";
+
+// CI substitution mode: GitHub-hosted runners do not carry the operator's
+// installed pi-orch/OMP closure. In CI we keep the real server/UI/planner/
+// materializer/TrialRunner/sealed bridge/relay/containment and replace ONLY
+// the executor with the repo-contained scripts/pi-orch-bridge/ci-executor.mjs
+// (plain read/write/opencode_task calls through the real model UDS). The
+// substitute labels itself in the guest observation and is never presented
+// as evidence for the installed binaries. Local runs stay on real-pi.
+const CI_MODE = process.env.COMPANION_AD_E2E_MODE === "ci";
 
 // Host locators for the ACTUAL installed pi-orch closure. These are pinned
 // test inputs, not production config: no production env/source is touched.
@@ -504,12 +519,6 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     0o700,
   );
   const bridgeDir = join(REPO, "scripts", "pi-orch-bridge");
-  const guest = join(root, "bin", "pi-orch-guest.mjs");
-  copyFileSync(join(bridgeDir, "pi-orch-guest.mjs"), guest);
-  chmodSync(guest, 0o700);
-
-  const launcher = realpathSync(join(INSTALLED_ROOT, "scripts", "pi-orch.mjs"));
-  const launcherRoot = dirname(dirname(launcher));
   const realBridgeScriptPath = join(bridgeDir, "companion-bridge.mjs");
   const bridgeConfigTemplatePath = join(root, "bridge-template.json");
   // Fixture-only diagnostic: wrap the REAL bridge spawn so its redacted
@@ -542,28 +551,58 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     );
   }
   write(bridgeConfigTemplatePath, "{}\n");
-  const runtime = {
-    nodeRealpath: realpathSync(join(INSTALLED_BIN, "node")),
-    ompRealpath: realpathSync(join(INSTALLED_BIN, "omp")),
-    bwrapRealpath: realpathSync("/usr/bin/bwrap"),
-    systemdRunRealpath: realpathSync("/usr/bin/systemd-run"),
-    systemctlRealpath: realpathSync("/usr/bin/systemctl"),
-    piOrchLauncherRealpath: launcher,
-    piOrchShellRealpath: join(
-      launcherRoot,
-      "scripts",
-      "pi_codex_orchestrator.sh",
-    ),
-    piOrchConfigRealpath: join(launcherRoot, "scripts", "omp-orchestrator.yml"),
-    piOrchExtensionRealpath: join(
-      launcherRoot,
-      ".pi",
-      "extensions",
-      "opencode-orchestrator",
-      "omp.ts",
-    ),
-    piOrchLockRealpath: join(launcherRoot, "package-lock.json"),
-  };
+  // The executor and its runtime locators are the ONLY CI substitution.
+  // CI keeps the real sealed bridge, confinement backend, model relay,
+  // materializer, runner, host checks, and artifact validation. It does not
+  // pretend to have the installed pi-orch/OMP closure.
+  let executorPath: string;
+  let runtime: Record<string, string>;
+  if (CI_MODE) {
+    executorPath = join(root, "bin", "ci-executor.mjs");
+    copyFileSync(join(bridgeDir, "ci-executor.mjs"), executorPath);
+    chmodSync(executorPath, 0o700);
+    runtime = {
+      nodeRealpath: realpathSync(process.execPath),
+      bwrapRealpath: realpathSync("/usr/bin/bwrap"),
+      systemdRunRealpath: realpathSync("/usr/bin/systemd-run"),
+      systemctlRealpath: realpathSync("/usr/bin/systemctl"),
+    };
+  } else {
+    const guest = join(root, "bin", "pi-orch-guest.mjs");
+    copyFileSync(join(bridgeDir, "pi-orch-guest.mjs"), guest);
+    chmodSync(guest, 0o700);
+    executorPath = guest;
+    const launcher = realpathSync(
+      join(INSTALLED_ROOT, "scripts", "pi-orch.mjs"),
+    );
+    const launcherRoot = dirname(dirname(launcher));
+    runtime = {
+      nodeRealpath: realpathSync(join(INSTALLED_BIN, "node")),
+      ompRealpath: realpathSync(join(INSTALLED_BIN, "omp")),
+      bwrapRealpath: realpathSync("/usr/bin/bwrap"),
+      systemdRunRealpath: realpathSync("/usr/bin/systemd-run"),
+      systemctlRealpath: realpathSync("/usr/bin/systemctl"),
+      piOrchLauncherRealpath: launcher,
+      piOrchShellRealpath: join(
+        launcherRoot,
+        "scripts",
+        "pi_codex_orchestrator.sh",
+      ),
+      piOrchConfigRealpath: join(
+        launcherRoot,
+        "scripts",
+        "omp-orchestrator.yml",
+      ),
+      piOrchExtensionRealpath: join(
+        launcherRoot,
+        ".pi",
+        "extensions",
+        "opencode-orchestrator",
+        "omp.ts",
+      ),
+      piOrchLockRealpath: join(launcherRoot, "package-lock.json"),
+    };
+  }
   const caps = {
     timeoutMs: 300_000,
     maxOutputBytes: 262_144,
@@ -582,6 +621,9 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     mandatoryChecks: ["readme-check"],
     configFingerprint: "0".repeat(64),
     sourceRevision: "0".repeat(40),
+    // Required by the frozen trial snapshot schema (the fixture previously
+    // omitted it, so the server disabled trials/autodispatch as legacy).
+    sourceRepoPath: sourceRoot,
     currentModel: MODEL_NAME,
     disclosedWholeRepoRead: true,
     timeoutMs: 300_000,
@@ -625,7 +667,11 @@ async function makeFixture(): Promise<NodeJS.ProcessEnv> {
     bridgeConfigTemplatePath,
     materialization: {
       stateDir,
-      executor: { kind: "real-pi", executable: guest, args: [] },
+      executor: {
+        kind: CI_MODE ? "fixed" : "real-pi",
+        executable: executorPath,
+        args: [],
+      },
       checks: { "readme-check": { executable: check, args: ["README.md"] } },
       executionBackend: "confined",
       runtime,
@@ -858,6 +904,12 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
+// eslint-disable-next-line no-console
+console.log(
+  CI_MODE
+    ? "autodispatch-e2e-mode ci (repo executor substitute; installed pi-orch/OMP NOT exercised)"
+    : "autodispatch-e2e-mode real-pi (installed launcher/OMP)",
+);
 // eslint-disable-next-line no-console
 console.log(`autodispatch-e2e-control-ready ${AUTODISPATCH_CONTROL_ORIGIN}`);
 // eslint-disable-next-line no-console
