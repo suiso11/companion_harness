@@ -511,6 +511,7 @@ function runnerConfigBase(
     gateway: stubGateway,
     observe: { activeTimeoutMs: 2000, goneTimeoutMs: 2000, pollIntervalMs: 5 },
     runDirBase,
+    timeZone: "UTC",
   };
 }
 
@@ -693,6 +694,22 @@ describe("trial_runner", () => {
       expect(report?.checks.length).toBeGreaterThan(0);
       const taskView = repo.getAutonomyTask(sessionId, taskId);
       expect(taskView.status).not.toBe("completed");
+      // The user is told in their own chat that the delegated run finished,
+      // exactly once per execution, with the verified verdict.
+      const notices = repo.listCompanionMessagesForward(sessionId, {
+        after: 0,
+        limit: 50,
+      }).messages;
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.text).toContain("verified");
+      expect(notices[0]?.text).toContain("/trials");
+      // A second poll has nothing queued: no second notice.
+      const again = await runner.runNext();
+      expect(again.ran).toBe(false);
+      expect(
+        repo.listCompanionMessagesForward(sessionId, { after: 0, limit: 50 })
+          .messages,
+      ).toHaveLength(1);
     } finally {
       closeKernelDatabase(handle);
     }
@@ -793,6 +810,13 @@ describe("trial_runner", () => {
       expect(report?.checks).toEqual([
         { name: "lint", outcome: "failed", exit: 0 },
       ]);
+      // An unverified result still tells the user the run finished.
+      const notices = repo.listCompanionMessagesForward(sessionId, {
+        after: 0,
+        limit: 50,
+      }).messages;
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.text).toContain("未検証");
     } finally {
       closeKernelDatabase(handle);
     }

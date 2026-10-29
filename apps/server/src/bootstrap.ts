@@ -3149,6 +3149,7 @@ export async function startServer(
           fixedModel: runnerModel,
           gateway: runnerGateway,
           observe: { ...trialConfig.runner.observe },
+          timeZone: config.timeZone,
           ...(autodispatchConfig !== null
             ? {
                 resolveMaterialization: (input: {

@@ -1421,6 +1421,7 @@ linuxDescribe(
             systemctlRealpath: "/usr/bin/systemctl",
             xdgRuntimeDir: "/run/user/1000",
             workspaceAlias: fx.config.workspaceAlias,
+            timeZone: "UTC",
             profile: {
               available: true,
               enabled: true,
