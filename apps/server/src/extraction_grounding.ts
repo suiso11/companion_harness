@@ -328,9 +328,12 @@ function stripGenericPhrases(text: string): string {
  * boundary bigram cut out of a generic phrase from looking like content.
  */
 function compactCoverageText(text: string): string {
+  // A particle is a boundary, not something to weld across: removing it with
+  // an empty replacement would invent terms ("犬と猫" -> "犬猫") that never
+  // appeared in the body and can only match assistant text.
   return stripGenericPhrases(stripFraming(text)).replace(
     PARTICLES_NORMALIZED,
-    "",
+    " ",
   );
 }
 
@@ -410,6 +413,66 @@ function extractionAsciiTerms(text: string): Set<string> {
   }
   return tokens;
 }
+
+/**
+ * Ordinary English inflection folding for token comparison. Only suffixes
+ * that change grammatical form are folded (plural/3rd-person -s/-es/-ies,
+ * past -ed/-ied, progressive -ing, doubled final consonant), so a faithful
+ * "likes" body is covered by a user "like" without accepting unrelated words.
+ */
+function asciiStems(word: string): string[] {
+  if (word.length <= 4) return [word];
+  let stem = word;
+  if (stem.endsWith("ies") || stem.endsWith("ied")) {
+    stem = `${stem.slice(0, -3)}y`;
+  } else if (stem.endsWith("ing") && stem.length > 5) {
+    stem = stem.slice(0, -3);
+  } else if (stem.endsWith("ed") && stem.length > 4) {
+    stem = stem.slice(0, -2);
+  } else if (stem.endsWith("es") && stem.length > 4) {
+    stem = stem.slice(0, -2);
+  } else if (stem.endsWith("s") && !stem.endsWith("ss")) {
+    stem = stem.slice(0, -1);
+  }
+  const stems = new Set([stem]);
+  // "stopped" -> "stopp" and "running" -> "runn": also try the base form.
+  if (stem.length > 3 && stem.endsWith(stem.slice(-2, -1))) {
+    stems.add(stem.slice(0, -1));
+  }
+  // A silent final e ("lived" -> "liv" / "live").
+  for (const variant of [...stems]) stems.add(`${variant}e`);
+  return [...stems];
+}
+
+function sameAsciiStem(a: string, b: string): boolean {
+  const stemsB = asciiStems(b);
+  return asciiStems(a).some((stem) => stemsB.includes(stem));
+}
+
+/** Exact/substring or ordinary inflection coverage of one ASCII term. */
+function containsAsciiInflection(text: string, term: string): boolean {
+  if (containsCandidate(coverageHaystack(text), term)) return true;
+  // Compare against EVERY word, not only content terms: a word that is
+  // framing in one sentence ("I like coffee") can be the inflected verb the
+  // body restates ("likes").
+  for (const match of text
+    .normalize("NFKC")
+    .toLowerCase()
+    .matchAll(ASCII_WORD_PATTERN)) {
+    const token = match[0];
+    if (token.length < 2) continue;
+    if (token === term || sameAsciiStem(token, term)) return true;
+  }
+  return false;
+}
+
+/**
+ * Absolute dates/times the extraction prompt requires resolving from the
+ * supplied current date/time. They are sanctioned transformations, never
+ * assistant embellishment.
+ */
+const RESOLVED_DATE_TIME_TERM =
+  /^(?:\d{4}[-.]\d{1,2}[-.]\d{1,2}(?:t\d{1,2}:\d{2}(?::\d{2})?)?|\d{4}\/\d{1,2}\/\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|\d{1,2}:\d{2}(?::\d{2})?|\d{4})$/;
 
 /**
  * CJK bigrams plus ASCII terms. `stripped` is the coverage-normalized form
@@ -541,8 +604,11 @@ export function hasAssistantDerivedBodyTerms(
   for (const term of extractionAsciiTerms(coreBody)) {
     if (term.length < EXTRACTION_ASSISTANT_ASCII_MIN) continue;
     if (isGenericTerm(term)) continue;
-    if (containsCandidate(user, term)) continue;
-    if (!containsCandidate(assistant, term)) continue;
+    // Resolved absolute dates/times come from the trusted current date/time,
+    // not from the assistant's wording (memory extraction prompt).
+    if (RESOLVED_DATE_TIME_TERM.test(term)) continue;
+    if (containsAsciiInflection(userText, term)) continue;
+    if (!containsAsciiInflection(assistantText, term)) continue;
     return true;
   }
 
@@ -575,6 +641,13 @@ export function hasAssistantDerivedBodyTerms(
   return false;
 }
 
+const CJK_SCRIPT_PATTERN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+function hasCjkScript(text: string): boolean {
+  return CJK_SCRIPT_PATTERN.test(text);
+}
+
 /** Why a body was downgraded (fixed diagnostic values, never content). */
 export type ExtractionBodyDowngrade = "coverage" | "assistant_terms";
 
@@ -589,6 +662,10 @@ export function extractionBodyDowngrade(
   assistantText: string | null | undefined,
 ): ExtractionBodyDowngrade | null {
   if (typeof userText !== "string") return null;
+  // The extractor writes a Japanese body even for a non-Japanese user turn
+  // (MEMORY_EXTRACT_SYSTEM_PROMPT). Surface overlap cannot judge a mandated
+  // translation, so cross-script pairs rely on the verbatim evidence quote.
+  if (hasCjkScript(body) !== hasCjkScript(userText)) return null;
   if (extractionBodyCoverage(body, userText) < EXTRACTION_BODY_COVERAGE_MIN) {
     return "coverage";
   }
