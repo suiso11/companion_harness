@@ -193,7 +193,7 @@ describe("trial.propose", () => {
     }
   });
 
-  it("fails closed under a self goal and returns a fixed code", async () => {
+  it("stages under a model-created self goal (the trial is the gate)", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       const { task } = goalTask(repo, sessionId, "self");
@@ -214,9 +214,9 @@ describe("trial.propose", () => {
       );
       expect(out.result.actualOutcome).toBe("succeeded");
       const staged = out.modelFacing as Record<string, unknown>;
-      expect(staged.status).toBe("rejected");
-      expect(staged.errorCode).toBe("requires_explicit_user_goal");
-      expect(repo.listTrials(sessionId).items).toHaveLength(0);
+      expect(staged.status).toBe("staged");
+      // Staged only: nothing runs until a human approves the trial.
+      expect(repo.listTrials(sessionId).items).toHaveLength(1);
     } finally {
       closeKernelDatabase(handle);
     }
@@ -285,7 +285,9 @@ describe("trial.propose", () => {
       expect(AGENT_SYSTEM_PROMPT).toContain("purpose.list");
       expect(AGENT_SYSTEM_PROMPT).toContain("task.propose");
       expect(AGENT_SYSTEM_PROMPT).toContain("trial.propose");
-      expect(AGENT_SYSTEM_PROMPT).toContain("候補");
+      expect(AGENT_SYSTEM_PROMPT).toContain(
+        "ONE step that needs the user's approval",
+      );
       expect(AGENT_SYSTEM_PROMPT).toContain("試行の提案");
       // Fit-goal check: unrelated personal chores must not ride a project goal.
       expect(AGENT_SYSTEM_PROMPT).toContain("actually fits the request");

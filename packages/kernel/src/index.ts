@@ -408,10 +408,13 @@ export {
   LEARNING_PENDING_TTL_MS,
   learningContentHash,
 } from "./conversation_learning.js";
-export type { ConversationProposalToolsOptions } from "./conversation_proposal_tools.js";
+export type {
+  ConversationProposalToolsOptions,
+  ProposalCreatedToolOutput,
+} from "./conversation_proposal_tools.js";
 export {
   createConversationProposalRegistrations,
-  ProposalStageToolOutputSchema,
+  ProposalCreatedToolOutputSchema,
   PurposeProposeToolInputSchema,
   TaskProposeToolInputSchema,
 } from "./conversation_proposal_tools.js";

@@ -171,6 +171,7 @@ function stageAuthority(
   sessionId: string,
   scope: string,
   explicit = true,
+  sourceKind: "user" | "self" | "external" = "user",
 ): { taskId: string } {
   const now = Date.now();
   const goal = repo.createAutonomyPurpose(
@@ -180,7 +181,7 @@ function stageAuthority(
       statement: "ship it",
       kind: "goal",
       explicit,
-      sourceKind: "user",
+      sourceKind,
     },
     { key: randomUUID(), now },
   );
@@ -409,13 +410,19 @@ describe("trial HTTP profile facts", () => {
     }
   });
 
-  it("rejects an unconfirmed goal with purpose_not_confirmed", async () => {
+  it("rejects an external-sourced goal with purpose_not_confirmed", async () => {
     const fixture = await makeApp(true);
     try {
       const { app, repo } = fixture;
       const created = await post(app, "/api/sessions", {}, randomUUID());
       const sessionId = (created.body as { sessionId: string }).sessionId;
-      const { taskId } = stageAuthority(repo, sessionId, "pf3", false);
+      const { taskId } = stageAuthority(
+        repo,
+        sessionId,
+        "pf3",
+        true,
+        "external",
+      );
       const staged = await post(
         app,
         `/api/sessions/${sessionId}/trials`,

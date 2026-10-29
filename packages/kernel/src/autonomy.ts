@@ -3165,13 +3165,13 @@ export function stageConversationProposal(
       return { status: existing.responseStatus, body, replayed: true };
     }
     requireSession(db, session);
-    // Semantic replay: an identical exact draft that is still pending
-    // replays instead of duplicating (ordinary repeated model calls with
-    // the same source quote stage nothing new; a meaningfully new source
-    // hashes differently and stages a new draft).
+    // Semantic replay: an identical exact draft replays instead of
+    // duplicating. Accepted drafts count too, because the tool adopts each
+    // draft immediately: repeating the same source quote must not create a
+    // second goal/task (a meaningfully new source hashes differently).
     const dup = db
       .prepare(
-        "SELECT * FROM conversation_proposals WHERE session_id = ? AND request_hash = ? AND status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1",
+        "SELECT * FROM conversation_proposals WHERE session_id = ? AND request_hash = ? AND status IN ('pending','accepted') ORDER BY created_at ASC, id ASC LIMIT 1",
       )
       .get(session, hash) as RawProposal | undefined;
     if (dup !== undefined) {

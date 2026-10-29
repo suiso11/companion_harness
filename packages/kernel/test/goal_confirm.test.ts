@@ -89,18 +89,19 @@ function stageInput(taskId: string) {
 }
 
 describe("goal confirmation", () => {
-  it("promotes an adopted goal so trial authority passes", async () => {
+  it("promotes an adopted goal to user provenance", async () => {
     const { handle, repo, sessionId } = await makeRepo();
     try {
       const { goal, task } = adoptedGoal(repo, sessionId);
-      expect(() =>
-        repo.stageTrial(sessionId, stageInput(task.id), {
-          key: randomUUID(),
-          now: NOW + 4,
-          profile: profile(),
-          workspaceAlias: "ws",
-        }),
-      ).toThrow();
+      // A self goal already stages a trial (the human approves the trial),
+      // so confirmation is a provenance upgrade, not an authority switch.
+      const staged = repo.stageTrial(sessionId, stageInput(task.id), {
+        key: randomUUID(),
+        now: NOW + 4,
+        profile: profile(),
+        workspaceAlias: "ws",
+      });
+      expect(staged.status).toBe(201);
       const out = repo.confirmAutonomyPurpose(
         sessionId,
         goal.id,
