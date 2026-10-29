@@ -162,6 +162,22 @@ function readGuestObservation(workRoot) {
         parsed.lastAssistantTail,
       ).slice(-MAX_ASSISTANT_TAIL_CHARS);
     }
+    // Tool error heads and paths are guest-written too. Bound and redact them
+    // at the boundary so every consumer (findings, diagnostics) sees only the
+    // sanitized form.
+    for (const tool of parsed.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      if (typeof tool.error === "string")
+        tool.error = redactDiagnostic(tool.error)
+          .replace(/\p{Cc}/gu, " ")
+          .slice(0, 240);
+      if (
+        tool.args &&
+        typeof tool.args === "object" &&
+        typeof tool.args.path === "string"
+      )
+        tool.args.path = redactDiagnostic(tool.args.path).slice(0, 200);
+    }
     return parsed;
   } catch {
     return null;
@@ -173,6 +189,28 @@ function readGuestObservation(workRoot) {
 const DIAGNOSTIC_HEAD_BYTES = 1024;
 const MAX_ASSISTANT_TAIL_CHARS = 512;
 const DIAGNOSTIC_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-9;?]*[A-Za-z]`,
+  "g",
+);
+
+// Host-observed evidence for a failed fixed operator check: the check id, its
+// exit code, and a small ANSI-stripped/redacted head of its combined output.
+// Without this a check failure (W3 on 01f40da ended lint exit 1, later
+// verified false) collapsed into the generic summary and the reason was lost.
+function checkFailureFinding(check) {
+  const combined = `${check.stdout ?? ""}\n${check.stderr ?? ""}`
+    .slice(0, 4096)
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(/\p{Cc}/gu, " ")
+    .trim();
+  return boundedDiagnostic(
+    `operator check ${check.id} failed (${
+      check.timedOut ? "timed out" : `exit ${check.exitCode}`
+    }): ${combined.length > 0 ? combined : "(no output)"}`,
+    400,
+  );
+}
 
 function redactDiagnostic(value) {
   return String(value ?? "")
@@ -336,12 +374,47 @@ function guestAnswerFindings(observation) {
   return buildGuestAnswerFindings(boundedGuestAnswer(observation));
 }
 
+// A failed tool call is evidence about the guest only, never host authority.
+// The guest retains a bounded error head; forward up to three of them so a
+// trial failure names its cause instead of collapsing to "denied".
+const MAX_TOOL_ERROR_FINDINGS = 3;
+const MAX_TOOL_ERROR_FINDING_CHARS = 160;
+
+function guestToolErrorFindings(observation) {
+  if (observation === null || !Array.isArray(observation.tools)) return [];
+  const out = [];
+  for (const tool of observation.tools) {
+    if (out.length >= MAX_TOOL_ERROR_FINDINGS) break;
+    if (
+      !tool ||
+      typeof tool !== "object" ||
+      tool.result !== "error" ||
+      typeof tool.error !== "string"
+    )
+      continue;
+    const name =
+      typeof tool.name === "string" && tool.name.length > 0
+        ? tool.name.slice(0, 64)
+        : "unknown";
+    // The observation is guest-owned and untrusted: re-bound and re-redact.
+    const text = redactDiagnostic(tool.error)
+      .replace(/\p{Cc}/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, MAX_TOOL_ERROR_FINDING_CHARS);
+    if (text.length === 0) continue;
+    out.push(`guest tool error (unattested): ${name}: ${text}`);
+  }
+  return out;
+}
+
 function reportFindings(observation, extra = []) {
   const out = [];
   const seen = new Set();
   const candidates = [
     ...guestAnswerFindings(observation),
     ...extra,
+    ...guestToolErrorFindings(observation),
     ...observationFindings(observation),
   ];
   for (const entry of candidates) {
@@ -969,12 +1042,18 @@ async function main() {
     writeSync(STDOUT_FD, line);
   };
 
-  const errorOutcome = (summary, checks, storedExit, unresolved = []) => ({
+  const errorOutcome = (
+    summary,
+    checks,
+    storedExit,
+    unresolved = [],
+    findings = [],
+  ) => ({
     raw: rawResult(
       request,
       "error",
       false,
-      { summary, files: [], findings: [], unresolved },
+      { summary, files: [], findings, unresolved },
       { checks },
     ),
     storedExit,
@@ -1250,6 +1329,7 @@ async function main() {
             });
             const checks = [];
             let stoppedEarly = false;
+            let failedCheck = null;
             for (
               let index = 0;
               index < request.requiredChecks.length;
@@ -1312,6 +1392,13 @@ async function main() {
                 outputMatched,
               });
               if (checkRun.timedOut || !outputMatched) {
+                failedCheck = {
+                  id,
+                  exitCode: checkRun.timedOut ? 4 : checkRun.code,
+                  timedOut: checkRun.timedOut,
+                  stdout: checkRun.stdout,
+                  stderr: checkRun.stderr,
+                };
                 stoppedEarly = true;
                 break;
               }
@@ -1335,6 +1422,8 @@ async function main() {
                   : "companion bridge: check failed",
                 checks,
                 deadlineFired ? 4 : 10,
+                [],
+                failedCheck === null ? [] : [checkFailureFinding(failedCheck)],
               );
             } else {
               const after = await verifySealedWorkspaceSnapshot(snapshot, {

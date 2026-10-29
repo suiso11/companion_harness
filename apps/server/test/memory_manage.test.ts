@@ -128,6 +128,7 @@ function recordEnvelope(
   id: string,
   status: string,
   revision: number,
+  evidence: string | null = null,
 ): Record<string, unknown> {
   return {
     record: {
@@ -140,6 +141,7 @@ function recordEnvelope(
       observedAt: new Date(T0).toISOString(),
       createdAt: new Date(T0).toISOString(),
       scope: SCOPE,
+      evidence,
     },
   };
 }
@@ -147,6 +149,7 @@ function recordEnvelope(
 function makeCli(
   ledger: FakeLedger,
   searchItems: Array<{ id: string; snippet: string; status: string }>,
+  evidence: string | null = null,
 ): CliCall {
   return async (_address, op, params) => {
     ledger.ops.push(op);
@@ -159,9 +162,7 @@ function makeCli(
     if (op === "record.get") {
       const id = String((params as { id?: unknown }).id ?? "");
       const status = ledger.liveStatus.get(id) ?? "active";
-      return okEnvelope(
-        recordEnvelope(id, status, status === "active" ? 3 : 3),
-      );
+      return okEnvelope(recordEnvelope(id, status, 3, evidence));
     }
     if (
       op === "event.append" ||
@@ -319,6 +320,37 @@ describe("target binding: ambiguity, scope, single-match", () => {
 });
 
 describe("current-target and stale guards, immutable citations", () => {
+  it("detail carries the stored user quote (evidence) and omits invalid values", async () => {
+    const f = await openRepo();
+    try {
+      const ledger: FakeLedger = { ops: [], liveStatus: new Map() };
+      const service = makeService(
+        f.repo,
+        makeCli(
+          ledger,
+          [{ id: "rec-a", snippet: "alpha", status: "active" }],
+          "I like green tea.",
+        ),
+      );
+      const { sessionId, runId } = completeRun(f.repo);
+      const search = await service.searchMemories({
+        sessionId,
+        runId,
+        query: "q",
+      });
+      const detail = await service.getMemoryDetail({
+        sessionId,
+        searchId: search.searchId,
+        handle: "m1",
+      });
+      expect(detail.current.evidence).toBe("I like green tea.");
+      expect(detail.snapshot.snippet).toBe("alpha");
+      expect(detail.current.body).toBe("body-of-rec-a");
+    } finally {
+      f.close();
+    }
+  });
+
   it("detail keeps snapshot distinct from live; correct on stale is state_conflict", async () => {
     const f = await openRepo();
     try {

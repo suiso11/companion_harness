@@ -370,7 +370,7 @@ connector instance owns **all** configured roots.
   preserved exactly).
 - When set, the value must be a strict JSON object with only
   `{ executable, entry, config, scope, timeoutMs?, maxResponseBytes?,
-  recallLimit?, idleMs? }`. Example:
+  recallLimit?, idleMs?, sendEvidence? }`. Example:
   `{"executable":"/usr/bin/node","entry":"/srv/remind/dist/src/cli.js","config":"/srv/remind/mem.json","scope":"personal"}`.
   `executable`/`entry`/`config` must be absolute paths (no shell, no
   lookup: the child is spawned with `shell: false` and exactly
@@ -380,7 +380,13 @@ connector instance owns **all** configured roots.
   `timeoutMs` default `5000` (bounds `500..30000`),
   `maxResponseBytes` default `65536` (bounds `4096..1048576`),
   `recallLimit` default `5` (bounds `1..8`),
-  `idleMs` default `30000` (bounds `5000..300000`).
+  `idleMs` default `30000` (bounds `5000..300000`),
+  `sendEvidence` default `true` (send remind#41 quotes; set `false` to skip
+  them up front for an older remind build). An older build is also handled
+  automatically: a `record.remember` with a quote answered BAD_REQUEST is
+  retried once without it (same idempotency key) and `evidence` is latched
+  off for the process, so later remembers still store the user fact (just
+  without the original words) and no per-remember errors repeat.
   Unknown keys, scalars, and malformed JSON are rejected fail-closed at
   startup with a fixed safe message (no paths, scopes, or values logged).
 - The remind CLI child is the ONLY remind interface: Companion never
@@ -406,8 +412,15 @@ connector instance owns **all** configured roots.
   verbatim quote from the user turn (NFKC + whitespace-normalized
   substring). Missing, paraphrased, or assistant-only evidence downgrades
   the item to `model_inference` (the memory is kept, never dropped, and
-  never presented as a user fact); `evidence` is grounding input only and
-  is never persisted. `summary`/`model_inference` may omit it. Prompt rule:
+  never presented as a user fact). A GROUNDED user_fact now also sends the
+  normalized quote (NFC + trim, control-free, <= 400 code points) as the
+  optional remind#41 `record.remember` `evidence`; downgraded kinds never
+  send it. Recall/detail carry `evidence: string | null`, and the memory
+  prompt shows it on user_fact lines as `（元の発言:「...」）` (at most 200
+  code points). Set `sendEvidence: false` while running a remind build
+  that predates remind#41; the runtime BAD_REQUEST retry/latch above also
+  keeps such a build working without the quote.
+  `summary`/`model_inference` may omit it. Prompt rule:
   assistant-only suggestions, assumptions, and inferences are never
   restated as user facts. Recall already carries each item's kind and
   renders it as `- mN [kind]: ...`, with only `user_fact` labeled as a
@@ -443,9 +456,35 @@ connector instance owns **all** configured roots.
   never dropped. Fixed counts (`downgraded_by_coverage`,
   `downgraded_by_assistant_terms`) ride the `memory.extract_grounded` /
   `memory.extract_none` / `memory.extract_invalid` logs; no content is logged.
-  The quote is still grounding-only: remind's `record.remember` has no
-  `meta`/`evidence` field (tags are topic-only and capped), so no quote is
-  stored or rendered.
+  Resolved absolute dates/times (the prompt's trusted-clock transform),
+  ordinary English inflections (`like`/`likes`), and a cross-script body
+  (prompt-mandated translation) are exempt; particle removal keeps run
+  boundaries instead of welding terms. The grounded quote is stored only on
+  the final `user_fact` (NFC/trim/control-free, <= 400 code points) as the
+  remind#41 `record.remember` `evidence`; downgraded kinds never carry it,
+  and recall/detail render it only for `user_fact`.
+- Memory content statistics (2026-10-28): `GET /api/memory/stats` (browser
+  read-only, same session auth as other API routes, no query parameters)
+  returns fixed numeric `{ byKind, byStatus, importance?, computedAt,
+  truncated }`. `byKind` covers ACTIVE records only (`user_fact /
+  model_inference / summary / correction`); `byStatus` covers `active /
+  retired / superseded / archived`. The service prefers remind's read-only
+  `record.stats` aggregate (remind#42): one bounded call, `truncated` false,
+  plus `importance {scored, unscored, buckets}` where `scored` counts active
+  records whose `record_importance.bodyHash` matches the current body.
+  Remind versions without the op answer `BAD_REQUEST`; the service then
+  latches "stats unsupported" for the process and falls back to bounded
+  `record.list` pages filtered by status, newest -> oldest with the
+  exclusive `until` timestamp, capping the walk (300 active rows, 100 rows
+  for each other status). Reaching a cap sets `truncated` (counts are lower
+  bounds); the UI labels this `上限まで集計`. The page size starts at 100 and
+  falls back through 25/10/5/1 when remind answers `LIMIT_EXCEEDED` for a
+  lower configured `limits.limitMax`. The snapshot is cached server-side
+  for five minutes with single-flight, so the panel's 30s auto-refresh does
+  not spawn a CLI child per view. Only counts cross the API boundary: the
+  `record.list` snippets are discarded server-side and never logged.
+  `importance` is absent in the fallback path, and the UI then omits the
+  importance chart.
 - Memory dates: extraction anchors relative dates (`今日暑い`,
   `今週の金曜日`, `一昨日`) to the turn's date in
   `COMPANION_TIME_ZONE` and writes ABSOLUTE dates into the extracted
@@ -485,10 +524,11 @@ connector instance owns **all** configured roots.
    scheduling proof only), and graceful shutdown with a reaped child.
    Verified 2026-10-15: 1/1 passed (~16s). CI provides the REAL CLI: the
    workflow checks out the pinned remind source
-   (`suiso11/remind@3a0afdcae71d11ada65239dfae2bb1b25bac4b6c`,
+   (`suiso11/remind@a1f6cedd086963e09e1eba21e20a551fc7f798ec`,
    remind master incl. remind#16 recall fields + remind#19 privacy support
-   + remind#28 graph ops + remind#29 topic/auto-association;
-   remind#29 merge commit 3a0afdc) into `.ci/remind`, builds it (`npm ci` + `npm run build`,
+   + remind#28 graph ops + remind#29 topic/auto-association
+   + remind#41 user_fact evidence quotes; remind#41 head a1f6cedd) into
+   `.ci/remind`, builds it (`npm ci` + `npm run build`,
    no models), and sets `COMPANION_MEMORY_TEST_ENTRY` /
    `COMPANION_MEMORY_TEST_CONFIG_TEMPLATE` to the built entry + template.
    Limits: synthetic gateway only
@@ -5955,3 +5995,25 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 ```
 
 `scripts/deploy/build-trial-operator.mts` がこの値を `autonomy.env` の `COMPANION_AUTONOMY_JSON` にそのまま引き渡します（厳格パース。未知キーは起動失敗）。`repoPath` は絶対パスの git checkout、`remote` はそのリポジトリの remote 名、`baseRef` は fetch 後の基準 ref、`branchPrefix` は `/` で終わる名前空間です。`gh` はサービス環境の `HOME`/`PATH`（必要なら `XDG_CONFIG_HOME`）で認証済みである必要があります。固定エラーは `adoption_disabled` / `not_verified` / `artifact_mismatch` / `base_changed` / `branch_exists` / `git_failed` / `gh_failed` で、`base_changed` の場合は試行をやり直してください（adoption テーブルは proposal 単位で失敗を記録し、再クリックで再試行できます）。
+
+## Companion-initiated chat messages (`companion_text`, 2026-10-29)
+
+- `pnpm --filter @companion/server message send --text "..." [--session <uuid>]`
+  writes ONE `companion_text` Turn (no Run) through the kernel repository.
+  Without `--session` the target is the most recently active session. The CLI
+  refuses a missing DB/session and stores the text as the real visible message
+  (bounded 1..32768, trimmed non-empty; no safe-text masking).
+- The history projection carries `kind: "companion_text"` with
+  `selectedRun: null`. Both chat shells (Svelte `/` and legacy `/legacy`)
+  render it as an assistant message, never as a user bubble and never as
+  「応答なし」.
+- Live delivery: `GET /api/sessions/:sessionId/companion-messages/stream?after=<turnSeq>`
+  serves `event: companion-message` with `id` = Turn seq through the shared
+  polled SSE loop (250ms poll, 15s heartbeat, backpressure grace, synchronous
+  drain gate, native `Last-Event-ID` replay). The Svelte chat opens it after
+  history hydration, seeded at the highest rendered Turn seq, and appends new
+  messages by Turn id; reload rebuilds from history. `/legacy` has no live
+  feed (reload/hydration only).
+- This kind deliberately has NO `user_text` semantics: no Run/retry, no
+  autonomy source turn, no memory extraction, no external send. It is in-app
+  only.

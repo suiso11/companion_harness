@@ -22,7 +22,8 @@
     "learning": "tsx src/learning_cli.ts",
     "agora": "tsx src/agora_cli.ts",
     "records": "tsx src/records_cli.ts",
-    "compare": "tsx src/compare_cli.ts"
+    "compare": "tsx src/compare_cli.ts",
+    "message": "tsx src/companion_message_cli.ts"
   },
   "dependencies": {
     "@companion/connector-markdown": "workspace:*",

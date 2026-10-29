@@ -462,6 +462,49 @@ describe("memory block provenance labels", () => {
   });
 });
 
+describe("memory block original user words (remind#41)", () => {
+  it("renders evidence only on user_fact and bounds it to 200 code points", () => {
+    const long = "あ".repeat(260);
+    const block = formatMemoryPromptBlock([
+      {
+        recordId: "r1",
+        recallId: "k1",
+        snippet: "User likes tea.",
+        kind: "user_fact" as const,
+        evidence: "  green   tea  ",
+      },
+      {
+        recordId: "r2",
+        recallId: "k2",
+        snippet: "Model guessed coffee.",
+        kind: "model_inference" as const,
+        evidence: "leaked quote",
+      },
+      {
+        recordId: "r3",
+        recallId: "k3",
+        snippet: "Long quote.",
+        kind: "user_fact" as const,
+        evidence: long,
+      },
+    ]);
+    expect(block).toContain(
+      "- m1 [user_fact]: User likes tea.（元の発言:「green tea」）",
+    );
+    expect(block).toContain(
+      "For user_fact lines, 元の発言 is the user's own verbatim words",
+    );
+    expect(block).not.toContain("leaked quote");
+    const longLine = block
+      .split("\n")
+      .find((line) => line.startsWith("- m3 [user_fact]"));
+    expect(longLine).toBeDefined();
+    const quote = longLine?.match(/元の発言:「(.*)」）$/)?.[1] ?? "";
+    expect(Array.from(quote)).toHaveLength(200);
+    expect(quote.endsWith("…")).toBe(true);
+  });
+});
+
 describe("per-run memory status (I01-06)", () => {
   /** Scripted happy-path gateway: one model step, no tool calls. */
   function plainGateway(): ModelGateway {

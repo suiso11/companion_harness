@@ -66,6 +66,15 @@ export const MemoryDetailResponseSchema = z.strictObject({
     source: z.string().min(1),
     observedAt: z.string().min(1),
     createdAt: z.string().min(1),
+    /** Remind#41 verbatim user quote for this record, when present. */
+    evidence: z
+      .string()
+      .min(1)
+      .refine(codePointsMax(400), {
+        message: "evidence over 400 code points",
+      })
+      .nullable()
+      .optional(),
   }),
   stale: z.boolean(),
 });
@@ -235,6 +244,57 @@ export const MemoryGraphVersionResponseSchema = z.strictObject({
 export type MemoryGraphVersionResponse = z.infer<
   typeof MemoryGraphVersionResponseSchema
 >;
+
+/**
+ * Read-only memory-content statistics for the configured scope. Counts are
+ * numbers only (no record bodies, ids, or scopes). `byKind` covers ACTIVE
+ * records; `truncated` means at least one status walk hit its server-side
+ * row cap, so the numbers are lower bounds. Optional `importance` comes from
+ * remind's `record.stats`: active records with a fresh score (`scored`),
+ * active records without one (`unscored`), and the five fixed buckets.
+ */
+export const MemoryStatsKindCountsSchema = z.strictObject({
+  user_fact: z.number().int().min(0),
+  model_inference: z.number().int().min(0),
+  summary: z.number().int().min(0),
+  correction: z.number().int().min(0),
+});
+export type MemoryStatsKindCounts = z.infer<typeof MemoryStatsKindCountsSchema>;
+
+export const MemoryStatsStatusCountsSchema = z.strictObject({
+  active: z.number().int().min(0),
+  retired: z.number().int().min(0),
+  superseded: z.number().int().min(0),
+  archived: z.number().int().min(0),
+});
+export type MemoryStatsStatusCounts = z.infer<
+  typeof MemoryStatsStatusCountsSchema
+>;
+
+/** One importance bucket (`lt` is the exclusive upper bound). */
+export const MemoryImportanceBucketSchema = z.strictObject({
+  lt: z.number().min(0),
+  count: z.number().int().min(0),
+});
+export type MemoryImportanceBucket = z.infer<
+  typeof MemoryImportanceBucketSchema
+>;
+
+export const MemoryStatsImportanceSchema = z.strictObject({
+  scored: z.number().int().min(0),
+  unscored: z.number().int().min(0),
+  buckets: z.array(MemoryImportanceBucketSchema).length(5),
+});
+export type MemoryStatsImportance = z.infer<typeof MemoryStatsImportanceSchema>;
+
+export const MemoryStatsResponseSchema = z.strictObject({
+  byKind: MemoryStatsKindCountsSchema,
+  byStatus: MemoryStatsStatusCountsSchema,
+  importance: MemoryStatsImportanceSchema.optional(),
+  computedAt: z.number().int().min(0),
+  truncated: z.boolean(),
+});
+export type MemoryStatsResponse = z.infer<typeof MemoryStatsResponseSchema>;
 
 /** Fixed memory route error codes (lowercase, no values leak). */
 export const MEMORY_ERROR_CODES = [

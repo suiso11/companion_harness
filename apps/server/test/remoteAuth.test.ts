@@ -464,6 +464,14 @@ describe("login sessions (steps 2-4)", () => {
       expect(await created.json()).toEqual({
         error: { code: "unauthenticated", message: "authentication required" },
       });
+      // Memory content stats inherit the same global session gate.
+      const stats = await f.app.request("/api/memory/stats", {
+        headers: { host: ALLOWED_HOST },
+      });
+      expect(stats.status).toBe(401);
+      expect(await stats.json()).toEqual({
+        error: { code: "unauthenticated", message: "authentication required" },
+      });
       const sessionId = f.repo.createSession({
         key: randomUUID(),
         now: T0,

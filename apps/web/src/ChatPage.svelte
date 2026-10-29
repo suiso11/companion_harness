@@ -93,6 +93,7 @@ interface HistoryRun {
 }
 interface Turn {
   turnId: string;
+  seq?: number;
   kind?: string;
   text?: string;
   run: HistoryRun | null;
@@ -252,6 +253,14 @@ let degradedMemory = $state(false);
 
 let sse: EventSource | null = null;
 let fallbackTimer: number | null = null;
+// Live companion-initiated messages (server-side turns). Durable history is
+// the reload projection; this stream only appends the new one.
+let companionSse: EventSource | null = null;
+let companionRetryTimer: number | null = null;
+const companionSeen = new Set<string>();
+// Highest durable Turn seq already rendered: the live feed opens after it,
+// so history is never replayed out of order (native Last-Event-ID resumes).
+let latestTurnSeq = 0;
 // V2 llama-like list: the transcript is a scroll container pinned to the
 // bottom. New content auto-scrolls unless the user scrolled up; sending
 // re-pins. `scrollEl`/`stickToBottom` are view-only (no message state).
@@ -413,6 +422,7 @@ async function ensureSession(): Promise<void> {
 async function switchSession(id: string): Promise<void> {
   if (id === sessionId || sending || activeRunId !== null) return;
   closeStream();
+  closeCompanionStream();
   sessionId = id;
   setSessionId(id);
   resetChatState();
@@ -457,6 +467,8 @@ function resetChatState(): void {
   terminalHydrated = new Set();
   turnKinds = new Map();
   runTurns = new Map();
+  latestTurnSeq = 0;
+  companionSeen.clear();
   pendingRequest = null;
   for (const timer of pendingExpiryTimers.values()) window.clearTimeout(timer);
   pendingExpiryTimers = new Map();
@@ -644,6 +656,7 @@ function coerceTurn(item: unknown): Turn | null {
   // exactOptionalPropertyTypes: absent optional props are omitted, never
   // explicitly `undefined` (svelte-check).
   const turn: Turn = { turnId: r.turnId, run };
+  if (typeof r.seq === "number" && Number.isInteger(r.seq)) turn.seq = r.seq;
   if (typeof r.kind === "string") turn.kind = r.kind;
   if (typeof r.text === "string") turn.text = r.text;
   return turn;
@@ -697,6 +710,7 @@ async function hydrateHistory(): Promise<void> {
     for (const t of pages[i] ?? []) {
       trackTurnKind(t);
       if (t.run !== null) renderedAnswers.add(t.run.runId);
+      if (t.seq !== undefined) latestTurnSeq = Math.max(latestTurnSeq, t.seq);
       ordered.push(t);
     }
   }
@@ -750,6 +764,7 @@ async function loadOlderHistory(): Promise<void> {
       for (const t of pages[i] ?? []) {
         trackTurnKind(t);
         if (t.run !== null) renderedAnswers.add(t.run.runId);
+        if (t.seq !== undefined) latestTurnSeq = Math.max(latestTurnSeq, t.seq);
         prepended.push(t);
       }
     }
@@ -1010,6 +1025,90 @@ function closeStream(): void {
     window.clearTimeout(fallbackTimer);
     fallbackTimer = null;
   }
+}
+
+function closeCompanionStream(): void {
+  if (companionRetryTimer !== null) {
+    window.clearTimeout(companionRetryTimer);
+    companionRetryTimer = null;
+  }
+  if (companionSse !== null) {
+    try {
+      companionSse.close();
+    } catch {
+      // Best effort.
+    }
+    companionSse = null;
+  }
+}
+
+function openCompanionStream(sid: string): void {
+  closeCompanionStream();
+  if (sessionId !== sid) return;
+  let source: EventSource;
+  try {
+    source = new EventSource(
+      `/api/sessions/${encodeURIComponent(sid)}/companion-messages/stream?after=${latestTurnSeq}`,
+    );
+  } catch {
+    return;
+  }
+  companionSse = source;
+  source.addEventListener("companion-message", (message) => {
+    if (sessionId !== sid) return;
+    const raw = (message as MessageEvent).data;
+    let item: { turnId?: unknown; seq?: unknown; text?: unknown } | null = null;
+    try {
+      item = JSON.parse(typeof raw === "string" ? raw : "") as {
+        turnId?: unknown;
+        seq?: unknown;
+        text?: unknown;
+      };
+    } catch {
+      return;
+    }
+    if (
+      item === null ||
+      typeof item.turnId !== "string" ||
+      typeof item.text !== "string" ||
+      companionSeen.has(item.turnId) ||
+      turns.some((turn) => turn.turnId === item.turnId)
+    ) {
+      return;
+    }
+    companionSeen.add(item.turnId);
+    turnKinds.set(item.turnId, "companion_text");
+    const seq =
+      typeof item.seq === "number" && Number.isInteger(item.seq)
+        ? item.seq
+        : undefined;
+    if (seq !== undefined) latestTurnSeq = Math.max(latestTurnSeq, seq);
+    turns = [
+      ...turns,
+      {
+        turnId: item.turnId,
+        ...(seq !== undefined ? { seq } : {}),
+        kind: "companion_text",
+        text: item.text,
+        run: null,
+      },
+    ];
+  });
+  source.onerror = () => {
+    // Native EventSource reconnects, but a persistent 401/404 must not spin.
+    if (sessionId !== sid) return;
+    try {
+      source.close();
+    } catch {
+      // Best effort.
+    }
+    if (companionSse === source) companionSse = null;
+    if (companionRetryTimer !== null) return;
+    companionRetryTimer = window.setTimeout(() => {
+      companionRetryTimer = null;
+      if (sessionId === sid) openCompanionStream(sid);
+    }, 5000);
+  };
 }
 
 function finishActiveRun(): void {
@@ -3030,6 +3129,7 @@ async function bootSession(): Promise<void> {
   if (descriptor !== null) {
     subscribe(descriptor.runId);
   }
+  openCompanionStream(sid);
 }
 
 onMount(() => {
@@ -3067,6 +3167,7 @@ onMount(() => {
   document.addEventListener("visibilitychange", onVisibility);
   return () => {
     closeStream();
+    closeCompanionStream();
     stopElapsedTimer();
     for (const timer of watchTimers.values()) window.clearInterval(timer);
     watchTimers.clear();
@@ -3254,7 +3355,11 @@ function evidenceForTurn(turn: Turn): {
           ? turn.kind
           : undefined}
       >
-        {#if turn.kind === "action_approval" || turn.kind === "action_rejection"}
+        {#if turn.kind === "companion_text"}
+          <div class="msg-assistant-row">
+            <Markdown text={turn.text ?? ""} />
+          </div>
+        {:else if turn.kind === "action_approval" || turn.kind === "action_rejection"}
           {@const receipt = turn.run?.receipt ?? null}
           {@const outcome =
             receipt !== null && typeof receipt.outcome === "string" ? receipt.outcome : null}

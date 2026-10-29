@@ -63,6 +63,13 @@ const MAX_OBSERVATION_BYTES = 64 * 1024;
 // so a degenerate loop (repeating a short cycle hundreds of times) is still
 // diagnosable from the observation without retaining model prose wholesale.
 const MAX_ASSISTANT_TAIL_CHARS = 512;
+// A failed tool call is the most diagnostic single event of a write trial, but
+// only a bounded head of it is retained: enough to name the cause (for example
+// "search text was not found"), never a full file or model payload.
+const MAX_TOOL_ERROR_CHARS = 240;
+const MAX_TOOL_ERROR_ENTRIES = 8;
+const MAX_TOOL_PATH_CHARS = 200;
+const MAX_TOOL_ARG_KEYS = 16;
 // Same credential-shape redaction as the host bridge's diagnostic reader.
 const ASSISTANT_SECRET_PATTERN = /(?:sk-|Bearer\s+)[A-Za-z0-9._-]+/g;
 let assistantTail = "";
@@ -236,6 +243,18 @@ function formatConstraints(constraints) {
   ].join("\n");
 }
 
+// OMP's default edit.mode is `hashline`, a line-anchored patch DSL. The
+// write-mode bench on 01f40da (#188) showed the local model misusing it:
+// "line 5: `CUT 2362*` resolved a single-line block" and "payload line has no
+// preceding hunk header ... Got \"PUT 25,26.=:\""; one call even leaked an
+// `</input>` token, and the first edit failed in nearly every write case.
+// `edit.mode: replace` (exact old/new text, OMP settings key `edit.mode`,
+// values apply_patch|hashline|patch|replace|sloppy, env PI_EDIT_VARIANT) is
+// the variant local models handle best.
+const EDIT_MODE = "replace";
+const EDIT_MODE_GUIDANCE =
+  "For edit, copy the exact existing text into the old text field and the replacement into the new text field; include enough surrounding lines in the old text to make it unique. Do not use line numbers or patch markers (no CUT/PUT/@@ hunks).";
+
 // Appended to the guest's system prompt so the sealed executor is never
 // mistaken for the pi-orch coordinator. The host coordinator contract forbids
 // the parent from editing/reading directly and tells it to delegate to
@@ -246,7 +265,7 @@ const DIRECT_WORKER_CONTRACT = [
   "You are a direct worker inside a sealed workspace, not a coordinator and not a parent agent.",
   "There are no delegation tools (no task, wait, opencode_task, opencode_spawn, opencode_wait, or opencode_tools).",
   "Do the work yourself with the tools provided in this session: read the relevant files, then make the candidate change when the mode allows it.",
-  "Modify existing files ONLY with edit (exact replacement); use write only to create new files; never rewrite an existing file with write.",
+  `Modify existing files ONLY with edit (exact replacement). ${EDIT_MODE_GUIDANCE} Use write only to create new files; never rewrite an existing file with write.`,
   "Never claim that work must be delegated to another worker; if a tool is unavailable, use the tools you do have.",
 ].join("\n");
 
@@ -269,7 +288,7 @@ function buildPrompt(job) {
   return [
     "You are a direct worker making one minimal candidate change in a sealed workspace at /work.",
     "Use the read, grep, glob, edit, and write tools yourself. Do not run commands, do not touch other paths, and do not delegate to other workers.",
-    "Modify existing files ONLY with edit (exact replacement); use write only to create new files; never rewrite an existing file with write.",
+    `Modify existing files ONLY with edit (exact replacement). ${EDIT_MODE_GUIDANCE} Use write only to create new files; never rewrite an existing file with write.`,
     `Relevant paths: ${paths}.`,
     `Purpose: ${job.statement}`,
     `Objective: ${job.objective}`,
@@ -335,6 +354,10 @@ function writeAgentConfig(agentDir, port) {
       "model:",
       "  loopGuard:",
       "    enabled: false",
+      // Give guests exact-text replacement instead of OMP's default
+      // hashline/patch DSL (see EDIT_MODE evidence above).
+      "edit:",
+      `  mode: ${EDIT_MODE}`,
       "",
     ].join("\n"),
     { mode: 0o600 },
@@ -589,6 +612,7 @@ function summarizeEvents(text, stderrText) {
   let finalText = "";
   let modelCalls = 0;
   let sawError = "";
+  let erroredWithText = 0;
   const seen = new Set();
   for (const line of text.split("\n")) {
     if (line.length === 0 || line.length > 2 * 1024 * 1024) continue;
@@ -616,7 +640,7 @@ function summarizeEvents(text, stderrText) {
                 seen.add(key);
                 const entry = {
                   name: String(block.name ?? "unknown").slice(0, 64),
-                  args: sanitizeArgs(block.arguments),
+                  args: sanitizeArgs(block.arguments, block.name),
                   result: "pending",
                 };
                 tools.push(entry);
@@ -649,7 +673,19 @@ function summarizeEvents(text, stderrText) {
         const entry =
           (callId ? byId.get(callId) : undefined) ??
           tools.find((tool) => tool.name === name && tool.result === "pending");
-        if (entry) entry.result = message.isError ? "error" : "ok";
+        if (entry) {
+          entry.result = message.isError ? "error" : "ok";
+          if (
+            message.isError === true &&
+            erroredWithText < MAX_TOOL_ERROR_ENTRIES
+          ) {
+            const errorText = boundedToolError(message);
+            if (errorText.length > 0) {
+              entry.error = errorText;
+              erroredWithText += 1;
+            }
+          }
+        }
         captureDelegatedStatus(
           delegated,
           name,
@@ -678,11 +714,61 @@ function summarizeEvents(text, stderrText) {
   };
 }
 
-function sanitizeArgs(value) {
+function toolResultText(message) {
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text" && typeof block.text === "string")
+      text += `${block.text}\n`;
+  }
+  return text;
+}
+
+// The first bytes of a failed tool result are what identifies the cause; the
+// rest is untrusted payload. Strip control characters, redact credentials, and
+// collapse whitespace so the observation stays a single bounded line.
+function boundedToolError(message) {
+  return toolResultText(message)
+    .replace(/\p{Cc}/gu, " ")
+    .replace(ASSISTANT_SECRET_PATTERN, "[redacted]")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, MAX_TOOL_ERROR_CHARS);
+}
+
+// Paths are recorded relative to the guest workspace (/work). An absolute path
+// outside it is reduced to its path shape without the leading slash so the
+// observation never carries a host location.
+function relativeToolPath(value) {
+  let path = value.replace(/\\/gu, "/").trim();
+  if (path.length === 0) return "";
+  const cwd = process.cwd().replace(/\\/gu, "/").replace(/\/+$/u, "");
+  if (cwd.length > 1 && path.startsWith(`${cwd}/`))
+    path = path.slice(cwd.length + 1);
+  path = path.replace(/^\.\//u, "").replace(/^\/+/u, "");
+  return path.slice(0, MAX_TOOL_PATH_CHARS);
+}
+
+function sanitizeArgs(value, name) {
   if (!value || typeof value !== "object") return {};
   const out = {};
   for (const key of ["path", "file_path", "filename"]) {
-    if (typeof value[key] === "string") out.path = value[key].slice(0, 512);
+    if (typeof value[key] === "string") {
+      const path = relativeToolPath(value[key]);
+      if (path.length > 0) out.path = path;
+      break;
+    }
+  }
+  // Edit/write arguments carry file contents (old/new text). Record only the
+  // argument key names so a failure can be classified without retaining any
+  // file bytes.
+  if (name === "edit" || name === "write") {
+    out.keys = Object.keys(value)
+      .filter((key) => typeof key === "string" && key.length <= 32)
+      .slice(0, MAX_TOOL_ARG_KEYS);
   }
   return out;
 }
@@ -790,6 +876,9 @@ async function main() {
     // Disable OMP's thinking/prose loop guard (see writeAgentConfig): the
     // config.yml key above is ignored by the headless stream path.
     PI_NO_THINKING_LOOP_GUARD: "1",
+    // Authoritative edit-mode switch: like model.loopGuard, the headless
+    // stream path can ignore the config.yml key, so pin the env override too.
+    PI_EDIT_VARIANT: EDIT_MODE,
     PI_TELEMETRY: "0",
     DO_NOT_TRACK: "1",
     OMP_LOG_LEVEL: "error",

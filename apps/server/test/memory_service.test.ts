@@ -36,11 +36,14 @@ import {
 } from "../src/memory_cli.js";
 import {
   createMemoryService,
+  MEMORY_EVIDENCE_MAX_CP,
   MEMORY_EXTRACT_MAX_ITEMS,
   MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS,
   MEMORY_EXTRACT_SYSTEM_PROMPT,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
+  normalizeRecalledEvidence,
+  normalizeStoredEvidence,
   parseExtractionOutcome,
   parseExtractionOutput,
   parseRecallData,
@@ -122,6 +125,7 @@ function makeService(
     scope?: string;
     background?: BackgroundResourceGate | null;
     logger?: ServerLogger;
+    sendEvidence?: boolean;
   } = {},
 ): MemoryService {
   const service = createMemoryService({
@@ -143,6 +147,9 @@ function makeService(
       ? { background: overrides.background }
       : {}),
     ...(overrides.logger !== undefined ? { logger: overrides.logger } : {}),
+    ...(overrides.sendEvidence !== undefined
+      ? { sendEvidence: overrides.sendEvidence }
+      : {}),
     cliCall,
   });
   services.push(service);
@@ -557,6 +564,56 @@ describe("parseExtractionOutput model decisions", () => {
     );
     expect(out.items[1]?.kind).toBe("model_inference");
     expect(out.downgradedByAssistantTerms).toBe(1);
+  });
+
+  it("persists the grounded quote only on user_fact, normalized and capped", () => {
+    // The body must also be covered by the user turn (body grounding); the
+    // long word keeps the evidence cap assertion while sharing a token.
+    const longWord = "a".repeat(MEMORY_EVIDENCE_MAX_CP + 30);
+    const userText = `  ${longWord}  `;
+    const payload = JSON.stringify({
+      memories: [
+        { body: "turn digest", kind: "summary" },
+        {
+          body: `The user mentioned ${longWord}`,
+          kind: "user_fact",
+          evidence: userText,
+        },
+        {
+          body: "assistant claim",
+          kind: "user_fact",
+          evidence: "not in the user turn",
+        },
+      ],
+    });
+    const out = parseExtractionOutcome(payload, userText);
+    expect(out.status).toBe("ok");
+    expect(out.items[1]).toMatchObject({ kind: "user_fact" });
+    expect(Array.from(out.items[1]?.evidence ?? "")).toHaveLength(
+      MEMORY_EVIDENCE_MAX_CP,
+    );
+    // Downgraded items never carry evidence.
+    expect(out.items[2]).toMatchObject({ kind: "model_inference" });
+    expect(out.items[2]?.evidence).toBeUndefined();
+    // Legacy direct parser calls had no user turn to ground against, so no
+    // evidence is attached even when the field was present.
+    expect(
+      parseExtractionOutput(payload, undefined)[1]?.evidence,
+    ).toBeUndefined();
+  });
+
+  it("normalizes stored quotes (NFC/trim/control-free) and drops empties", () => {
+    expect(normalizeStoredEvidence("  e\u0301  ")).toBe("é");
+    expect(normalizeStoredEvidence("a\u0001b\n")).toBe("a b");
+    expect(normalizeStoredEvidence("\u0000 \u0001 ")).toBeNull();
+    expect(normalizeStoredEvidence(42)).toBeNull();
+    // Recalled values are not re-escaped but stay bounded/control-free.
+    expect(normalizeRecalledEvidence(" user words ")).toBe("user words");
+    expect(normalizeRecalledEvidence("a\u0000b")).toBeNull();
+    expect(normalizeRecalledEvidence(null)).toBeNull();
+    expect(
+      normalizeRecalledEvidence("a".repeat(MEMORY_EVIDENCE_MAX_CP + 1)),
+    ).toBeNull();
   });
 
   it("rejects valid items that lack the mandatory summary (store-everything)", () => {
@@ -1390,7 +1447,9 @@ describe("completion cultivation and cite-gated feedback", () => {
       });
       expect(byBody.get("user asks which tea helps sleep")).toMatchObject({
         kind: "user_fact",
+        evidence: "What tea helps sleep?",
       });
+      expect(byBody.get("user likes green tea")).not.toHaveProperty("evidence");
       // Captured request structure: hostile tag text in the user turn is
       // entity-escaped, so only the envelope's own closing tags exist.
       const content =
@@ -1404,6 +1463,145 @@ describe("completion cultivation and cite-gated feedback", () => {
       );
       expect(content.match(/<\/user_message>/g)).toHaveLength(1);
       expect(content.match(/<\/assistant_message>/g)).toHaveLength(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("omits evidence entirely when sendEvidence is false (older remind)", async () => {
+    const f = await openRepo();
+    try {
+      const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        seen.push({ op, params });
+        return okEnvelope(null);
+      };
+      const userText = "I like green tea.";
+      const { gateway } = extractionGateway(
+        JSON.stringify({
+          memories: [
+            { body: "turn digest", kind: "summary", sensitivity: "normal" },
+            {
+              body: "user likes green tea",
+              kind: "user_fact",
+              sensitivity: "normal",
+              evidence: userText,
+            },
+          ],
+        }),
+      );
+      const service = makeService(f.repo, cliCall, {
+        gateway,
+        sendEvidence: false,
+      });
+      service.start();
+      const run = completeV2Run(
+        f.repo,
+        [{ text: "Noted.", citations: [] }],
+        userText,
+      );
+      service.onRunCompleted(run.runId);
+      await waitFor(
+        () =>
+          outboxRowsByKind(f, "record.remember", run.runId).filter(
+            (row) => row.status === "acked",
+          ).length === 2,
+      );
+      const remembered = seen.filter((call) => call.op === "record.remember");
+      expect(remembered).toHaveLength(2);
+      expect(remembered.every((call) => !("evidence" in call.params))).toBe(
+        true,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  it("retries a quote-bearing remember once without evidence, then latches", async () => {
+    const f = await openRepo();
+    try {
+      const collecting = createCollectingLogger("debug");
+      const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        seen.push({ op, params });
+        // An older remind's strict params reject the unknown key.
+        if (op === "record.remember" && "evidence" in params) {
+          return rejectedEnvelope("BAD_REQUEST");
+        }
+        return okEnvelope(null);
+      };
+      const userText = "I like green tea.";
+      const extraction = JSON.stringify({
+        memories: [
+          { body: "turn digest", kind: "summary", sensitivity: "normal" },
+          {
+            body: "user likes green tea",
+            kind: "user_fact",
+            sensitivity: "normal",
+            evidence: userText,
+          },
+        ],
+      });
+      const { gateway } = extractionGateway(extraction);
+      const service = makeService(f.repo, cliCall, {
+        gateway,
+        logger: collecting.logger,
+      });
+      service.start();
+      const run = completeV2Run(
+        f.repo,
+        [{ text: "Noted.", citations: [] }],
+        userText,
+      );
+      service.onRunCompleted(run.runId);
+      await waitFor(
+        () =>
+          outboxRowsByKind(f, "record.remember", run.runId).filter(
+            (row) => row.status === "acked",
+          ).length === 2,
+      );
+      const firstFactCalls = seen.filter(
+        (call) =>
+          call.op === "record.remember" &&
+          call.params.body === "user likes green tea",
+      );
+      // One rejected attempt WITH the quote, then one accepted retry without.
+      expect(firstFactCalls).toHaveLength(2);
+      expect(firstFactCalls[0]?.params.evidence).toBe(userText);
+      expect(firstFactCalls[1]?.params).not.toHaveProperty("evidence");
+      expect(
+        collecting.records.filter(
+          (record) => record.code === "memory.evidence_unsupported",
+        ),
+      ).toHaveLength(1);
+
+      // The latch also applies to newly enqueued remembers: no quote is sent.
+      const run2 = completeV2Run(
+        f.repo,
+        [{ text: "Noted again.", citations: [] }],
+        userText,
+      );
+      service.onRunCompleted(run2.runId);
+      await waitFor(
+        () =>
+          outboxRowsByKind(f, "record.remember", run2.runId).filter(
+            (row) => row.status === "acked",
+          ).length === 2,
+      );
+      const secondFactCalls = seen
+        .filter(
+          (call) =>
+            call.op === "record.remember" &&
+            call.params.body === "user likes green tea",
+        )
+        .slice(2);
+      expect(secondFactCalls).toHaveLength(1);
+      expect(secondFactCalls[0]?.params).not.toHaveProperty("evidence");
+      expect(
+        collecting.records.filter(
+          (record) => record.code === "memory.evidence_unsupported",
+        ),
+      ).toHaveLength(1);
     } finally {
       f.close();
     }
@@ -1954,6 +2152,48 @@ describe("parseRecallData provenance fields", () => {
     expect(
       parseRecallData({ recallId: "r-1", items: [], vector: 42 })?.vector,
     ).toBeUndefined();
+  });
+
+  it("carries evidence only on user_fact and drops null/invalid values", () => {
+    const parsed = parseRecallData({
+      recallId: "r-1",
+      items: [
+        {
+          id: "rec-1",
+          snippet: "s",
+          kind: "user_fact",
+          evidence: "  green tea  ",
+        },
+        { id: "rec-2", snippet: "t", kind: "user_fact", evidence: null },
+        {
+          id: "rec-3",
+          snippet: "u",
+          kind: "user_fact",
+          evidence: "a\u0000b",
+        },
+        {
+          id: "rec-4",
+          snippet: "v",
+          kind: "user_fact",
+          evidence: "x".repeat(MEMORY_EVIDENCE_MAX_CP + 1),
+        },
+        {
+          id: "rec-5",
+          snippet: "w",
+          kind: "model_inference",
+          evidence: "not a user fact",
+        },
+      ],
+    });
+    expect(parsed?.items[0]).toEqual({
+      id: "rec-1",
+      snippet: "s",
+      kind: "user_fact",
+      evidence: "green tea",
+    });
+    for (const item of parsed?.items.slice(1) ?? []) {
+      expect(item.evidence).toBeUndefined();
+    }
   });
 
   it("carries the correction kind as itself (stored, never a fact)", () => {
