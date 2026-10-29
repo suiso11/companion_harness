@@ -12,7 +12,12 @@ export interface ContainmentRuntime {
 }
 
 export interface ContainmentProfile {
-  executor: { kind?: string; executable: string; args: string[] };
+  executor: {
+    kind?: string;
+    executable: string;
+    args: string[];
+    guestEnv?: string[];
+  };
   runtime: ContainmentRuntime;
   limits: Record<string, number>;
   model: { sockHostPath: string };
@@ -48,6 +53,7 @@ export function buildWholejobCommand(
     executorExecutable: string;
     workRoot: string;
     jobFile: string;
+    guestEnvFile?: string;
   },
   scopeUnit: string,
   options?: { guestTimeoutMs?: number },

@@ -219,11 +219,37 @@ function isPathInside(child, parent) {
   );
 }
 
+const GUEST_ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+function parseGuestEnv(raw) {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 64) {
+    fail("profile.executor.guestEnv must be an array of names (max 64)");
+  }
+  const seen = new Set();
+  const names = [];
+  for (const name of raw) {
+    if (
+      typeof name !== "string" ||
+      !GUEST_ENV_NAME_RE.test(name) ||
+      name === "HOME" ||
+      name === "TMPDIR" ||
+      name.startsWith("COMPANION_") ||
+      seen.has(name)
+    ) {
+      fail("profile.executor.guestEnv contains an invalid name");
+    }
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
 function parseExecutor(raw) {
   if (!isRecord(raw)) fail("field profile.executor must be an object");
   checkNoUnknown(
     raw,
-    ["kind", "executable", "args", "contentDigest"],
+    ["kind", "executable", "args", "contentDigest", "guestEnv"],
     "profile.executor",
   );
   const kind = raw.kind === undefined ? "fixed" : raw.kind;
@@ -254,6 +280,7 @@ function parseExecutor(raw) {
       need(raw, "contentDigest", "profile.executor"),
       "profile.executor.contentDigest",
     ),
+    guestEnv: parseGuestEnv(raw.guestEnv),
   };
 }
 
@@ -835,6 +862,11 @@ export function computeEffectiveProfile(config) {
       executable: config.profile.executor.executable,
       args: config.profile.executor.args,
       contentDigest: executorDigest,
+      // Omit the empty list so existing frozen profiles keep their exact
+      // fingerprint; enabling the allowlist is a real profile change.
+      ...((config.profile.executor.guestEnv ?? []).length > 0
+        ? { guestEnv: config.profile.executor.guestEnv }
+        : {}),
     },
     checks,
     runtime,

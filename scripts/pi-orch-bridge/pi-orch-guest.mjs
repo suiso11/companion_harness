@@ -31,8 +31,10 @@ import {
 } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { readForwardedGuestEnv } from "./guest-env.mjs";
 
 const WORK_ROOT = "/work";
+const GUEST_ENV_FILE = "/run/companion-env.json";
 const MODEL_UDS = process.env.COMPANION_MODEL_UDS ?? "/run/model.sock";
 const JOB_FILE = process.env.COMPANION_JOB_FILE ?? "/run/companion-job.json";
 const OMP_BIN = process.env.COMPANION_OMP_BIN ?? "";
@@ -868,8 +870,12 @@ async function main() {
     String(maxTimeSeconds),
     buildPrompt(job),
   ];
+  const forwardedEnv = readForwardedGuestEnv(GUEST_ENV_FILE);
   const env = {
-    PATH: `${dirname(NODE_BIN)}:${dirname(OMP_BIN)}:/usr/local/bin:/usr/bin:/bin`,
+    ...forwardedEnv,
+    PATH:
+      forwardedEnv.PATH ??
+      `${dirname(NODE_BIN)}:${dirname(OMP_BIN)}:/usr/local/bin:/usr/bin:/bin`,
     HOME: home,
     TMPDIR: scratch,
     PI_SKIP_VERSION_CHECK: "1",

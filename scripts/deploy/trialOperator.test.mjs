@@ -83,6 +83,24 @@ describe("validateTrialOperatorInput", () => {
     expect(input.runtime.nodeRealpath).toBe("/usr/bin/nodeRealpath");
   });
 
+  it("normalizes the optional workerEnv allowlist and rejects unsafe names", () => {
+    const ok = clone();
+    ok.workerEnv = ["PI_CODEX_MODEL", "GH_TOKEN"];
+    expect(validateTrialOperatorInput(ok).workerEnv).toEqual([
+      "PI_CODEX_MODEL",
+      "GH_TOKEN",
+    ]);
+    expect(validateTrialOperatorInput(baseInput).workerEnv).toEqual([]);
+    for (const name of ["HOME", "TMPDIR", "COMPANION_DB_PATH", "bad name"]) {
+      const bad = clone();
+      bad.workerEnv = [name];
+      expect(() => validateTrialOperatorInput(bad)).toThrow(/workerEnv/);
+    }
+    const duplicate = clone();
+    duplicate.workerEnv = ["A", "A"];
+    expect(() => validateTrialOperatorInput(duplicate)).toThrow(/workerEnv/);
+  });
+
   it("rejects unknown keys and unsafe aliases", () => {
     const extra = clone();
     extra.surprise = true;

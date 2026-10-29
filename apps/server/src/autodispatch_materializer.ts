@@ -1411,6 +1411,9 @@ export function createAutodispatchMaterializer(
             "executor",
           ),
           args: [...material.executor.args],
+          ...(material.executor.guestEnv !== undefined
+            ? { guestEnv: [...material.executor.guestEnv] }
+            : {}),
         },
         checks: checkCommands,
         runtime: {

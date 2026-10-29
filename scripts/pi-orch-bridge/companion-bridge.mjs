@@ -54,6 +54,7 @@ import {
   spawnObserved,
   stopOwnedScope,
 } from "./containment.mjs";
+import { writeGuestEnvSnapshot } from "./guest-env.mjs";
 import {
   assertConsent,
   assertProfileMatches,
@@ -1204,11 +1205,25 @@ async function main() {
         externalModelConsent: request.externalModelConsent,
       });
       const unit = reserve.scopeUnit;
+      // Snapshot the operator-allowlisted host env at execution start (the
+      // OMP launch). Values never enter the config, argv, or logs: a private
+      // file is bound read-only into the guest at /run/companion-env.json.
+      const guestEnvNames = config.profile.executor.guestEnv ?? [];
+      let guestEnvFile;
+      if (guestEnvNames.length > 0) {
+        guestEnvFile = join(runDir, "guest-env.json");
+        writeGuestEnvSnapshot(guestEnvFile, guestEnvNames, process.env);
+      }
       let run;
       if (config.profile.executionBackend === "confined") {
         const built = buildWholejobCommand(
           config.profile,
-          { executorExecutable: executorFile, workRoot, jobFile },
+          {
+            executorExecutable: executorFile,
+            workRoot,
+            jobFile,
+            ...(guestEnvFile !== undefined ? { guestEnvFile } : {}),
+          },
           unit,
           { guestTimeoutMs: effectiveDurationMs },
         );

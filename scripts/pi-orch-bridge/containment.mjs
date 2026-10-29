@@ -243,6 +243,9 @@ export function buildWholejobCommand(profile, paths, scopeUnit, options = {}) {
     "--ro-bind",
     paths.jobFile,
     "/run/companion-job.json",
+    ...(paths.guestEnvFile === undefined
+      ? []
+      : ["--ro-bind", paths.guestEnvFile, "/run/companion-env.json"]),
     "--ro-bind",
     profile.model.sockHostPath,
     "/run/model.sock",

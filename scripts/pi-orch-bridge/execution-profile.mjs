@@ -439,6 +439,9 @@ function buildRawConfig(options) {
     args: policy.executor.args ?? [],
     contentDigest:
       policy.executor.contentDigest ?? hashFileSync(policy.executor.executable),
+    ...(policy.executor.guestEnv !== undefined
+      ? { guestEnv: [...policy.executor.guestEnv] }
+      : {}),
   };
   if (!isRecord(policy.checks) || Object.keys(policy.checks).length === 0)
     fail("policy.checks is required");

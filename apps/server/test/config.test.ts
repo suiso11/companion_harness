@@ -1051,6 +1051,59 @@ describe("autodispatch caps defaults fit the trial runner", () => {
     expect(autodispatch?.caps.maxOutputTokens).toBeLessThanOrEqual(256);
   });
 
+  it("parses and validates the executor guest env allowlist", () => {
+    const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
+    expect(trial).not.toBeNull();
+    const materialization = {
+      stateDir: "/synthetic/state",
+      executor: {
+        kind: "real-pi" as const,
+        executable: "/opt/omp-guest.mjs",
+        args: [],
+        guestEnv: ["PI_CODEX_MODEL", "GH_TOKEN"],
+      },
+      checks: { lint: { executable: "/usr/bin/node", args: [] } },
+      runtime: { nodeRealpath: "/usr/bin/node" },
+      allowedTopLevelFiles: ["package.json"],
+      maxDurationMs: 60_000,
+      modelRoute: "local",
+      executionBackend: "confined" as const,
+    };
+    const parsed = parseAutodispatchConfig(
+      JSON.stringify({
+        ...autodispatchConfig(),
+        dependencyRoot: null,
+        materialization,
+      }),
+      trial,
+    );
+    expect(parsed?.materialization?.executor.guestEnv).toEqual([
+      "PI_CODEX_MODEL",
+      "GH_TOKEN",
+    ]);
+    for (const guestEnv of [
+      ["HOME"],
+      ["TMPDIR"],
+      ["COMPANION_DB_PATH"],
+      ["BAD NAME"],
+      ["A", "A"],
+    ]) {
+      expect(() =>
+        parseAutodispatchConfig(
+          JSON.stringify({
+            ...autodispatchConfig(),
+            dependencyRoot: null,
+            materialization: {
+              ...materialization,
+              executor: { ...materialization.executor, guestEnv },
+            },
+          }),
+          trial,
+        ),
+      ).toThrow(/guestEnv/);
+    }
+  });
+
   it("still rejects explicit caps that exceed the trial runner caps", () => {
     const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
     expect(() =>

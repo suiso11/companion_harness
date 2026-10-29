@@ -1821,6 +1821,9 @@ export interface AutodispatchMaterializationConfig {
     readonly kind?: "fixed" | "pi-orch-guest" | "real-pi";
     readonly executable: string;
     readonly args: readonly string[];
+    /** Host env names forwarded verbatim to the sealed executor (OMP). The
+     * values are snapshotted at execution start, never stored in config. */
+    readonly guestEnv?: readonly string[];
   };
   readonly checks: Readonly<
     Record<
@@ -2002,6 +2005,13 @@ function parseMaterializationPath(value: unknown, what: string): string {
   return value;
 }
 
+const GUEST_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+/** Names the sealed runtime owns; forwarding them would break the guest. */
+function isForbiddenGuestEnv(name: string): boolean {
+  return name === "HOME" || name === "TMPDIR" || name.startsWith("COMPANION_");
+}
+
 function parseMaterializationCommand(
   raw: unknown,
   what: string,
@@ -2010,6 +2020,7 @@ function parseMaterializationCommand(
   kind?: "fixed" | "pi-orch-guest" | "real-pi";
   executable: string;
   args: string[];
+  guestEnv?: string[];
 } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw configError(`autodispatch materialization ${what} is invalid`);
@@ -2021,7 +2032,7 @@ function parseMaterializationCommand(
       (key) =>
         key !== "executable" &&
         key !== "args" &&
-        !(allowKind && key === "kind"),
+        !(allowKind && (key === "kind" || key === "guestEnv")),
     )
   ) {
     throw configError(`autodispatch materialization ${what} is invalid`);
@@ -2057,10 +2068,31 @@ function parseMaterializationCommand(
   ) {
     throw configError(`autodispatch materialization ${what} args are invalid`);
   }
+  let guestEnv: string[] | undefined;
+  if (allowKind && rec.guestEnv !== undefined) {
+    const rawEnv = rec.guestEnv;
+    if (
+      !Array.isArray(rawEnv) ||
+      rawEnv.length > 64 ||
+      rawEnv.some(
+        (name) =>
+          typeof name !== "string" ||
+          !GUEST_ENV_NAME.test(name) ||
+          isForbiddenGuestEnv(name),
+      ) ||
+      new Set(rawEnv).size !== rawEnv.length
+    ) {
+      throw configError(
+        `autodispatch materialization ${what} guestEnv is invalid`,
+      );
+    }
+    guestEnv = [...(rawEnv as string[])];
+  }
   return {
     ...(kind !== undefined ? { kind } : {}),
     executable,
     args: [...(argsRaw as string[])],
+    ...(guestEnv !== undefined ? { guestEnv } : {}),
   };
 }
 
@@ -2207,6 +2239,9 @@ function parseAutodispatchMaterialization(
     executor: Object.freeze({
       ...executor,
       args: Object.freeze(executor.args),
+      ...(executor.guestEnv !== undefined
+        ? { guestEnv: Object.freeze(executor.guestEnv) }
+        : {}),
     }),
     checks: Object.freeze(checkCommands),
     runtime: Object.freeze({
