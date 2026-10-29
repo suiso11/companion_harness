@@ -715,9 +715,9 @@ async function select(
   detailVisible = true;
 }
 
-/** Human click only: adopt the reviewed candidate into a DRAFT PR. Confirms
- * that a branch will be pushed to GitHub before calling the API. */
-async function adopt(): Promise<void> {
+/** Human click only: adopt the reviewed candidate. localOnly keeps the
+ * commit on a LOCAL branch (no push, no PR); the PR click pushes it. */
+async function adopt(localOnly = false): Promise<void> {
   const sessionId = getSessionId();
   const id = selected;
   const sha = detailReport?.artifact?.sha256 ?? null;
@@ -727,17 +727,23 @@ async function adopt(): Promise<void> {
     sha === null ||
     adoptionMutating ||
     !window.confirm(
-      "確認した差分を GitHub の新しいブランチに push し、下書きPRを作成します。続けますか？",
+      localOnly
+        ? "確認した差分をローカルの新しいブランチにコミットします（push も PR も作りません）。続けますか？"
+        : "確認した差分を GitHub の新しいブランチに push し、下書きPRを作成します。続けますか？",
     )
   ) {
     return;
   }
   adoptionMutating = true;
-  adoptionStatus = "ブランチとPRを作成しています";
+  adoptionStatus = localOnly
+    ? "ローカルブランチに適用しています"
+    : "ブランチとPRを作成しています";
   try {
     const result = await postJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(id)}/adopt`,
-      { artifactSha256: sha },
+      localOnly
+        ? { artifactSha256: sha, localOnly: true }
+        : { artifactSha256: sha },
       randomUuid(),
     );
     if (
@@ -748,7 +754,10 @@ async function adopt(): Promise<void> {
       const mapped = readTrialAdoption({ adoption: result.body });
       adoption = mapped;
       if (mapped?.status === "done") {
-        adoptionStatus = "下書きPRを作成しました";
+        adoptionStatus =
+          mapped.prUrl === null
+            ? "ローカルブランチに適用しました"
+            : "下書きPRを作成しました";
       } else if (mapped?.status === "pending") {
         adoptionStatus = "作成中です。しばらくしてから更新してください";
       } else {
@@ -1022,16 +1031,29 @@ $effect(() => {
           <p id="trial-candidate-truncated">差分は上限に達したため省略されています</p>
         {/if}
         <pre id="trial-candidate-diff">{candidateView.diff}</pre>
-        {#if adoption?.status !== "done"}
+        {#if adoption === null || adoption.prUrl === null}
           <button
             id="trial-adopt-button"
             type="button"
             disabled={!detailReport?.verified || adoptionMutating}
-            onclick={() => void adopt()}
+            onclick={() => void adopt(false)}
           >
             ブランチとPRを作成（下書き）
           </button>
+          <button
+            id="trial-apply-button"
+            type="button"
+            disabled={!detailReport?.verified || adoptionMutating}
+            onclick={() => void adopt(true)}
+          >
+            ローカルブランチに適用
+          </button>
           <p id="trial-adopt-status" aria-live="polite">{adoptionStatus}</p>
+        {/if}
+        {#if adoption?.status === "done" && adoption.prUrl === null}
+          <p id="trial-apply-note">
+            ローカルブランチに適用済み（{adoption.branch ?? ""}）
+          </p>
         {/if}
         {#if adoption?.status === "failed" && adoptionStatus === ""}
           <p id="trial-adoption-result">

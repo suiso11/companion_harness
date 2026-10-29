@@ -5698,12 +5698,19 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       typeof body !== "object" ||
       body === null ||
       Array.isArray(body) ||
-      Object.keys(body).length !== 1 ||
+      Object.keys(body).some(
+        (key) => key !== "artifactSha256" && key !== "localOnly",
+      ) ||
+      !("artifactSha256" in body) ||
       typeof body.artifactSha256 !== "string" ||
-      !/^[0-9a-f]{64}$/.test(body.artifactSha256)
+      !/^[0-9a-f]{64}$/.test(body.artifactSha256) ||
+      ("localOnly" in body && typeof body.localOnly !== "boolean")
     ) {
       return validationError(c);
     }
+    // localOnly=true keeps the candidate on a LOCAL branch (no push, no PR);
+    // a later adopt click upgrades the same ledger row to a draft PR.
+    const localOnly = "localOnly" in body && body.localOnly === true;
     const trial = config.trial;
     const adoption = trial?.adoption ?? null;
     if (trial === null || adoption === null) {
@@ -5754,7 +5761,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       // candidate files: retention may already have pruned them, but the
       // stored branch/PR result must stay replayable.
       const durable = repo.readTrialAdoption(session.id, proposal.id);
-      if (durable !== null && durable.status === "done") {
+      const upgradeFromLocal =
+        durable !== null &&
+        durable.status === "done" &&
+        durable.prUrl === null &&
+        !localOnly;
+      if (durable !== null && durable.status === "done" && !upgradeFromLocal) {
         return c.json(durable, 200);
       }
       const executionId = repo.readTrialExecutionIdByProposal(
@@ -5806,6 +5818,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         executionId,
         report.artifact.sha256,
         now(),
+        upgradeFromLocal ? { upgradeFromLocal: true } : {},
       );
       if (claim === null) {
         return apiError(c, 404, "not_found", "resource not found");
@@ -5825,6 +5838,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           objective: found.objective,
           files,
           baseSha: claim.baseSha,
+          push: !localOnly,
           onBaseSha: (baseSha) => {
             repo.recordTrialAdoptionBaseSha(proposal.id, baseSha, now());
           },
