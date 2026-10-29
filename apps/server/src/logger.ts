@@ -137,6 +137,8 @@ export interface ServerLogFields {
   readonly turnId?: string;
   readonly runId?: string;
   readonly proposalId?: string;
+  /** Human approve-time write opt-in (trial approve only). */
+  readonly allowWrite?: boolean;
   readonly scope?: string;
   readonly status?: number | string;
   /** Fixed model-local gateway error code (never raw text). */

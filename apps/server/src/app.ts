@@ -5381,6 +5381,28 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     );
   }
 
+  /**
+   * Strict approve body: `{}` keeps the staged mode, `{allowWrite:true}`
+   * lets a staged read-only trial edit its frozen paths. Any other key or
+   * type is rejected (unknown fields never reach the kernel).
+   */
+  function parseApproveBody(value: unknown): { allowWrite: boolean } | null {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const keys = Object.keys(value);
+    if (keys.length === 0) {
+      return { allowWrite: false };
+    }
+    if (keys.length !== 1 || keys[0] !== "allowWrite") {
+      return null;
+    }
+    if (!("allowWrite" in value) || typeof value.allowWrite !== "boolean") {
+      return null;
+    }
+    return { allowWrite: value.allowWrite };
+  }
+
   // Stage a DATA-only trial proposal (keyed, exactly-once): strict
   // `TrialStageRequestSchema` body (unknown keys rejected, so no
   // profile/alias override is possible).
@@ -5457,7 +5479,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!raw.ok) {
       return validationError(c);
     }
-    if (!isEmptyBody(raw.value)) {
+    // Strict body: `{}` (keep the staged mode) or `{allowWrite:true}` (the
+    // human lets a staged read-only trial edit its frozen paths).
+    const approveBody = parseApproveBody(raw.value);
+    if (approveBody === null) {
       return validationError(c);
     }
     const frozen = trialProfileOf(config);
@@ -5473,11 +5498,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         now: now(),
         profile: frozen.profile,
         workspaceAlias: frozen.workspaceAlias,
+        ...(approveBody.allowWrite ? { allowWrite: true } : {}),
       });
       logger.info("http.trials.approve", {
         sessionId: session.id,
         proposalId: proposal.id,
         status: out.status,
+        allowWrite: approveBody.allowWrite,
         durationMs: Math.max(now() - started, 0),
       });
       return c.json(out.body, out.status as 201);

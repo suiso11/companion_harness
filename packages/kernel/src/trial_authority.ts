@@ -506,6 +506,21 @@ export function wireModeForReadOnly(readOnly: boolean): TrialWireMode {
 }
 
 /**
+ * Effective scope of a grant: the staged proposal keeps its own read_only
+ * value, and the grant's human `allow_write` opt-in widens it. Every
+ * authority/constraint re-check must use this, not the proposal alone.
+ */
+function effectiveTrialScope(
+  view: { readOnlyMode: boolean; operation: TrialOperation },
+  allowWrite: boolean,
+): { readOnly: boolean; operation: TrialOperation } {
+  if (!view.readOnlyMode || !allowWrite) {
+    return { readOnly: view.readOnlyMode, operation: view.operation };
+  }
+  return { readOnly: false, operation: "implement" };
+}
+
+/**
  * The exact `relevantPaths` sent on the CLAIM wire. A read-only grant may be
  * staged with no literal patch paths; instead of inventing whole-repo "."
  * (which a scoped frozen profile rejects at the bridge), carry the profile's
@@ -1275,6 +1290,9 @@ export function approveTrialProposal(
     now?: number;
     profile: TrialProfileSnapshot;
     workspaceAlias: string;
+    /** Human opt-in: allow the staged read-only trial to edit the SAME
+     * frozen literalPatchPaths (inside the approved allowedPaths). */
+    allowWrite?: boolean;
     /** Trusted host preallocated UUID; never a model/HTTP body field. */
     executionId?: string;
   },
@@ -1330,6 +1348,7 @@ export function approveTrialProposal(
           proposalId: pid,
           workspaceAlias: options.workspaceAlias,
           profile: JSON.parse(profileBindingKey(profile)),
+          ...(options.allowWrite === true ? { allowWrite: true } : {}),
         },
       );
       const ex = stored(db, scope, key);
@@ -1400,12 +1419,25 @@ export function approveTrialProposal(
         throw new RepositoryValidationError("autonomy paused: no new grant");
       // Fresh authority re-check before grant (frozen alias, frozen versions
       // must still be current: goal/task version drift => authority fails).
+      const allowWrite = options.allowWrite === true;
+      if (
+        allowWrite &&
+        view.readOnlyMode &&
+        view.literalPatchPaths.length === 0
+      )
+        throw new RepositoryValidationError(
+          "allowWrite requires literal patch paths",
+        );
+      // A widened read-only trial becomes a write operation for the
+      // authority/constraint checks; the wire carries only the mode.
+      const effectiveOperation =
+        allowWrite && view.readOnlyMode ? "implement" : view.operation;
       const auth = checkTrialAuthority(
         db,
         session,
         view.taskId,
-        view.operation,
-        view.readOnlyMode ? [] : view.literalPatchPaths,
+        effectiveOperation,
+        view.readOnlyMode && !allowWrite ? [] : view.literalPatchPaths,
         frozenAlias,
         now,
       );
@@ -1421,7 +1453,7 @@ export function approveTrialProposal(
           ? generateId()
           : requireId(options.executionId, "executionId");
       db.prepare(
-        "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+        "INSERT INTO trial_grants (execution_id, proposal_id, session_id, scope, status, cancel_requested, control_generation, created_at, workspace_alias, approved_profile_json, allow_write) VALUES (?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?)",
       ).run(
         executionId,
         pid,
@@ -1431,6 +1463,7 @@ export function approveTrialProposal(
         now,
         frozenAlias,
         JSON.stringify(profile),
+        allowWrite ? 1 : 0,
       );
       db.prepare("UPDATE trial_proposals SET status='granted' WHERE id=?").run(
         pid,
@@ -1643,6 +1676,7 @@ export function claimTrialGrant(
           request_json: string | null;
           workspace_alias: string | null;
           approved_profile_json: string | null;
+          allow_write: number;
         }
       | undefined;
     if (!g || g.session_id !== session)
@@ -1692,6 +1726,12 @@ export function claimTrialGrant(
       .prepare("SELECT * FROM trial_proposals WHERE id=?")
       .get(g.proposal_id) as Parameters<typeof toProposalView>[0];
     const view = toProposalView(prow);
+    // The human may have widened a staged read-only trial to write at
+    // approval; the grant carries that choice, the proposal keeps the
+    // staged value for the audit trail.
+    const effectiveReadOnly = view.readOnlyMode && g.allow_write !== 1;
+    const effectiveOperation =
+      view.readOnlyMode && g.allow_write === 1 ? "implement" : view.operation;
     if ((parseStrictInstantMs(view.expiry) ?? NaN) <= now)
       throw new RepositoryValidationError("grant expired");
     // Bind control generation AT CLAIM; queued grants survive pause/restart
@@ -1745,8 +1785,8 @@ export function claimTrialGrant(
       db,
       session,
       view.taskId,
-      view.operation,
-      view.readOnlyMode ? [] : view.literalPatchPaths,
+      effectiveOperation,
+      effectiveReadOnly ? [] : view.literalPatchPaths,
       frozenAlias,
       now,
     );
@@ -1773,8 +1813,8 @@ export function claimTrialGrant(
       db,
       session,
       view.taskId,
-      view.operation,
-      view.readOnlyMode ? [] : view.literalPatchPaths,
+      effectiveOperation,
+      effectiveReadOnly ? [] : view.literalPatchPaths,
       frozenAlias,
       view.expiry,
       view.timeoutMs,
@@ -1815,7 +1855,7 @@ export function claimTrialGrant(
       configFingerprint: approved.configFingerprint,
       sourceRevision: approved.sourceRevision,
       workspaceAlias: frozenAlias,
-      mode: wireModeForReadOnly(view.readOnlyMode),
+      mode: wireModeForReadOnly(effectiveReadOnly),
       purpose: { statement: goalRow.statement, scope: view.scope },
       objective: view.objective,
       relevantPaths: wirePaths,
@@ -2283,6 +2323,7 @@ export function issueLaunchPermit(
           request_json: string | null;
           workspace_alias: string | null;
           approved_profile_json: string | null;
+          allow_write: number;
         }
       | undefined;
     if (!g || g.session_id !== session)
@@ -2359,12 +2400,13 @@ export function issueLaunchPermit(
     const view = toProposalView(prow);
     if ((parseStrictInstantMs(view.expiry) ?? NaN) <= now)
       throw new RepositoryValidationError("grant expired");
+    const effectiveScope = effectiveTrialScope(view, g.allow_write === 1);
     const auth = checkTrialAuthority(
       db,
       session,
       view.taskId,
-      view.operation,
-      view.readOnlyMode ? [] : view.literalPatchPaths,
+      effectiveScope.operation,
+      effectiveScope.readOnly ? [] : view.literalPatchPaths,
       frozenAlias,
       now,
     );
@@ -2409,8 +2451,8 @@ export function issueLaunchPermit(
         db,
         session,
         view.taskId,
-        view.operation,
-        view.readOnlyMode ? [] : view.literalPatchPaths,
+        effectiveScope.operation,
+        effectiveScope.readOnly ? [] : view.literalPatchPaths,
         frozenAlias,
         view.expiry,
         now,
@@ -3188,6 +3230,7 @@ export function recordWorkerResult(
           request_json: string | null;
           workspace_alias: string | null;
           approved_profile_json: string | null;
+          allow_write: number;
         }
       | undefined;
     if (!g || g.session_id !== session)
@@ -3347,12 +3390,13 @@ export function recordWorkerResult(
           .get(g.proposal_id) as Parameters<typeof toProposalView>[0];
         const view = toProposalView(prow);
         const frozenAlias = g.workspace_alias ?? req.workspaceAlias;
+        const effectiveScope = effectiveTrialScope(view, g.allow_write === 1);
         checkTrialAuthority(
           db,
           session,
           view.taskId,
-          view.operation,
-          view.readOnlyMode ? [] : view.literalPatchPaths,
+          effectiveScope.operation,
+          effectiveScope.readOnly ? [] : view.literalPatchPaths,
           frozenAlias,
           now,
         );
