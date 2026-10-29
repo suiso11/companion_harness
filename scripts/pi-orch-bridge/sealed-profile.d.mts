@@ -29,6 +29,7 @@ export interface OperatorConfig {
       executable: string;
       args: string[];
       contentDigest: string;
+      guestEnv?: string[];
     };
     checks: Record<
       string,

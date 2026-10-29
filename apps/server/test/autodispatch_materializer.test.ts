@@ -329,6 +329,47 @@ function materializerFor(fixture: Fixture, platform?: NodeJS.Platform) {
 }
 
 linuxDescribe("autodispatch materializer (Linux)", () => {
+  it("freezes the executor guest env allowlist in the profile", async () => {
+    const fx = makeFixture();
+    try {
+      const config = {
+        ...fx.config,
+        materialization: {
+          ...fx.config.materialization,
+          executor: {
+            ...fx.config.materialization.executor,
+            guestEnv: ["PI_CODEX_MODEL", "GH_TOKEN"],
+          },
+        },
+      };
+      const result = await createAutodispatchMaterializer({
+        config,
+        runtimeDir: fx.runtimeDir,
+        currentModel: "test-model",
+        available: true,
+        enabled: true,
+        disclosedWholeRepoRead: true,
+        now: () => NOW,
+      }).prepare({
+        plan: PLAN,
+        policy: POLICY,
+        executionId: EXECUTION_ID,
+        now: NOW,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.materialization.config.profile.executor.guestEnv).toEqual([
+        "PI_CODEX_MODEL",
+        "GH_TOKEN",
+      ]);
+      expect(result.materialization.config.profile.executor.guestEnv).not.toBe(
+        config.materialization.executor.guestEnv,
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it("prepares an exact sealed snapshot/depot/profile and excludes secrets", async () => {
     const fx = makeFixture();
     try {

@@ -67,10 +67,38 @@ const INPUT_KEYS = [
   "runner",
   "runtime",
   "adoption",
+  "workerEnv",
 ];
 
 // Validate the small host input file. Unknown keys are rejected so host
 // drift is loud rather than silently ignored.
+const GUEST_ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+/** Optional host env allowlist forwarded to the sealed OMP guest. */
+function needWorkerEnv(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 64) {
+    fail("workerEnv must be an array of env names (max 64)");
+  }
+  const seen = new Set();
+  const names = [];
+  for (const name of value) {
+    if (
+      typeof name !== "string" ||
+      !GUEST_ENV_NAME_RE.test(name) ||
+      name === "HOME" ||
+      name === "TMPDIR" ||
+      name.startsWith("COMPANION_") ||
+      seen.has(name)
+    ) {
+      fail("workerEnv contains an invalid name");
+    }
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
 export function validateTrialOperatorInput(raw) {
   const input = needObject(raw, "input");
   for (const key of Object.keys(input)) {
@@ -149,6 +177,7 @@ export function validateTrialOperatorInput(raw) {
     stateRoot,
     operatorFile,
     environmentFile,
+    workerEnv: needWorkerEnv(input.workerEnv),
     mandatoryChecks: [...checks],
     limits: {
       timeoutMs: needInt(limits.timeoutMs, "limits.timeoutMs", 1, 900_000),

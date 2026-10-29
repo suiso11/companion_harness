@@ -5652,7 +5652,8 @@ is Linux-only.
   described below.
 - `materialization` (strict): `stateDir` (absolute, outside `sourceRoot`),
   `executor` (`kind` `fixed`|`pi-orch-guest`|`real-pi`, absolute executable,
-  args), `checks` (one command per configured check id, no extra keys),
+  args, optional `guestEnv` allowlist), `checks` (one command per configured
+  check id, no extra keys),
   `runtime` (`nodeRealpath` required; optional `ompRealpath`,
   `bwrapRealpath`, `systemdRunRealpath`, `systemctlRealpath`,
   `piOrchLauncherRealpath`, `piOrchShellRealpath`, `piOrchConfigRealpath`,
@@ -5919,7 +5920,8 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - Host input (no secrets): `~/.config/companion/trial-operator.json` —
   `workspaceAlias`, `sourceRepo` (the deploy checkout), `sourceRef`
   (`origin/master`), `stateRoot`, `operatorFile`, `environmentFile`,
-  `mandatoryChecks`, `limits`, `runner` caps, and absolute `runtime` paths.
+  `mandatoryChecks`, `limits`, `runner` caps, absolute `runtime` paths, and
+  optional `workerEnv` (see below).
 - Builder: `scripts/deploy/build-trial-operator.mts`. It exports the deployed
   SHA with `git archive` (never the working tree), materializes a new
   `frozen-<sha7>-<stamp>/` root, verifies the snapshot against the archive and
@@ -5938,6 +5940,22 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   a non-empty `LITELLM_MASTER_KEY` in `.env.litellm` selects `local-chat`.
   The build fails if neither determines a model (never publish a profile that
   `bootstrap.ts` would reject).
+- Forwarded OMP env (`workerEnv`, optional): an explicit allowlist of host
+  env names (max 64, `[A-Za-z_][A-Za-z0-9_]{0,63}`, unique) whose values are
+  snapshotted from the server environment at execution start (the OMP launch)
+  and bound read-only into the guest at `/run/companion-env.json`. The guest
+  merges them into the OMP child env; `HOME`, `TMPDIR`, and `COMPANION_*` are
+  rejected because the sealed runtime owns them. Values never enter argv,
+  config, or logs. Add the names to `trial-operator.json` and ensure the
+  values exist in the service environment (for example
+  `~/.config/companion/env`); absent names are simply omitted. Auto-dispatch
+  uses the same mechanism through
+  `materialization.executor.guestEnv` in `COMPANION_AUTODISPATCH_JSON`.
+  SECURITY: forwarded values are visible to the guest model (env/`/proc`),
+  and the guest can write candidate files. Do not forward credentials,
+  tokens, or other secrets that must never appear in a candidate diff; the
+  sealed guest has no external network and does not need provider keys for
+  the local relay.
 - Sealed checks: only `lint` is runnable. The dependency closure is mounted at
   `/deps/node_modules`, which TypeScript cannot use to resolve project imports
   from `/work`, so `typecheck` is dropped loudly from the selected check set;

@@ -976,6 +976,37 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     },
   );
 
+  it.skipIf(process.platform === "win32")(
+    "parses and fingerprints the forwarded guest env allowlist",
+    async () => {
+      const fixture = await makeFixture({
+        executorBody: "process.stdout.write('executor-ok\\n');\n",
+      });
+      const base = computeEffectiveProfile(
+        parseOperatorConfig(JSON.stringify(fixture.config)),
+      );
+      const withEnv = structuredClone(fixture.config);
+      withEnv.profile.executor.guestEnv = ["PI_CODEX_MODEL", "GH_TOKEN"];
+      const parsed = parseOperatorConfig(JSON.stringify(withEnv));
+      expect(parsed.profile.executor.guestEnv).toEqual([
+        "PI_CODEX_MODEL",
+        "GH_TOKEN",
+      ]);
+      const effective = computeEffectiveProfile(parsed);
+      expect(effective.fingerprint).not.toBe(base.fingerprint);
+      const forbidden = structuredClone(withEnv);
+      forbidden.profile.executor.guestEnv = ["HOME"];
+      expect(() => parseOperatorConfig(JSON.stringify(forbidden))).toThrow(
+        /guestEnv/,
+      );
+      const duplicate = structuredClone(withEnv);
+      duplicate.profile.executor.guestEnv = ["A", "A"];
+      expect(() => parseOperatorConfig(JSON.stringify(duplicate))).toThrow(
+        /guestEnv/,
+      );
+    },
+  );
+
   it("pins the transient scope to the exact frozen millisecond runtime bound", () => {
     const built = buildWholejobCommand(
       {
@@ -1009,6 +1040,46 @@ describe("sealed pi-orch bridge portable protocol/command contract", () => {
     // frozen budget and make the kernel's observed/permit equality deny.
     expect(built.args).toContain("RuntimeMaxSec=12345ms");
     expect(built.args).not.toContain("RuntimeMaxSec=13");
+  });
+
+  it("binds the operator-allowed guest env file read-only", () => {
+    const built = buildWholejobCommand(
+      {
+        runtime: {
+          bwrapRealpath: "/usr/bin/bwrap",
+          systemdRunRealpath: "/usr/bin/systemd-run",
+          nodeRealpath: process.execPath,
+        },
+        model: { sockHostPath: "/tmp/model.sock" },
+        dependencies: { mounts: [] },
+        executor: {
+          executable: process.execPath,
+          args: [],
+          guestEnv: ["PI_CODEX_MODEL"],
+        },
+        limits: {
+          memoryMaxBytes: 256 * 1024 * 1024,
+          maxProcesses: 64,
+          cpuQuotaPercent: 100,
+          maxModelCalls: 1,
+          maxOutputTokens: 1,
+          maxModelCallMs: 1,
+          modelConcurrency: 1,
+          maxDurationMs: 30_000,
+        },
+      },
+      {
+        executorExecutable: process.execPath,
+        workRoot: "/tmp/work",
+        jobFile: "/tmp/companion-job.json",
+        guestEnvFile: "/tmp/guest-env.json",
+      },
+      "capsule-test.scope",
+    );
+    const index = built.args.indexOf("/run/companion-env.json");
+    expect(index).toBeGreaterThan(0);
+    expect(built.args[index - 2]).toBe("--ro-bind");
+    expect(built.args[index - 1]).toBe("/tmp/guest-env.json");
   });
 
   it("passes the effective frozen timeout to the guest without widening it", () => {

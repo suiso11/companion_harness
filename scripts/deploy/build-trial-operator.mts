@@ -323,6 +323,9 @@ try {
           join(SRC, "scripts/pi-orch-bridge/pi-orch-guest.mjs"),
         ),
         args: [],
+        ...(input.workerEnv.length > 0
+          ? { guestEnv: [...input.workerEnv] }
+          : {}),
       },
       checks: selectedCheckCommands,
       executionBackend: "confined",
