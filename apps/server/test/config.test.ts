@@ -99,6 +99,28 @@ function tempDbPath(): string {
   return join(dir, "companion.sqlite");
 }
 
+describe("memory sendEvidence (remind#41 compatibility gate)", () => {
+  it("defaults to true for the pinned remind#41 CLI", () => {
+    const config = parseMemoryConfig(JSON.stringify(memoryConfigEnv()));
+    expect(config?.sendEvidence).toBe(true);
+  });
+
+  it("accepts false for an older remind build", () => {
+    const config = parseMemoryConfig(
+      JSON.stringify(memoryConfigEnv({ sendEvidence: false })),
+    );
+    expect(config?.sendEvidence).toBe(false);
+  });
+
+  it("rejects a non-boolean value", () => {
+    expect(() =>
+      parseMemoryConfig(
+        JSON.stringify(memoryConfigEnv({ sendEvidence: "yes" })),
+      ),
+    ).toThrow("memory sendEvidence must be a boolean");
+  });
+});
+
 describe("server config defaults", () => {
   it("loads defaults with a frozen object", () => {
     const config = loadServerConfig(baseEnv(tempDbPath()));

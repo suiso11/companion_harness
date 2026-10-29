@@ -32,6 +32,7 @@ import {
 } from "./graph.js";
 import { HandoffPanel } from "./handoff_panel.js";
 import { LearningPanel } from "./learning_panel.js";
+import { formatMemoryDetailText } from "./memory_detail.js";
 import {
   browseRunId,
   returnToBrowseGenerations,
@@ -4372,6 +4373,7 @@ class ConversationApp {
         revision?: unknown;
         source?: unknown;
         createdAt?: unknown;
+        evidence?: unknown;
       };
       stale?: unknown;
     };
@@ -4390,6 +4392,10 @@ class ConversationApp {
     const currentSource =
       typeof body.current?.source === "string" ? body.current.source : "";
     const stale = body.stale === true;
+    const currentCreatedAt =
+      typeof body.current?.createdAt === "string" ? body.current.createdAt : "";
+    const currentEvidence =
+      typeof body.current?.evidence === "string" ? body.current.evidence : null;
     if (
       this.sessionId !== sessionId ||
       seq !== this.memoryDetailSeq ||
@@ -4414,15 +4420,23 @@ class ConversationApp {
       this.memoryGraphLocal.disabled = false;
     }
     this.memoryDetail.hidden = false;
-    const recordedAt =
-      typeof body.current?.createdAt === "string"
-        ? formatRecordedAt(body.current.createdAt)
-        : null;
-    this.memoryDetailBody.textContent =
-      `引用スナップショット ${handle} [${snapshotStatus}]\n${snapshotSnippet}\n---\n` +
-      (recordedAt === null ? "" : `記録日時: ${recordedAt}\n`) +
-      `現在 [${currentStatus} rev.${currentRevision} ${currentKind} ${currentSource}]\n${currentBody}` +
-      (stale ? "\n---\n状態が変わっています。再検索してください" : "");
+    this.memoryDetailBody.textContent = formatMemoryDetailText({
+      snapshot: {
+        handle,
+        snippet: snapshotSnippet,
+        status: snapshotStatus,
+      },
+      current: {
+        body: currentBody,
+        kind: currentKind,
+        status: currentStatus,
+        revision: currentRevision,
+        source: currentSource,
+        createdAt: currentCreatedAt,
+        evidence: currentEvidence,
+      },
+      stale,
+    });
     this.memoryOpStatus.textContent = stale
       ? "stale: 引用時から状態が変化"
       : "";

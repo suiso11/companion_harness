@@ -1264,7 +1264,7 @@ function deepFreeze<T>(value: T): T {
  * - Env `COMPANION_MEMORY_JSON` is strict JSON only; unset means null.
  * - Must be an exact object with only `{ executable, entry, config,
  *   scope, timeoutMs?, extractTimeoutMs?, maxResponseBytes?, recallLimit?,
- *   idleMs? }`.
+ *   idleMs?, sendEvidence? }`.
  * - `executable`: absolute path to the child-process binary (usually the
  *   Node.js binary that runs the remind CLI). `entry`: absolute path to
  *   the remind CLI script. `config`: absolute path to the remind startup
@@ -1281,6 +1281,12 @@ function deepFreeze<T>(value: T): T {
  *   4096..1048576): stdout byte cap. `recallLimit` (default 5, bounds
  *   1..8): pre-answer recall item cap. `idleMs` (default 30000, bounds
  *   5000..300000): idle delay before one bounded cultivation batch.
+ *   `sendEvidence` (default true): send the optional remind#41 `evidence`
+ *   quote on grounded `user_fact` remembers. Set false to skip it up front while the
+ *   running remind build predates remind#41 (its strict params reject the
+ *   unknown key with BAD_REQUEST). Such a build is also handled at runtime:
+ *   a quote-bearing remember answered BAD_REQUEST is retried once without
+ *   the quote and latched off for the process, so the user fact still stores.
  * - Failures carry fixed messages only: no paths, scopes, or values escape.
  * - The returned object is deep-frozen.
  */
@@ -1303,6 +1309,12 @@ export interface MemoryConfig {
   readonly recallLimit: number;
   /** Idle delay in ms before one bounded cultivation batch (default 30000). */
   readonly idleMs: number;
+  /**
+   * Send the optional remind#41 `evidence` quote on grounded user_fact
+   * remembers (default true). False skips it up front for an older remind;
+   * the service additionally retries/latches on BAD_REQUEST.
+   */
+  readonly sendEvidence: boolean;
 }
 
 export const DEFAULT_MEMORY_TIMEOUT_MS = 5000;
@@ -1391,7 +1403,8 @@ export function parseMemoryConfig(
       key !== "extractTimeoutMs" &&
       key !== "maxResponseBytes" &&
       key !== "recallLimit" &&
-      key !== "idleMs"
+      key !== "idleMs" &&
+      key !== "sendEvidence"
     ) {
       throw configError("memory config has an unknown key");
     }
@@ -1406,6 +1419,7 @@ export function parseMemoryConfig(
     maxResponseBytes?: unknown;
     recallLimit?: unknown;
     idleMs?: unknown;
+    sendEvidence?: unknown;
   };
   const executable = requireAbsolutePath(record.executable);
   const entry = requireAbsolutePath(record.entry);
@@ -1446,6 +1460,12 @@ export function parseMemoryConfig(
     MAX_MEMORY_IDLE_MS,
     "memory idleMs",
   );
+  if (
+    record.sendEvidence !== undefined &&
+    typeof record.sendEvidence !== "boolean"
+  ) {
+    throw configError("memory sendEvidence must be a boolean");
+  }
   return Object.freeze({
     executable,
     entry,
@@ -1456,6 +1476,7 @@ export function parseMemoryConfig(
     maxResponseBytes,
     recallLimit,
     idleMs,
+    sendEvidence: record.sendEvidence !== false,
   });
 }
 

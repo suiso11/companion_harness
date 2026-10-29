@@ -66,6 +66,15 @@ export const MemoryDetailResponseSchema = z.strictObject({
     source: z.string().min(1),
     observedAt: z.string().min(1),
     createdAt: z.string().min(1),
+    /** Remind#41 verbatim user quote for this record, when present. */
+    evidence: z
+      .string()
+      .min(1)
+      .refine(codePointsMax(400), {
+        message: "evidence over 400 code points",
+      })
+      .nullable()
+      .optional(),
   }),
   stale: z.boolean(),
 });

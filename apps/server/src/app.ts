@@ -285,6 +285,7 @@ export interface MemoryHttpPort {
       source: string;
       observedAt: string;
       createdAt: string;
+      evidence?: string | null;
     };
     stale: boolean;
   }>;
