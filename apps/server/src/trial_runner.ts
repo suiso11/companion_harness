@@ -194,6 +194,8 @@ export interface TrialRunnerConfig {
   gateway: ModelGateway;
   observe: TrialRunnerObserveTimeouts;
   runDirBase?: string | undefined;
+  /** IANA zone for the completion notice's timestamped decision context. */
+  timeZone: string;
   /** Optional policy-only materialization resolver. Manual human trial
    * grants return {kind:"manual"} and keep the unchanged static path. */
   resolveMaterialization?: TrialMaterializationResolver | undefined;
@@ -1825,6 +1827,7 @@ export class TrialRunner {
     };
     let authorized = false;
     let outcome: TrialRunNextResult["outcome"] = "observed";
+    let recordedOk = false;
     try {
       const recorded = this.repo.recordTrialWorkerResult(
         sessionId,
@@ -1834,10 +1837,32 @@ export class TrialRunner {
       );
       authorized = recorded.authorized === true;
       outcome = recorded.outcome === "done" ? "done" : "observed";
+      recordedOk = true;
     } catch (error) {
       this.logger.warn("trial.result_failed", {});
       void error;
       outcome = "observed";
+    }
+    if (recordedOk) {
+      // Tell the user in their own chat: the delegated run finished, so they
+      // do not have to poll /trials. Best effort — the durable result is
+      // already recorded, and one execution records exactly once.
+      try {
+        const label = authorized ? "verified" : "未検証";
+        const snippet = Array.from(
+          request.objective.replace(/\s+/g, " ").trim(),
+        )
+          .slice(0, 60)
+          .join("");
+        const subject = snippet.length > 0 ? `「${snippet}」— ` : "";
+        this.repo.postCompanionMessage(
+          sessionId,
+          `試行が終わった（${label}）。${subject}/trials で確認して。`,
+          { timeZone: this.config.timeZone },
+        );
+      } catch {
+        this.logger.warn("trial.notice_failed", { runId: executionId });
+      }
     }
     // Redacted result trace: outcome + authorized-as-1/0 only.
     this.logger.info("trial.result_recorded", {
