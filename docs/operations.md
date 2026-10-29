@@ -437,6 +437,32 @@ connector instance owns **all** configured roots.
   kind and states that only `[user_confirmed_feedback]` reflects what the
   user said; all other kinds are unverified model observations. The
   pending/approval flow is unchanged.
+- Body grounding (2026-10-27, retuned): a real quote is necessary but not
+  sufficient; the BODY must also be grounded in the user's own turn, for BOTH
+  memory `user_fact` and learning `user_confirmed_feedback` (the shared check
+  lives in `extraction_grounding.ts`). It targets the signal that matters:
+  substantive terms the assistant introduced, not surface similarity. After
+  NFKC/lowercase/punctuation normalization, katakana folding, and removal of a
+  small documented framing list (`ユーザーは`, `と考えている`, `している`,
+  etc.) and generic verbs/function words, a would-be user-stated item is
+  downgraded when its body contains a >=4-character Japanese run or
+  >=5-character ASCII term that is absent from the user turn but present in
+  the assistant answer, unless at least half of that term's bigrams already
+  occur in the user turn. A separate, deliberately loose coverage floor (0.12)
+  exists only for near-zero overlap, e.g. a greeting-only turn whose body
+  invents an unrelated factual claim. Colloquial-to-formal paraphrases are
+  therefore kept as user-stated; assistant-only elaboration is not. Both
+  checks only downgrade (to `model_inference` / `observation`); the item is
+  never dropped. Fixed counts (`downgraded_by_coverage`,
+  `downgraded_by_assistant_terms`) ride the `memory.extract_grounded` /
+  `memory.extract_none` / `memory.extract_invalid` logs; no content is logged.
+  Resolved absolute dates/times (the prompt's trusted-clock transform),
+  ordinary English inflections (`like`/`likes`), and a cross-script body
+  (prompt-mandated translation) are exempt; particle removal keeps run
+  boundaries instead of welding terms. The grounded quote is stored only on
+  the final `user_fact` (NFC/trim/control-free, <= 400 code points) as the
+  remind#41 `record.remember` `evidence`; downgraded kinds never carry it,
+  and recall/detail render it only for `user_fact`.
 - Memory content statistics (2026-10-28): `GET /api/memory/stats` (browser
   read-only, same session auth as other API routes, no query parameters)
   returns fixed numeric `{ byKind, byStatus, importance?, computedAt,

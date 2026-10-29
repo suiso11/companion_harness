@@ -60,7 +60,9 @@ import {
   type BackgroundResourceGate,
 } from "./background_resource.js";
 import {
+  type ExtractionBodyDowngrade,
   escapeExtractionDelimiters,
+  extractionBodyDowngrade,
   isGroundedExtractionQuote,
   unescapeExtractionDelimiters,
 } from "./extraction_grounding.js";
@@ -774,26 +776,34 @@ function sliceCodePoints(text: string, max: number): string {
  * Fail-safe provenance resolution for extracted items. `user_fact` is
  * accepted ONLY when the model supplied a bounded verbatim `evidence`
  * quote that is a substring of the user's own turn text (after grounding
- * normalization; see extraction_grounding.ts). Missing/invalid/ungrounded
- * evidence DOWNGRADES the item to `model_inference` — the memory is kept,
- * never silently dropped, and never presented as something the user stated.
- * Without turn text (legacy direct parser callers) no grounding verdict is
- * possible; the caller must supply the user turn for production extraction.
+ * normalization; see extraction_grounding.ts) AND the body itself is covered
+ * by the user's own words. Missing/invalid/ungrounded evidence OR an
+ * unrelated/embellished body DOWNGRADES the item to `model_inference` — the
+ * memory is kept, never silently dropped, and never presented as something
+ * the user stated. Without turn text (legacy direct parser callers) no
+ * grounding verdict is possible; the caller must supply the user turn for
+ * production extraction.
  */
 function resolveExtractedKind(
   kind: string,
+  body: string,
   evidence: string | undefined,
   userText: string | null | undefined,
-): string {
+  assistantText: string | null | undefined,
+): { kind: string; downgrade: ExtractionBodyDowngrade | null } {
   if (kind !== "user_fact" || typeof userText !== "string") {
-    return kind;
+    return { kind, downgrade: null };
   }
-  if (evidence === undefined) {
-    return "model_inference";
+  if (
+    evidence === undefined ||
+    !isGroundedExtractionQuote(evidence, userText)
+  ) {
+    return { kind: "model_inference", downgrade: null };
   }
-  return isGroundedExtractionQuote(evidence, userText)
-    ? "user_fact"
-    : "model_inference";
+  const downgrade = extractionBodyDowngrade(body, userText, assistantText);
+  return downgrade === null
+    ? { kind: "user_fact", downgrade: null }
+    : { kind: "model_inference", downgrade };
 }
 
 /**
@@ -981,6 +991,13 @@ export interface ExtractionParseResult {
    * lands NO memory write for the run (no late writes after STOP).
    */
   readonly status: ExtractionParseStatus;
+  /**
+   * Fixed body-grounding counters (no content). Present on a completed
+   * parse; absent on early aborts/invalid shapes. Tell the operator how
+   * many would-be user_facts the body check downgraded and why.
+   */
+  readonly downgradedByCoverage?: number;
+  readonly downgradedByAssistantTerms?: number;
 }
 
 /**
@@ -1005,14 +1022,16 @@ export interface ExtractionParseResult {
 export function parseExtractionOutput(
   text: string,
   userText?: string | null,
+  assistantText?: string | null,
 ): ExtractedMemory[] {
-  return parseExtractionOutcome(text, userText).items;
+  return parseExtractionOutcome(text, userText, assistantText).items;
 }
 
 /** Strict parse plus tri-state outcome (ok / valid-empty / invalid). */
 export function parseExtractionOutcome(
   text: string,
   userText?: string | null,
+  assistantText?: string | null,
 ): ExtractionParseResult {
   let parsed: unknown;
   try {
@@ -1032,6 +1051,8 @@ export function parseExtractionOutcome(
     return { items: [], status: "invalid" };
   }
   const out: ExtractedMemory[] = [];
+  let downgradedByCoverage = 0;
+  let downgradedByAssistantTerms = 0;
   for (const item of list.slice(0, MEMORY_EXTRACT_MAX_ITEMS)) {
     if (!isRecord(item)) {
       continue;
@@ -1114,17 +1135,27 @@ export function parseExtractionOutcome(
       countCodePoints(evidence) <= MEMORY_EXTRACT_EVIDENCE_MAX_CP
         ? evidence
         : undefined;
-    const resolvedKind = resolveExtractedKind(kind, evidenceText, userText);
+    const grounded = resolveExtractedKind(
+      kind,
+      body,
+      evidenceText,
+      userText,
+      assistantText,
+    );
+    if (grounded.downgrade === "coverage") downgradedByCoverage += 1;
+    if (grounded.downgrade === "assistant_terms") {
+      downgradedByAssistantTerms += 1;
+    }
     // Persist the quote ONLY when the item is still a grounded user_fact.
     // A downgraded item never carries evidence (it is model inference), and
     // the stored value is normalized/truncated to remind#41's contract.
     const storedEvidence =
-      resolvedKind === "user_fact" && typeof userText === "string"
+      grounded.kind === "user_fact" && typeof userText === "string"
         ? normalizeStoredEvidence(evidenceText)
         : null;
     out.push({
       body,
-      kind: resolvedKind,
+      kind: grounded.kind,
       sensitivity: resolvedSensitivity,
       ...(validTopics.length > 0 ? { topics: validTopics } : {}),
       ...(storedEvidence !== null ? { evidence: storedEvidence } : {}),
@@ -1142,6 +1173,8 @@ export function parseExtractionOutcome(
   return {
     items: out,
     status: out.length > 0 ? "ok" : list.length > 0 ? "invalid" : "none",
+    downgradedByCoverage,
+    downgradedByAssistantTerms,
   };
 }
 
@@ -1485,6 +1518,8 @@ export function createMemoryService(
       durationMs?: number;
       attempt?: number;
       status?: number | string;
+      downgraded_by_coverage?: number;
+      downgraded_by_assistant_terms?: number;
     },
   ): void => {
     try {
@@ -3255,6 +3290,7 @@ export function createMemoryService(
       return parseExtractionOutcome(
         sliceCodePoints(text, 8192),
         input.turnText,
+        input.answerText,
       );
     } catch {
       // An aborted call rejects out of the gateway (fetch/socket abort):
@@ -3546,7 +3582,12 @@ export function createMemoryService(
         outcome.status === "invalid"
           ? "memory.extract_invalid"
           : "memory.extract_none",
-        { runId: run.id },
+        {
+          runId: run.id,
+          downgraded_by_coverage: outcome.downgradedByCoverage ?? 0,
+          downgraded_by_assistant_terms:
+            outcome.downgradedByAssistantTerms ?? 0,
+        },
       );
       await drainOnce().catch(() => undefined);
       return;
@@ -3581,6 +3622,14 @@ export function createMemoryService(
       await drainOnce().catch(() => undefined);
       return;
     }
+    // Fixed body-grounding diagnostics only (counts, never content): how
+    // many would-be user_facts the coverage/assistant-terms check downgraded
+    // for this accepted turn.
+    log("info", "memory.extract_grounded", {
+      runId: run.id,
+      downgraded_by_coverage: outcome.downgradedByCoverage ?? 0,
+      downgraded_by_assistant_terms: outcome.downgradedByAssistantTerms ?? 0,
+    });
     // Remember fan-out for the extracted items: the same stable-keyed
     // chain logic the event.append ack fan-out uses, invoked directly so
     // the fan-out no longer depends on the raw event's chain payload.
