@@ -67,7 +67,10 @@ describe("forwarded guest env", () => {
     ).toEqual({ ONE: "1" });
     expect(readForwardedGuestEnv(path)).toEqual({ ONE: "1" });
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ONE: "1" });
-    expect(statSync(path).mode & 0o077).toBe(0);
+    // POSIX mode is the real privacy boundary; Windows has no equivalent.
+    if (process.platform !== "win32") {
+      expect(statSync(path).mode & 0o077).toBe(0);
+    }
   });
 
   it("returns no overrides for invalid, oversized, or missing files", () => {
