@@ -1180,6 +1180,7 @@ posixDescribe("trial adoption HTTP surface", () => {
     scope: string,
   ): Promise<{
     base: string;
+    sessionId: string;
     proposalId: string;
     executionId: string;
     artifactSha: string;
@@ -1277,6 +1278,7 @@ posixDescribe("trial adoption HTTP surface", () => {
       .run(executionId);
     return {
       base,
+      sessionId,
       proposalId,
       executionId,
       artifactSha: hash(artifactBytes.toString("utf8")),
@@ -1286,7 +1288,7 @@ posixDescribe("trial adoption HTTP surface", () => {
   it("adopts on a human click and replays the same result once", async () => {
     const fixture = await makeApp(true, adoptionCfg());
     try {
-      const { base, proposalId, executionId, artifactSha } =
+      const { base, sessionId, proposalId, executionId, artifactSha } =
         await prepareAdoptable(fixture, "ad1");
       const key = randomUUID();
       const first = await post(
@@ -1309,6 +1311,16 @@ posixDescribe("trial adoption HTTP surface", () => {
         commitSha,
         errorCode: null,
       });
+      // The user is told in their own chat exactly once, with the PR link.
+      const notices = fixture.repo.listCompanionMessagesForward(sessionId, {
+        after: 0,
+        limit: 50,
+      }).messages;
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.text).toContain(
+        "https://github.com/example/repo/pull/42",
+      );
+      expect(notices[0]?.text).toContain(branch);
       const second = await post(
         fixture.app,
         `${base}/${proposalId}/adopt`,
@@ -1317,6 +1329,13 @@ posixDescribe("trial adoption HTTP surface", () => {
       );
       expect(second.status).toBe(200);
       expect(second.body).toEqual(first.body);
+      // A replay never re-announces the same PR.
+      expect(
+        fixture.repo.listCompanionMessagesForward(sessionId, {
+          after: 0,
+          limit: 50,
+        }).messages,
+      ).toHaveLength(1);
       // The executor (gh) ran exactly once across both clicks (the PR body
       // itself spans lines, so count invocations, not file lines).
       const calls = readFileSync(ghCalls, "utf8")

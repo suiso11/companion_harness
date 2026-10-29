@@ -5813,6 +5813,21 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           },
           now(),
         );
+        // Tell the user in their own chat: a worker's candidate became a PR.
+        // Best effort — the adoption is already durable, so a message
+        // failure only loses the notice, never the PR.
+        try {
+          repo.postCompanionMessage(
+            session.id,
+            `worker の成果を PR にした。${result.prUrl}（${result.branch}）`,
+            { timeZone: config.timeZone },
+          );
+        } catch {
+          logger.warn("http.trials.adopt_message_failed", {
+            sessionId: session.id,
+            proposalId: proposal.id,
+          });
+        }
         logger.info("http.trials.adopt", {
           sessionId: session.id,
           proposalId: proposal.id,
