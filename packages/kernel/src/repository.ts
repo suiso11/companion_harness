@@ -6708,6 +6708,44 @@ export function createKernelRepository(
     }));
   }
 
+  /**
+   * Staged hypotheses with enough DISTINCT host-anchored runs and no trial
+   * proposal yet. The loop's only source of "what to investigate".
+   */
+  function listEligibleLoopHypotheses(
+    sessionId: string,
+    minEvidence: number,
+    limit = 1,
+  ): Array<{ id: string; statement: string; evidenceCount: number }> {
+    const capped = Math.max(1, Math.min(20, Math.trunc(minEvidence)));
+    const rows = db
+      .prepare(
+        `SELECT h.id AS id, h.statement AS statement,
+                COUNT(DISTINCT e.source_id) AS evidenceCount
+         FROM learning_hypotheses h
+         JOIN learning_evidence e
+           ON e.hypothesis_id = h.id AND e.source_kind = 'run'
+         WHERE h.session_id = ? AND h.staged = 1 AND h.status = 'open'
+           AND NOT EXISTS (
+             SELECT 1 FROM trial_proposals p WHERE p.hypothesis_id = h.id
+           )
+         GROUP BY h.id
+         HAVING COUNT(DISTINCT e.source_id) >= ?
+         ORDER BY evidenceCount DESC, h.created_at ASC
+         LIMIT ?`,
+      )
+      .all(sessionId, capped, Math.max(1, Math.min(10, limit))) as Array<{
+      id: string;
+      statement: string;
+      evidenceCount: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      statement: row.statement,
+      evidenceCount: row.evidenceCount,
+    }));
+  }
+
   /** (stated confidence, host outcome) pairs for trial calibration. */
   function readCalibrationPairs(): CalibrationPair[] {
     const rows = db
@@ -7549,6 +7587,9 @@ export function createKernelRepository(
       db,
       {
         paused: parsed.paused,
+        ...(parsed.learningFrozen !== undefined
+          ? { learningFrozen: parsed.learningFrozen }
+          : {}),
         expectedVersion: parsed.expectedVersion,
         ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
       },
@@ -8732,6 +8773,7 @@ export function createKernelRepository(
     setAutonomyControlState,
     readLoopRunFacts,
     readCalibrationPairs,
+    listEligibleLoopHypotheses,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
     stageConversationProposalFromModel,
