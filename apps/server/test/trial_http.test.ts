@@ -1402,6 +1402,61 @@ posixDescribe("trial adoption HTTP surface", () => {
     }
   });
 
+  it("applies to a local branch and later upgrades it to a draft PR", async () => {
+    const fixture = await makeApp(true, adoptionCfg());
+    try {
+      writeFileSync(ghCalls, "");
+      const { base, proposalId, executionId, artifactSha } =
+        await prepareAdoptable(fixture, "ad1b");
+      const branch = `trial/${executionId.slice(0, 8)}`;
+      const applied = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha, localOnly: true },
+        randomUUID(),
+      );
+      expect(applied.status).toBe(201);
+      expect(applied.body).toMatchObject({
+        status: "done",
+        branch,
+        prUrl: null,
+        errorCode: null,
+      });
+      // The commit exists on a LOCAL branch; nothing was pushed or PR'd.
+      const localTip = execFileSync(
+        "git",
+        ["-C", checkout, "rev-parse", "--verify", `refs/heads/${branch}`],
+        { encoding: "utf8" },
+      ).trim();
+      expect(localTip).toMatch(/^[0-9a-f]{40,64}$/);
+      expect(
+        readFileSync(ghCalls, "utf8")
+          .split("\n")
+          .filter((line) => line.startsWith("pr create ")),
+      ).toHaveLength(0);
+      // A later PR click upgrades the SAME ledger row and pushes it.
+      const upgraded = await post(
+        fixture.app,
+        `${base}/${proposalId}/adopt`,
+        { artifactSha256: artifactSha },
+        randomUUID(),
+      );
+      expect(upgraded.status).toBe(201);
+      expect(upgraded.body).toMatchObject({
+        status: "done",
+        branch,
+        prUrl: "https://github.com/example/repo/pull/42",
+      });
+      expect(
+        readFileSync(ghCalls, "utf8")
+          .split("\n")
+          .filter((line) => line.startsWith("pr create ")),
+      ).toHaveLength(1);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("replays a done adoption after retention pruned the artifact", async () => {
     const fixture = await makeApp(true, adoptionCfg());
     try {

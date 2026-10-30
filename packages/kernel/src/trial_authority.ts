@@ -3050,6 +3050,7 @@ export function beginTrialAdoption(
   executionId: string,
   artifactSha256: string,
   now: number,
+  options: { upgradeFromLocal?: boolean } = {},
 ): TrialAdoptionClaim | null {
   const session = requireId(sessionId, "sessionId");
   const pid = requireId(proposalId, "proposalId");
@@ -3073,7 +3074,30 @@ export function beginTrialAdoption(
       // base branch has advanced since the push.
       const baseSha = readAdoptionBaseSha(db, pid);
       if (existing.status === "done" || existing.status === "pending") {
-        return { state: existing.status, adoption: existing, baseSha };
+        // A local-only apply (done, no PR) may be upgraded to a pushed
+        // branch + draft PR by the same human click flow. The base commit
+        // recorded by the local attempt is preserved.
+        const upgrade =
+          existing.status === "done" &&
+          existing.prUrl === null &&
+          options.upgradeFromLocal === true;
+        if (!upgrade) {
+          return { state: existing.status, adoption: existing, baseSha };
+        }
+        db.prepare(
+          "UPDATE trial_adoptions SET status='pending', updated_at=? WHERE proposal_id=? AND status='done' AND pr_url IS NULL",
+        ).run(now, pid);
+        return {
+          state: "started",
+          adoption: {
+            status: "pending",
+            branch: null,
+            prUrl: null,
+            commitSha: null,
+            errorCode: null,
+          },
+          baseSha,
+        };
       }
       db.prepare(
         "UPDATE trial_adoptions SET execution_id=?, artifact_sha256=?, status='pending', branch=NULL, pr_url=NULL, commit_sha=NULL, error_code=NULL, updated_at=? WHERE proposal_id=? AND status='failed'",

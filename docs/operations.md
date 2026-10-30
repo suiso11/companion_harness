@@ -6008,6 +6008,12 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 
 `POST /api/sessions/:sessionId/goals/:goalId/confirm`（Idempotency-Key + `expectedVersion` CAS）は残っており、採用済みの目的を `is_explicit=1 / source_kind='user'` に昇格させます（`confirmed_from='conversation_proposal'`・`confirmed_at` を記録、id・scope・依存タスクは不変）。試行権限の条件ではなくなったため、この確定は任意の provenance 整理として扱います。退避・完了済みの目的は 409、既に明示的な目的は 200 の no-op、`expectedVersion` 不一致は 409 です。
 
+### ローカルブランチへの適用（人間のクリックのみ）
+
+検証済みの候補は、PR を作らずに**ローカルのブランチ**へ適用できます。`/trials` の「ローカルブランチに適用」は `POST /api/sessions/:sessionId/trials/:proposalId/adopt` に `{"artifactSha256": "...", "localOnly": true}` を送ります。サーバーは adoption と同じ検証（artifact digest・base bytes・scope）を通したうえで、`adoption.repoPath` の checkout に `trial/<executionId 先頭8桁>` ブランチを作り、コミットだけを残します（push なし、PR なし、deploy なし）。`trial_adoptions` の同じ行に `status=done / pr_url=null` として記録されます。
+
+同じ提案で後から「ブランチとPRを作成（下書き）」を押すと、台帳の行を `pending` に戻して既存のローカルブランチを再検証し、push と draft PR 作成まで進めます（昇格）。base commit は最初の適用時のものが保持されます。
+
 ### 検証済み試行のブランチ・下書きPR化（人間のクリックのみ）
 
 `/trials` で検証済み（`verified: true`）かつ差分が取得できた試行には「ブランチとPRを作成（下書き）」ボタンが出ます。押すと確認ダイアログの後に `POST /api/sessions/:sessionId/trials/:proposalId/adopt` を呼び、確認した `report.artifact.sha256` を本文で固定します。サーバーは凍結済み候補の全ファイル・基準バイト・スコープを再検証し、`git worktree` 上に候補バイトを書き（モードは変更しない）、固定 author/message でコミットして `trial/<executionId 先頭8桁>` を push、`gh pr create --draft` で下書きPRを作ります。マージ・base ブランチへの push・force push は決して行いません。同じ proposal は一度だけ実行され、完了済みなら同じ branch/PR を返し、実行中なら 202 を返します。

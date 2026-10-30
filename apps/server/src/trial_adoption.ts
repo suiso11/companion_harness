@@ -62,11 +62,14 @@ export interface ExecuteTrialAdoptionInput {
   /** Called once the base commit is fixed, before any worktree mutation, so
    * the caller can persist it for a later resume. */
   readonly onBaseSha?: (baseSha: string) => void;
+  /** false = keep the commit on a LOCAL branch (no push, no PR). */
+  readonly push?: boolean;
 }
 
 export interface TrialAdoptionResult {
   readonly branch: string;
-  readonly prUrl: string;
+  /** null for a local-only apply (no push, no PR). */
+  readonly prUrl: string | null;
   readonly commitSha: string;
   readonly baseSha: string;
 }
@@ -359,13 +362,17 @@ export async function executeTrialAdoption(
       "--quiet",
       `refs/heads/${branch}`,
     ]);
-    const remoteExists = await git(config.repoPath, [
-      "ls-remote",
-      "--heads",
-      config.remote,
-      `refs/heads/${branch}`,
-    ]);
-    if (remoteExists.code !== 0) throw new TrialAdoptionError("git_failed");
+    const push = input.push !== false;
+    const remoteExists = push
+      ? await git(config.repoPath, [
+          "ls-remote",
+          "--heads",
+          config.remote,
+          `refs/heads/${branch}`,
+        ])
+      : { code: 1, stdout: "" };
+    if (push && remoteExists.code !== 0)
+      throw new TrialAdoptionError("git_failed");
 
     // Resume is allowed only when the existing branch is provably the commit
     // this exact execution pushed (same execution id and artifact digest), so
@@ -605,6 +612,21 @@ export async function executeTrialAdoption(
           message,
         ]);
         if (committed.code !== 0) throw new TrialAdoptionError("git_failed");
+
+        if (!push) {
+          // Local-only apply: keep the commit on a branch in the operator
+          // checkout. No remote write, no PR, no deploy.
+          const head = await git(worktree, ["rev-parse", "--verify", "HEAD"]);
+          if (head.code !== 0) throw new TrialAdoptionError("git_failed");
+          commitSha = head.stdout.trim();
+          const created = await git(config.repoPath, [
+            "branch",
+            branch,
+            commitSha,
+          ]);
+          if (created.code !== 0) throw new TrialAdoptionError("branch_exists");
+          return { branch, prUrl: null, commitSha, baseSha: baseCommit };
+        }
 
         const pushed = await git(
           worktree,

@@ -8133,6 +8133,7 @@ export function createKernelRepository(
     executionId: string,
     artifactSha256: string,
     now: number,
+    options: { upgradeFromLocal?: boolean } = {},
   ) {
     return beginTrialAdoptionFn(
       db,
@@ -8141,6 +8142,7 @@ export function createKernelRepository(
       executionId,
       artifactSha256,
       now,
+      options,
     );
   }
 
