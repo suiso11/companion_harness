@@ -121,7 +121,9 @@ async function setup(overrides: Partial<SpontaneousServiceDeps> = {}) {
     timeZone: "UTC",
     now: () => T0 + 10 * 60 * 1000,
     setTimeout: (() =>
-      0 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+      0 as unknown as ReturnType<
+        typeof setTimeout
+      >) as unknown as typeof setTimeout,
     ...overrides,
   });
   service.start();

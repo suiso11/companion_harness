@@ -2008,8 +2008,8 @@ export function createMemoryService(
     // and model_inference may reference both originals. Legacy/correction
     // chains without sourceEventIds keep the single eventId fallback.
     const explicit = isRecord(sourceEventIds) ? sourceEventIds : null;
-    const explicitUser = explicit?.["user"];
-    const explicitAssistant = explicit?.["assistant"];
+    const explicitUser = explicit?.user;
+    const explicitAssistant = explicit?.assistant;
     const userEvent =
       typeof explicitUser === "string" && explicitUser.length > 0
         ? explicitUser
