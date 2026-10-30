@@ -159,6 +159,7 @@ import {
 } from "./sse.js";
 import {
   executeTrialAdoption,
+  findOversightTouches,
   TrialAdoptionError,
   type TrialAdoptionErrorCode,
 } from "./trial_adoption.js";
@@ -5812,6 +5813,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }
         throw error;
       }
+      // Oversight surfaces (checks, eval fixtures, prompts, budgets,
+      // migrations) and test files are flagged for a separate review. The
+      // human still decides; this never blocks or mutates.
+      const oversightTouches = findOversightTouches(
+        files,
+        config.selfLoop?.oversightPaths ?? [],
+      );
+      if (oversightTouches.length > 0) {
+        logger.warn("http.trials.adopt_oversight", {
+          sessionId: session.id,
+          proposalId: proposal.id,
+          count: oversightTouches.length,
+        });
+      }
       const claim = repo.beginTrialAdoption(
         session.id,
         proposal.id,
@@ -5858,9 +5873,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         // Best effort — the adoption is already durable, so a message
         // failure only loses the notice, never the PR.
         try {
+          const warning =
+            oversightTouches.length > 0
+              ? `（注意: チェック/テストを変更しています ${oversightTouches.length} 件。別途レビューが必要）`
+              : "";
           repo.postCompanionMessage(
             session.id,
-            `worker の成果を PR にした。${result.prUrl}（${result.branch}）`,
+            `worker の成果を PR にした。${result.prUrl}（${result.branch}）${warning}`,
             { timeZone: config.timeZone },
           );
         } catch {

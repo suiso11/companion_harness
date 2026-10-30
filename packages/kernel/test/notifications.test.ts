@@ -370,7 +370,13 @@ describe("notifications durable core", () => {
       const session = repo.createSession({ key: randomUUID(), now: T0 });
       const sessionId = session.body.sessionId;
       seedPurpose(repo, sessionId, "health", T0 + 5);
-      unpause(repo, 1, T0 + 10);
+      // Raw control write: this store is deliberately pinned at v15 (before
+      // the loop freeze column), so the current control reader cannot run.
+      handle.raw
+        .prepare(
+          "UPDATE autonomy_control SET paused = 0, version = 2, updated_at = ? WHERE id = 'global'",
+        )
+        .run(T0 + 10);
       const first = completeExplicitJob(
         repo,
         sessionId,

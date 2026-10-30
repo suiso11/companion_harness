@@ -108,6 +108,29 @@ function minimalEnv(): NodeJS.ProcessEnv {
 
 /** Token/host env is forwarded to the `gh` invocation only. Never pass this
  * to git: the credentials must not leak into repository commands or logs. */
+/**
+ * Candidate paths that need a separate human review: any oversight prefix
+ * (checks, eval fixtures, prompts, budgets, migrations) and any test file.
+ * The caller flags them; this function never blocks or mutates.
+ */
+export function findOversightTouches(
+  files: readonly { readonly path: string; readonly kind: string }[],
+  oversightPaths: readonly string[],
+): string[] {
+  const hits = new Set<string>();
+  for (const file of files) {
+    const path = file.path;
+    const isTest =
+      /(^|\/)(test|tests|__tests__|spec|e2e)\//.test(path) ||
+      /\.(test|spec)\.[^/]+$/.test(path);
+    const isOversight = oversightPaths.some(
+      (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+    );
+    if (isTest || isOversight) hits.add(path);
+  }
+  return [...hits].sort();
+}
+
 export function ghEnvironment(): NodeJS.ProcessEnv {
   const env = minimalEnv();
   for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"] as const) {

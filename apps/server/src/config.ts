@@ -517,6 +517,8 @@ export interface ServerConfig {
   readonly executionRecords: ExecutionRecordsConfig | null;
   /** Opt-in conversation learning; null (unset) means learning disabled. */
   readonly learning: LearningConfig | null;
+  /** Opt-in self-improvement proposals; null (unset) means disabled. */
+  readonly selfLoop: SelfLoopConfig | null;
   /** Opt-in AGORA participation; null (unset) means disabled. */
   readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
@@ -676,6 +678,103 @@ export function parseLearningConfig(
     throw configError("learning database path must be absolute");
   }
   return Object.freeze({ dbPath });
+}
+
+export interface SelfLoopConfig {
+  readonly enabled: boolean;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly minEvidence: number;
+  readonly dailyProposals: number;
+  /** Repo-relative prefixes whose changes need a separate human review. */
+  readonly oversightPaths: readonly string[];
+}
+
+const SELF_LOOP_KEYS = new Set([
+  "enabled",
+  "sessionId",
+  "taskId",
+  "minEvidence",
+  "dailyProposals",
+  "oversightPaths",
+]);
+const SELF_LOOP_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Strict opt-in self-improvement parser (COMPANION_SELFLOOP_JSON).
+ * Unset = null (disabled): the loop observes but never proposes trials.
+ * `taskId` must be a human-created task under an explicit goal; the loop
+ * never creates one.
+ */
+export function parseSelfLoopConfig(
+  raw: string | undefined,
+): SelfLoopConfig | null {
+  if (raw === undefined) return null;
+  const record = requireConfigObject(raw, "self loop config");
+  for (const key of Object.keys(record)) {
+    if (!SELF_LOOP_KEYS.has(key)) {
+      throw configError("self loop config has an unknown key");
+    }
+  }
+  if (typeof record.enabled !== "boolean") {
+    throw configError("self loop enabled must be a boolean");
+  }
+  const sessionId = record.sessionId;
+  if (typeof sessionId !== "string" || !SELF_LOOP_UUID.test(sessionId)) {
+    throw configError("self loop sessionId must be a UUID");
+  }
+  const taskId = record.taskId;
+  if (typeof taskId !== "string" || !SELF_LOOP_UUID.test(taskId)) {
+    throw configError("self loop taskId must be a UUID");
+  }
+  const minEvidence = record.minEvidence ?? 3;
+  if (
+    typeof minEvidence !== "number" ||
+    !Number.isInteger(minEvidence) ||
+    minEvidence < 1 ||
+    minEvidence > 20
+  ) {
+    throw configError("self loop minEvidence must be an integer 1..20");
+  }
+  const dailyProposals = record.dailyProposals ?? 1;
+  if (
+    typeof dailyProposals !== "number" ||
+    !Number.isInteger(dailyProposals) ||
+    dailyProposals < 1 ||
+    dailyProposals > 10
+  ) {
+    throw configError("self loop dailyProposals must be an integer 1..10");
+  }
+  const rawOversight = record.oversightPaths ?? [];
+  if (!Array.isArray(rawOversight) || rawOversight.length > 32) {
+    throw configError("self loop oversightPaths must be an array (max 32)");
+  }
+  const oversightPaths: string[] = [];
+  for (const entry of rawOversight) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > 256 ||
+      entry === "." ||
+      entry.startsWith("/") ||
+      entry.includes("\0") ||
+      entry.split("/").some((segment) => segment === ".." || segment === "")
+    ) {
+      throw configError(
+        "self loop oversightPaths must be repo-relative literal prefixes",
+      );
+    }
+    oversightPaths.push(entry);
+  }
+  return Object.freeze({
+    enabled: record.enabled,
+    sessionId,
+    taskId,
+    minEvidence,
+    dailyProposals,
+    oversightPaths: Object.freeze(oversightPaths),
+  });
 }
 
 /**
@@ -2689,6 +2788,7 @@ export function loadServerConfig(
     env.COMPANION_EXECUTION_RECORDS_JSON,
   );
   const learning = parseLearningConfig(env.COMPANION_LEARNING_JSON);
+  const selfLoop = parseSelfLoopConfig(env.COMPANION_SELFLOOP_JSON);
   const agora = parseAgoraConfig(env.COMPANION_AGORA_JSON);
   const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
@@ -2759,6 +2859,7 @@ export function loadServerConfig(
     memory,
     executionRecords,
     learning,
+    selfLoop,
     agora,
     voice,
     remote,
