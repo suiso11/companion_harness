@@ -263,6 +263,8 @@ export interface ProjectedHistoryItem {
   readonly turnSeq: number;
   readonly requestText: string;
   readonly resultText: string;
+  /** Companion-initiated assistant-only message (no user request). */
+  readonly companionOnly?: boolean;
 }
 
 export interface ProjectedReferenceSummary {
@@ -344,7 +346,14 @@ export const AGENT_HISTORY_USER_PREFIX = "Earlier request:\n" as const;
 export function isProjectableHistoryItem(item: {
   readonly requestText: string;
   readonly resultText: string;
+  readonly companionOnly?: boolean;
 }): boolean {
+  if (item.companionOnly === true) {
+    return (
+      item.resultText.length >= 1 &&
+      item.resultText.length <= MAX_MESSAGE_CONTENT_LENGTH
+    );
+  }
   if (item.requestText.length < 1 || item.resultText.length < 1) {
     return false;
   }
@@ -422,6 +431,10 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
     .filter(isProjectableHistoryItem)
     .slice(-AGENT_MAX_HISTORY_ITEMS);
   for (const item of history) {
+    if (item.companionOnly === true) {
+      messages.push({ role: "assistant", content: item.resultText });
+      continue;
+    }
     messages.push({
       role: "user",
       content: `${AGENT_HISTORY_USER_PREFIX}${item.requestText}`,
@@ -3624,16 +3637,31 @@ function loadHistory(
     seq: number;
     input_json: string;
     result_json: string | null;
+    companion: number;
   }>;
   try {
     rows = db
       .prepare(
-        `SELECT t.seq AS seq, t.input_json AS input_json, r.result_json AS result_json FROM turns t JOIN turn_selections s ON s.turn_id = t.id JOIN runs r ON r.id = s.run_id WHERE t.session_id = ? AND t.seq < ? AND r.status = 'completed' AND r.result_json IS NOT NULL ORDER BY t.seq DESC LIMIT ${AGENT_MAX_HISTORY_ITEMS}`,
+        `SELECT t.seq AS seq, t.input_json AS input_json,
+                r.result_json AS result_json, 0 AS companion
+         FROM turns t
+         JOIN turn_selections s ON s.turn_id = t.id
+         JOIN runs r ON r.id = s.run_id
+         WHERE t.session_id = ? AND t.seq < ?
+           AND r.status = 'completed' AND r.result_json IS NOT NULL
+         UNION ALL
+         SELECT t.seq AS seq, t.input_json AS input_json,
+                NULL AS result_json, 1 AS companion
+         FROM turns t
+         WHERE t.session_id = ? AND t.seq < ?
+           AND json_extract(t.input_json, '$.kind') = 'companion_text'
+         ORDER BY seq DESC LIMIT ${AGENT_MAX_HISTORY_ITEMS}`,
       )
-      .all(sessionId, beforeSeq) as Array<{
+      .all(sessionId, beforeSeq, sessionId, beforeSeq) as Array<{
       seq: number;
       input_json: string;
       result_json: string | null;
+      companion: number;
     }>;
   } catch {
     return [];
@@ -3647,6 +3675,18 @@ function loadHistory(
   for (const row of rows) {
     try {
       const input = JSON.parse(row.input_json) as { text?: unknown };
+      if (row.companion === 1) {
+        if (typeof input.text !== "string" || input.text.length === 0) {
+          continue;
+        }
+        out.push({
+          turnSeq: row.seq,
+          requestText: "",
+          resultText: input.text,
+          companionOnly: true,
+        });
+        continue;
+      }
       const result = JSON.parse(row.result_json as string) as {
         text?: unknown;
       };
@@ -3726,6 +3766,16 @@ export function trimConversationToCap(messages: ChatRequest["messages"]): void {
   while (messages.length > MAX_MESSAGES_PER_REQUEST && currentIdx > 1) {
     const second = messages[1];
     const third = messages[2];
+    // Companion-initiated assistant-only message: drop one.
+    if (
+      second !== undefined &&
+      second.role === "assistant" &&
+      (second.toolCalls === undefined || second.toolCalls.length === 0)
+    ) {
+      messages.splice(1, 1);
+      currentIdx -= 1;
+      continue;
+    }
     if (
       second === undefined ||
       second.role !== "user" ||

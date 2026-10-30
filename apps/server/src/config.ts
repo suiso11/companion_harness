@@ -517,6 +517,7 @@ export interface ServerConfig {
   readonly executionRecords: ExecutionRecordsConfig | null;
   /** Opt-in conversation learning; null (unset) means learning disabled. */
   readonly learning: LearningConfig | null;
+  readonly speech: SpeechConfig | null;
   /** Opt-in AGORA participation; null (unset) means disabled. */
   readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
@@ -587,6 +588,123 @@ export class ServerConfigError extends Error {
 export interface LearningConfig {
   /** Absolute private SQLite path. */
   readonly dbPath: string;
+}
+
+/** Opt-in spontaneous thought/speech service (COMPANION_SPEECH_JSON). */
+export interface SpeechConfig {
+  readonly enabled: boolean;
+  readonly mode: "dry-run" | "live";
+  readonly thoughtIntervalMs: number;
+  readonly speechIntervalMs: number;
+  readonly minQuietMs: number;
+  readonly minGapMs: number;
+  readonly maxSpeechPerDay: number;
+  readonly memoryLimit: number;
+  readonly maxChars: number;
+  /** Optional local quiet window ("HH:MM"; start inclusive, end exclusive). */
+  readonly quietHours: { readonly start: string; readonly end: string } | null;
+}
+
+const SPEECH_CONFIG_KEYS = new Set([
+  "enabled",
+  "mode",
+  "thoughtIntervalMs",
+  "speechIntervalMs",
+  "minQuietMs",
+  "minGapMs",
+  "maxSpeechPerDay",
+  "memoryLimit",
+  "maxChars",
+  "quietHours",
+]);
+const SPEECH_TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+export function parseSpeechConfig(
+  raw: string | undefined,
+): SpeechConfig | null {
+  if (raw === undefined) return null;
+  const record = requireConfigObject(raw, "speech config");
+  for (const key of Object.keys(record)) {
+    if (!SPEECH_CONFIG_KEYS.has(key)) {
+      throw configError("speech config has an unknown key");
+    }
+  }
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") {
+    throw configError("speech enabled must be a boolean");
+  }
+  const mode = record.mode ?? "dry-run";
+  if (mode !== "dry-run" && mode !== "live") {
+    throw configError("speech mode must be dry-run or live");
+  }
+  let quietHours: SpeechConfig["quietHours"] = null;
+  if (record.quietHours !== undefined && record.quietHours !== null) {
+    const q = record.quietHours;
+    if (typeof q !== "object" || q === null || Array.isArray(q)) {
+      throw configError("speech quietHours must be an object");
+    }
+    const qr = q as Record<string, unknown>;
+    if (Object.keys(qr).length !== 2) {
+      throw configError("speech quietHours must carry start and end");
+    }
+    if (
+      typeof qr.start !== "string" ||
+      typeof qr.end !== "string" ||
+      !SPEECH_TIME_RE.test(qr.start) ||
+      !SPEECH_TIME_RE.test(qr.end) ||
+      qr.start === qr.end
+    ) {
+      throw configError("speech quietHours is invalid");
+    }
+    quietHours = Object.freeze({ start: qr.start, end: qr.end });
+  }
+  return Object.freeze({
+    enabled: record.enabled === true,
+    mode,
+    thoughtIntervalMs: boundedInteger(
+      record.thoughtIntervalMs,
+      86_400_000,
+      3_600_000,
+      604_800_000,
+      "speech thoughtIntervalMs",
+    ),
+    speechIntervalMs: boundedInteger(
+      record.speechIntervalMs,
+      86_400_000,
+      3_600_000,
+      604_800_000,
+      "speech speechIntervalMs",
+    ),
+    minQuietMs: boundedInteger(
+      record.minQuietMs,
+      1_800_000,
+      300_000,
+      86_400_000,
+      "speech minQuietMs",
+    ),
+    minGapMs: boundedInteger(
+      record.minGapMs,
+      21_600_000,
+      3_600_000,
+      604_800_000,
+      "speech minGapMs",
+    ),
+    maxSpeechPerDay: boundedInteger(
+      record.maxSpeechPerDay,
+      1,
+      1,
+      4,
+      "speech maxSpeechPerDay",
+    ),
+    memoryLimit: boundedInteger(
+      record.memoryLimit,
+      30,
+      5,
+      60,
+      "speech memoryLimit",
+    ),
+    maxChars: boundedInteger(record.maxChars, 200, 40, 500, "speech maxChars"),
+    quietHours,
+  });
 }
 
 /** Opt-in AGORA participation store (approvals + host-held credential). */
@@ -2689,6 +2807,7 @@ export function loadServerConfig(
     env.COMPANION_EXECUTION_RECORDS_JSON,
   );
   const learning = parseLearningConfig(env.COMPANION_LEARNING_JSON);
+  const speech = parseSpeechConfig(env.COMPANION_SPEECH_JSON);
   const agora = parseAgoraConfig(env.COMPANION_AGORA_JSON);
   const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
@@ -2759,6 +2878,7 @@ export function loadServerConfig(
     memory,
     executionRecords,
     learning,
+    speech,
     agora,
     voice,
     remote,
