@@ -437,6 +437,8 @@ export type TaskResumeRequest = z.infer<typeof TaskResumeRequestSchema>;
  */
 export const AutonomyControlViewSchema = z.strictObject({
   paused: z.boolean(),
+  /** Loop-only freeze (separate from pause; human-cleared only). */
+  learningFrozen: z.boolean().default(false),
   version: z.number().int().min(1),
   reason: z.string().max(500).nullable(),
   updatedAt: UnixMsSchema,
@@ -445,6 +447,8 @@ export type AutonomyControlView = z.infer<typeof AutonomyControlViewSchema>;
 
 export const AutonomyControlSetRequestSchema = z.strictObject({
   paused: z.boolean(),
+  /** Omitted = preserve the current loop freeze. */
+  learningFrozen: z.boolean().optional(),
   expectedVersion: z.number().int().min(1),
   reason: z.string().min(1).max(500).optional(),
 });
@@ -818,6 +822,8 @@ export const LearningEvidenceSourceKindSchema = z.enum([
   "conversation_proposal",
   "action_receipt",
   "task_event",
+  "run",
+  "trial_outcome",
 ]);
 export type LearningEvidenceSourceKind = z.infer<
   typeof LearningEvidenceSourceKindSchema

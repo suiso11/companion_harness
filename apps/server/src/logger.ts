@@ -137,6 +137,8 @@ export interface ServerLogFields {
   readonly turnId?: string;
   readonly runId?: string;
   readonly proposalId?: string;
+  /** Bounded count for diagnostics (never user content). */
+  readonly count?: number;
   /** Human approve-time write opt-in (trial approve only). */
   readonly allowWrite?: boolean;
   readonly scope?: string;

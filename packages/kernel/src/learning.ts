@@ -1244,6 +1244,39 @@ function requireAnchoredSourceInTx(
     }
     return;
   }
+  if (sourceKind === "run") {
+    const row = db
+      .prepare("SELECT session_id, status FROM runs WHERE id = ?")
+      .get(id) as { session_id: string; status: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `run ${id} not found in session ${session}`,
+      );
+    }
+    if (
+      row.status !== "completed" &&
+      row.status !== "failed" &&
+      row.status !== "cancelled"
+    ) {
+      throw new LearningStateConflictError(
+        `run ${id} is ${row.status} (only settled runs anchor evidence)`,
+      );
+    }
+    return;
+  }
+  if (sourceKind === "trial_outcome") {
+    const row = db
+      .prepare(
+        "SELECT session_id FROM trial_worker_outcomes WHERE execution_id = ?",
+      )
+      .get(id) as { session_id: string } | undefined;
+    if (row === undefined || row.session_id !== session) {
+      throw new RepositoryNotFoundError(
+        `trial outcome ${id} not found in session ${session}`,
+      );
+    }
+    return;
+  }
   const row = db
     .prepare("SELECT session_id FROM autonomy_task_events WHERE id = ?")
     .get(id) as { session_id: string } | undefined;
@@ -1307,7 +1340,12 @@ export function attachEvidence(
       return { status: existing.responseStatus, body, replayed: true };
     }
     const row = assertOwnedHypothesis(db, session, hypothesis);
-    if (row.staged === 1) {
+    // Host-observed anchors (a settled run, a trial outcome) may attach to a
+    // staged hypothesis: they are not model claims, and the hypothesis stays
+    // staged. Every other source still needs human acceptance first.
+    const hostAnchored =
+      input.sourceKind === "run" || input.sourceKind === "trial_outcome";
+    if (row.staged === 1 && !hostAnchored) {
       throw new LearningStateConflictError(
         `hypothesis ${row.id} is staged and must be accepted first`,
       );
