@@ -6014,6 +6014,24 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 
 `learning_frozen` は `POST /api/autonomy/control` の body に `"learningFrozen": true|false` を足して切り替えます（省略時は現状維持）。グローバル pause の resume では解除されません。
 
+### 自己改善ループの提案（P4、既定で無効）
+
+`COMPANION_SELFLOOP_JSON` を設定したときだけ、日次で **読み取り専用の試行提案** を1件作ります。
+
+```json
+{"enabled": true, "sessionId": "<uuid>", "taskId": "<uuid>", "minEvidence": 3, "dailyProposals": 1}
+```
+
+- `taskId` は**人間が作った standing task**（明示 goal の子）。ループは task を作りません
+- 対象は「staged hypothesis で、distinct な `run` evidence が `minEvidence` 件以上、まだ trial proposal が無いもの」
+- 提案は `operation="investigate"`, `readOnlyMode=true`, `literalPatchPaths=[]`（pathless read）で、objective は `仮説の検証: <statement>`
+- 期限は 3 時間、caps/checks は凍結 profile から
+- 冪等キーは hypothesis id（再実行しても重複しない）
+- `paused` / `learning_frozen` の間は作らない。日次 1 回（UTC）
+- 承認は従来どおり `/trials` の人間クリック。grant はループから発行しません
+
+未設定（既定）では観測（P2）だけが動き、提案は出ません。
+
 ### 自己改善ループの計測レポート（読み取り専用）
 
 `pnpm --filter @companion/server loop report [--limit N]` は、ループが使う**決定論的ラベル**の被覆を表示します。書き込みは一切しません。

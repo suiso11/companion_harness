@@ -2316,6 +2316,24 @@ export async function startServer(
       logger,
       now,
       background: backgroundResource,
+      selfLoop: config.selfLoop,
+      trialProfile:
+        config.trial === null
+          ? null
+          : {
+              available: config.trial.available,
+              enabled: config.trial.enabled,
+              mandatoryChecks: [...config.trial.mandatoryChecks],
+              configFingerprint: config.trial.configFingerprint,
+              sourceRevision: config.trial.sourceRevision,
+              currentModel: config.trial.currentModel,
+              disclosedWholeRepoRead: config.trial.disclosedWholeRepoRead,
+              timeoutMs: config.trial.timeoutMs,
+              maxOutputBytes: config.trial.maxOutputBytes,
+              allowedPaths: [...config.trial.allowedPaths],
+              modelRoute: config.trial.modelRoute,
+            },
+      workspaceAlias: config.trial?.workspaceAlias ?? null,
     });
     reflect.start();
     repo = wrapRepoWithReflect(repo, reflect);

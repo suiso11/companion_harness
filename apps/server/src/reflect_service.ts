@@ -14,6 +14,7 @@
 //   `learning_frozen` / global pause stop new work.
 // - Fail-open: every failure logs a fixed code and drops the item.
 
+import type { TrialProfileSnapshot } from "@companion/contracts";
 import type { KernelRepository } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
 import {
@@ -21,6 +22,7 @@ import {
   type BackgroundReservation,
   type BackgroundResourceGate,
 } from "./background_resource.js";
+import type { SelfLoopConfig } from "./config.js";
 import type { ServerLogger } from "./logger.js";
 
 export const REFLECT_DAILY_CALL_CAP = 20;
@@ -31,6 +33,9 @@ export const REFLECT_MAX_STATEMENT_CP = 400;
 export const REFLECT_MAX_QUOTE_CP = 200;
 export const REFLECT_MIN_QUOTE_CP = 4;
 export const REFLECT_DAY_MS = 86_400_000;
+/** One clock trigger: the loop may stage proposals once per UTC day. */
+export const REFLECT_PLAN_INTERVAL_MS = REFLECT_DAY_MS;
+export const REFLECT_PROPOSAL_EXPIRY_MS = 3 * 3_600_000;
 
 export const REFLECT_SYSTEM_PROMPT =
   "You review ONE failed assistant run and propose ONE behavioural " +
@@ -110,6 +115,11 @@ export interface ReflectServiceOptions {
   readonly now?: () => number;
   readonly background?: BackgroundResourceGate | null;
   readonly dailyCallCap?: number;
+  /** Opt-in proposal staging; null/disabled = observe only. */
+  readonly selfLoop?: SelfLoopConfig | null;
+  /** Frozen trial profile used to stage proposals (from server config). */
+  readonly trialProfile?: TrialProfileSnapshot | null;
+  readonly workspaceAlias?: string | null;
 }
 
 export interface ReflectService {
@@ -117,6 +127,8 @@ export interface ReflectService {
   onRunSettled(runId: string): void;
   /** Resolves once the queue is empty and no drain is running (test seam). */
   onIdle(): Promise<void>;
+  /** One daily planning pass; safe to call directly (test seam). */
+  plan(): Promise<void>;
   start(): void;
   stop(): Promise<void>;
 }
@@ -139,6 +151,8 @@ export function createReflectService(
   let unsubscribe: (() => void) | null = null;
   let callDay = -1;
   let callCount = 0;
+  let planDay = -1;
+  let planTimer: ReturnType<typeof setInterval> | null = null;
 
   const log = (event: string, fields?: Record<string, unknown>): void => {
     options.logger?.info(event, fields);
@@ -284,6 +298,65 @@ export function createReflectService(
     log("reflect.proposed", { hypothesisId: staged.body.id });
   }
 
+  /**
+   * Stage at most `dailyProposals` read-only investigations for the most
+   * repeated staged hypotheses. Requires an operator-configured standing
+   * task; the loop never creates one and never writes a grant.
+   */
+  async function plan(): Promise<void> {
+    const cfg = options.selfLoop ?? null;
+    const profile = options.trialProfile ?? null;
+    const alias = options.workspaceAlias ?? null;
+    if (
+      stopped ||
+      cfg === null ||
+      !cfg.enabled ||
+      profile === null ||
+      alias === null
+    ) {
+      return;
+    }
+    const control = repo.getAutonomyControlState();
+    if (control.paused || control.learningFrozen) return;
+    const day = utcDayStart(now());
+    if (day === planDay) return;
+    const eligible = repo.listEligibleLoopHypotheses(
+      cfg.sessionId,
+      cfg.minEvidence,
+      cfg.dailyProposals,
+    );
+    if (eligible.length === 0) return;
+    planDay = day;
+    for (const hypothesis of eligible) {
+      try {
+        repo.stageTrial(
+          cfg.sessionId,
+          {
+            taskId: cfg.taskId,
+            objective: `仮説の検証: ${hypothesis.statement}`,
+            acceptance: [
+              "失敗の再現条件と、仮説が正しいか誤りかの根拠を report に書く",
+            ],
+            literalPatchPaths: [],
+            operation: "investigate",
+            readOnlyMode: true,
+            expiry: new Date(now() + REFLECT_PROPOSAL_EXPIRY_MS).toISOString(),
+            possibleExternalDataConsent: false,
+            objectiveResourceCaps: {
+              timeoutMs: profile.timeoutMs,
+              maxOutputBytes: profile.maxOutputBytes,
+            },
+            requiredChecks: [...profile.mandatoryChecks],
+          },
+          { key: hypothesis.id, profile, workspaceAlias: alias, now: now() },
+        );
+        log("reflect.proposed_trial", { hypothesisId: hypothesis.id });
+      } catch {
+        warn("reflect.proposal_failed");
+      }
+    }
+  }
+
   return {
     onRunSettled(runId: string): void {
       if (!started) return;
@@ -299,12 +372,24 @@ export function createReflectService(
     start(): void {
       started = true;
       unsubscribe = background?.onSettled(wake) ?? null;
+      planTimer = setInterval(() => {
+        void plan();
+      }, REFLECT_PLAN_INTERVAL_MS);
+      planTimer.unref?.();
+      void plan();
+    },
+    async plan(): Promise<void> {
+      await plan();
     },
     async stop(): Promise<void> {
       stopped = true;
       started = false;
       unsubscribe?.();
       unsubscribe = null;
+      if (planTimer !== null) {
+        clearInterval(planTimer);
+        planTimer = null;
+      }
       activeController?.abort();
       pending.length = 0;
       queued.clear();
