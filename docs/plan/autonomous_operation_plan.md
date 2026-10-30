@@ -7,10 +7,13 @@
 - 方向転換: ユーザー修正「ちょっとイメージと違うかも、資料なくても会話をまとめてplan生成。そっからそれをpi-orchに投げる形で」を主経路として採用する。加えて **D3 は「許可範囲内の standing 自動 dispatch」を選択済み**。plan ごとの必須レビュー/承認 UI を既定に戻さず、同じ二者択一を再質問しない。**カレンダー準備は主経路ではなく、将来の入力例**（§13.7）。
 - 配信: **「完成次第知らせる」は選択済みの報告選好**。時刻待ちをしないという意味であり、実行・権限・自律開始の承認ではない。
 
-## 0. 実装状況（2026-10-25 候補パッチ・未配備）
+## 0. 実装状況（2026-10-29 更新）
 
-- **状態**: 会話 → 凍結計画 → standing ポリシー → 既存 TrialRunner の候補実装は staged working tree に存在し、実ブラウザ 2/2（実 UI・合成モデル・実 pi-orch child）と kernel 41 / observer 37 / bridge 19 の focused suite を通した。**これは配備・本番反映・source apply の承認ではない。**
-- **既定無効**: `COMPANION_AUTODISPATCH_JSON` 未設定（または `enabled:false`）で API は 404、UI パネルは非表示。live production は不変。`COMPANION_AUTONOMY_JSON` が必須で、alias/checks/caps は trial 設定と一致しなければならない。
+- **状態**: 会話 → 凍結計画 → standing ポリシー → 既存 TrialRunner は PR #134 で master にマージ済み・配備済み。P2/P3 の経路は実装済みで、**有効化だけが operator config 待ち**（`COMPANION_AUTODISPATCH_JSON` 未設定 → policy 0 件 → dispatch 0 件）。
+- **既定無効**: `COMPANION_AUTODISPATCH_JSON` 未設定（または `enabled:false`）で API は 404、UI パネルは非表示。`COMPANION_AUTONOMY_JSON` が必須で、alias/checks/caps は trial 設定と一致しなければならない。
+- **2026-10-29 時点の追加実装**: 会話からの目的・タスクは即時作成（人間ゲートは試行承認のみ）／試行完了と PR 作成を自発チャットで通知／読み取り専用で staged された試行を承認時に write へ widen 可能（`allowWrite`、`trial_grants.allow_write`）。
+- **narrow read 実装済み**: sealed `/work` snapshot は `SEALED_SOURCE_ROOTS = allowedPaths`（`apps`, `packages`）＋トップレベルファイルのみ。`scripts/`・`docs/` はゲストから読めない。次回 deploy の snapshot 再構築から有効（既存 snapshot は旧 root のまま）。
+- **未実装**: P4 artifact apply（candidate を host に適用する経路は存在しない。adoption の draft PR まで）。
 - **設定**: 実パス・checks・caps・bridge・sealed snapshot・runtime realpaths・dependency depot・model route/consent は**運用者専用 config** のみ。モデル名は hardcode せず（特定モデルを前提にしない）、要求から上書きできない。strict caps は operator/trial caps の上限以下に限定。checks は trial mandatory checks と完全一致。
 - **依存**: `dependencyRoot` は `prepareDependencyClosure` が返す実 depot と sibling `<root>.closure-manifest.json` が必要。native `better-sqlite3` と pinned Node ABI を再ハッシュし、欠落/改ざん/ABI 不一致は `dependency_unavailable` で block。空ディレクトリや偽 manifest は不可。
 - **trust**: `done`/`verified` は固定 host check と scope/artifact 再検証のみ。worker status は guest-reported/unattested で、delegation・完了・意味的正しさを証明しない。成果物は candidate のみで、host apply/deploy/publish は行わない。guest worker status の attestation を主張しない。
@@ -296,7 +299,8 @@ pi-orch は成果物・差分・テスト・エラー・阻害要因を返し、
 - `TrialModelRelay` の実制御: `maxRequestBytes`/`maxModelCalls`/`maxOutputTokens`/`maxResponseBytes`/`perCallTimeoutMs`/`maxConcurrent`。
 - candidate capsule の制御: `timeoutMs`/`maxOutputBytes`/`workspaceMaxBytes`/`memoryMaxBytes`/`maxTasks`/`cpuQuotaPercent` と storage caps。
 - **scope の意味**: `relevantPaths` は**追加/変更/削除 candidate path** に適用。`read_only` は変更を拒否。`write` は sourceRoot 全体を private work area に copy し candidate artifact を返し、**host root に決して書かない**。
-- **read 範囲の限界（正直に開示）**: 実装は whole-repo snapshot read。`relevantPaths` は**変更**を制限するが**全 repo READ** は制限しない。`disclosedWholeRepoRead` config boolean は narrow read を強制しない。よって「narrow read scope」と主張せず、whole-repo read の開示とユーザーポリシー承認を要するか、実 narrow read を実装するまで主張しない。**選択済み workspace では現行 capsule が original sourceRoot を `/input` と `/input/.git` に bind するため、この disclosure が実際に残る（§14.7）。root copy cap（例 1 GiB）は copy を失敗させるだけで `/input` disclosure を防がない。**
+- **read 範囲（2026-10-29 更新）**: sealed snapshot は `SEALED_SOURCE_ROOTS` = `allowedPaths`（`apps`, `packages`）＋トップレベルファイルのみをコピーするため、ゲストは `scripts/`・`docs/`・`.github` を読めない。次回 deploy の snapshot 再構築から有効。以下は旧実装（whole-repo）時点の記述として保持する。
+- **read 範囲の限界（旧実装・履歴）**: 実装は whole-repo snapshot read。`relevantPaths` は**変更**を制限するが**全 repo READ** は制限しない。`disclosedWholeRepoRead` config boolean は narrow read を強制しない。よって「narrow read scope」と主張せず、whole-repo read の開示とユーザーポリシー承認を要するか、実 narrow read を実装するまで主張しない。**選択済み workspace では現行 capsule が original sourceRoot を `/input` と `/input/.git` に bind するため、この disclosure が実際に残る（§14.7）。root copy cap（例 1 GiB）は copy を失敗させるだけで `/input` disclosure を防がない。**
 - bridge config は `runtime.workspaceAliases[alias]` を absolute `sourceRoot` に写像する。**alias は選択済みだが mapping は未 activate**、operator checks も未設定。既定の authorized repo を発明しない。`sourceRoot` は absolute-only で stat は symlink を follow するため、canonical containment は §14.7.2 で必須。
 - bridge は model secret を持たない。guest は UDS relay と dummy key を使い、host credential は**存在確認のみで実 auth 未試験**。operator check は executable+args 固定で、plan から任意 shell を実行しない。
 

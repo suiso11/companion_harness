@@ -295,8 +295,13 @@ export function formatAutonomyEnvLine(json) {
 
 /** Guest-generated scratch root inside /work (untrusted, never source). */
 export const GUEST_OBSERVATION_SCRATCH_ROOT = ".companion-observation";
-/** Directories copied into the sealed /work snapshot. */
-export const SEALED_SOURCE_ROOTS = ["apps", "packages", "scripts", "docs"];
+/**
+ * Directories copied into the sealed /work snapshot: exactly the frozen
+ * allowedPaths (write scope). The guest therefore cannot read scripts/,
+ * docs/, or any other root, so "narrow read" is a real property and not
+ * only a disclosure. Keep this in sync with the profile's allowedPaths.
+ */
+export const SEALED_SOURCE_ROOTS = ["apps", "packages"];
 /** Top-level files preserved by the materializer snapshot filter. */
 export const SEALED_TOP_LEVEL_FILES = [
   "package.json",
