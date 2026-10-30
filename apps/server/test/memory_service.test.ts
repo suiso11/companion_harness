@@ -2252,11 +2252,11 @@ describe("parseRecallData provenance fields", () => {
 
 describe("raw originals: per-speaker storage", () => {
   it("chunks long text without truncation and preserves surrogate pairs", () => {
-    const text = "あ".repeat(MEMORY_RAW_CHUNK_CP + 3) + "😀";
+    const text = `${"あ".repeat(MEMORY_RAW_CHUNK_CP + 3)}😀`;
     const chunks = splitRawChunks(text);
     expect(chunks).toHaveLength(2);
     expect(chunks.join("")).toBe(text);
-    expect(Array.from(chunks[0]!)).toHaveLength(MEMORY_RAW_CHUNK_CP);
+    expect(Array.from(chunks[0] ?? "")).toHaveLength(MEMORY_RAW_CHUNK_CP);
     expect(chunks[1]).toBe("あああ😀");
     expect(splitRawChunks("")).toEqual([]);
   });
@@ -2296,15 +2296,15 @@ describe("raw originals: per-speaker storage", () => {
       const events = seen.filter((call) => call.op === "event.append");
       expect(events).toHaveLength(2);
       const bySpeaker = new Map(
-        events.map((call) => [call.params["speaker"], call.params]),
+        events.map((call) => [call.params.speaker, call.params]),
       );
-      expect(bySpeaker.get("user")?.["body"]).toBe("user likes tea");
-      expect(bySpeaker.get("assistant")?.["body"]).toBe("assistant answer");
-      expect(bySpeaker.get("user")?.["chunk"]).toEqual({
+      expect(bySpeaker.get("user")?.body).toBe("user likes tea");
+      expect(bySpeaker.get("assistant")?.body).toBe("assistant answer");
+      expect(bySpeaker.get("user")?.chunk).toEqual({
         docId: `evt-${run.runId}-user`,
         seq: 0,
       });
-      expect(bySpeaker.get("assistant")?.["chunk"]).toEqual({
+      expect(bySpeaker.get("assistant")?.chunk).toEqual({
         docId: `evt-${run.runId}-assistant`,
         seq: 0,
       });
@@ -2316,10 +2316,10 @@ describe("raw originals: per-speaker storage", () => {
           call.params,
         ]),
       );
-      expect(byBody.get("user likes tea")?.["sourceRefs"]).toEqual([
+      expect(byBody.get("user likes tea")?.sourceRefs).toEqual([
         `evt-${run.runId}-user-c0000`,
       ]);
-      expect(byBody.get("turn digest")?.["sourceRefs"]).toEqual([
+      expect(byBody.get("turn digest")?.sourceRefs).toEqual([
         `evt-${run.runId}-user-c0000`,
         `evt-${run.runId}-assistant-c0000`,
       ]);
@@ -2359,7 +2359,7 @@ describe("privacy metadata on memory writes (F-I01-05)", () => {
       // One raw event per speaker, both fail-closed sensitive.
       expect(appended).toHaveLength(2);
       const bySpeaker = new Map(
-        appended.map((call) => [call.params["speaker"], call.params]),
+        appended.map((call) => [call.params.speaker, call.params]),
       );
       expect(bySpeaker.get("user")).toMatchObject({
         privacy: { sensitivity: "sensitive", origin: "conversation" },

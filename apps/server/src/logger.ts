@@ -155,6 +155,10 @@ export interface ServerLogFields {
   readonly delayMs?: number;
   /** Count of citation entries dropped from an accepted answer. */
   readonly dropped?: number;
+  /** Spontaneous service mode (dry-run/live). */
+  readonly mode?: string;
+  /** Spontaneous service enabled flag. */
+  readonly enabled?: boolean;
   /**
    * Comma-joined fixed citation-drop reason codes
    * (`too_long,invalid_format,unresolved,over_limit`). Closed vocabulary;

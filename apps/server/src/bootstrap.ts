@@ -193,7 +193,12 @@ import {
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
+import {
+  createSpontaneousService,
+  type SpontaneousService,
+} from "./spontaneous_service.js";
 import { childFailedStatusForError } from "./supervisor.js";
+import { createThoughtStore } from "./thought_store.js";
 import { pruneTrialAdoptionWorktrees } from "./trial_adoption.js";
 import {
   narrowTrialModelRelayCaps,
@@ -983,6 +988,7 @@ export async function startServer(
   let onSigterm: (() => void) | undefined;
   /** Conversation-memory service (null = memoryless; set inside try). */
   let memory: MemoryService | null = null;
+  let spontaneous: SpontaneousService | null = null;
   /** Conversation-learning service (null = disabled; set inside try). */
   let learning: LearningService | null = null;
   let reflect: ReflectService | null = null;
@@ -1763,6 +1769,32 @@ export async function startServer(
       });
       repo = wrapRepoWithMemoryIntake(baseRepo, memory);
       logger.info("server.memory_ready", { status: 1 });
+      if (config.speech !== null) {
+        spontaneous = createSpontaneousService({
+          repo: baseRepo,
+          store: createThoughtStore(handle.raw),
+          config: config.speech,
+          memory: {
+            executable: memoryConfig.executable,
+            entry: memoryConfig.entry,
+            config: memoryConfig.config,
+            timeoutMs: memoryConfig.timeoutMs,
+            maxResponseBytes: memoryConfig.maxResponseBytes,
+          },
+          scope: memoryConfig.scope,
+          webSearch: config.webSearch,
+          gateway: modelGateway,
+          model: modelName,
+          background: backgroundResource,
+          timeZone: config.timeZone,
+          logger,
+          now,
+        });
+        logger.info("server.speech_ready", {
+          enabled: config.speech.enabled,
+          mode: config.speech.mode,
+        });
+      }
     }
     // AV05 notification projector (always on, no config gate): durable
     // background projection AFTER committed sources — never inside the M5
@@ -3131,6 +3163,9 @@ export async function startServer(
     if (memory !== null) {
       memory.start();
     }
+    if (spontaneous !== null) {
+      spontaneous.start();
+    }
     // Shadow worker starts after engine recovery (reconciled restart state
     // is already paused + held above): NO automatic job pickup — only
     // meaningful new state (or a new explicit request) wakes it.
@@ -3469,6 +3504,13 @@ export async function startServer(
         }
       }
       try {
+        if (spontaneous !== null) {
+          await spontaneous.stop();
+        }
+      } catch {
+        // Best effort: the listen error carries the startup failure.
+      }
+      try {
         if (memory !== null) {
           await memory.stop();
         }
@@ -3605,6 +3647,13 @@ export async function startServer(
         if (trialRunner !== null) {
           try {
             await trialRunner.shutdown(drainMs);
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        if (spontaneous !== null) {
+          try {
+            await spontaneous.stop();
           } catch {
             // Best effort: the engine drain below still runs.
           }

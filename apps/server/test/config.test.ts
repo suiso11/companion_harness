@@ -17,6 +17,7 @@ import {
   parseMarkdownRoots,
   parseMemoryConfig,
   parseModelConfig,
+  parseSpeechConfig,
   parseTrialConfig,
   parseVoiceConfig,
   ServerConfigError,
@@ -1126,5 +1127,43 @@ describe("autodispatch caps defaults fit the trial runner", () => {
         trial,
       ),
     ).toThrow("autodispatch caps must fit trial runner caps");
+  });
+});
+
+describe("speech config", () => {
+  it("is disabled when unset and parses the bounded defaults", () => {
+    expect(parseSpeechConfig(undefined)).toBeNull();
+    const parsed = parseSpeechConfig(JSON.stringify({ enabled: true }));
+    expect(parsed).toMatchObject({
+      enabled: true,
+      mode: "dry-run",
+      maxSpeechPerDay: 1,
+      memoryLimit: 30,
+      maxChars: 200,
+      quietHours: null,
+    });
+  });
+
+  it("accepts live mode and a quiet window, rejects unknown keys/bad times", () => {
+    expect(
+      parseSpeechConfig(
+        JSON.stringify({
+          enabled: true,
+          mode: "live",
+          quietHours: { start: "23:00", end: "07:00" },
+        }),
+      )?.quietHours,
+    ).toEqual({ start: "23:00", end: "07:00" });
+    expect(() => parseSpeechConfig(JSON.stringify({ surprise: true }))).toThrow(
+      /unknown key/,
+    );
+    expect(() =>
+      parseSpeechConfig(
+        JSON.stringify({ quietHours: { start: "25:00", end: "07:00" } }),
+      ),
+    ).toThrow(/quietHours/);
+    expect(() =>
+      parseSpeechConfig(JSON.stringify({ maxSpeechPerDay: 9 })),
+    ).toThrow(/maxSpeechPerDay/);
   });
 });

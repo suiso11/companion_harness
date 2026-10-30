@@ -31,6 +31,48 @@ function historyMessages(req: ChatRequest) {
 }
 
 describe("history message bounds", () => {
+  it("projects companion-only assistant messages without a user pair", () => {
+    const req = projectPrompt({
+      requestText: "now",
+      history: [
+        {
+          turnSeq: 1,
+          requestText: "",
+          resultText: "companion spoke first",
+          companionOnly: true,
+        },
+        { turnSeq: 2, requestText: "q", resultText: "r" },
+      ],
+      references: [],
+      tools: [],
+      model: "m",
+    });
+    const hist = historyMessages(req);
+    expect(hist[0]).toMatchObject({
+      role: "assistant",
+      content: "companion spoke first",
+    });
+    expect(hist[1]).toMatchObject({
+      role: "user",
+      content: `${AGENT_HISTORY_USER_PREFIX}q`,
+    });
+    expect(hist[2]).toMatchObject({ role: "assistant", content: "r" });
+    expect(
+      isProjectableHistoryItem({
+        requestText: "",
+        resultText: "companion",
+        companionOnly: true,
+      }),
+    ).toBe(true);
+    expect(
+      isProjectableHistoryItem({
+        requestText: "",
+        resultText: "",
+        companionOnly: true,
+      }),
+    ).toBe(false);
+  });
+
   it("omits empty request/result pairs whole (no half-pairs, no truncation)", () => {
     const req = projectPrompt({
       requestText: "now",

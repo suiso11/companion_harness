@@ -32,6 +32,9 @@ importers:
       '@companion/connector-mcp':
         specifier: workspace:*
         version: link:../../packages/connector-mcp
+      '@companion/connector-web':
+        specifier: workspace:*
+        version: link:../../packages/connector-web
       '@companion/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

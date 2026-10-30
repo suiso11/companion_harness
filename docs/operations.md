@@ -6133,3 +6133,35 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - Requires remind v14 (`raw_events.speaker`). Merge/deploy remind first; an
   older remind rejects the unknown `speaker` param (jobs retry rather than
   silently falling back to a mixed body).
+
+## Spontaneous thoughts and speech (2026-10-30, opt-in)
+
+- Env: `COMPANION_SPEECH_JSON` (strict; unset = disabled). Fields:
+  `enabled` (default false), `mode` (`dry-run` default; `live` posts),
+  `thoughtIntervalMs` (24h), `speechIntervalMs` (24h), `minQuietMs` (30m since
+  the last user turn), `minGapMs` (6h between speeches), `maxSpeechPerDay` (1),
+  `memoryLimit` (30), `maxChars` (200), and optional
+  `quietHours: { start, end }` ("HH:MM", local `COMPANION_TIME_ZONE`).
+  Unknown keys/invalid bounds fail startup.
+- Requires `COMPANION_MEMORY_JSON` and a configured model gateway. The thought
+  pass reads remind `record.list` (active `user_fact`/`summary` only) and
+  **skips every item whose `privacy.sensitivity` is not `normal`** (older
+  remind builds that omit `privacy` therefore yield no thoughts: fail closed).
+- Thought pass (at most one per interval): recent normal memories + recent
+  conversation -> a strict research plan (topic + 1-3 general queries) -> the
+  existing loopback SearXNG client -> one private thought row
+  (`companion_thoughts`, migration 0040) with bounded body (max 400 cp),
+  topics, memory record ids, and up to 5 web title/url sources.
+- Speech pass (once/day by default, never during an active run, quiet hours,
+  or right after a companion message): picks one open thought, asks the model
+  for ONE natural observation + exactly one open question, validates length/
+  no IDs/URLs/`ユーザーは`/question mark, and posts via the existing
+  `postCompanionMessage` path (`companion_text`). `dry-run` logs only.
+- Feedback is durable on the thought: `askedAt`/`speechTurnId` when posted,
+  then the first user turn after it is bound as `replyTurnId` and
+  `outcome: "replied"`; no reply within 24h marks `ignored`. This is the
+  learning signal (no automatic frequency change yet).
+- The agent prompt includes prior `companion_text` turns as assistant-only
+  history, so a user reply sees the message it answers.
+- No UI panel for the journal yet; it is internal. Raw conversation originals
+  stay in remind (per-speaker chunks); thoughts never write remind memory.
