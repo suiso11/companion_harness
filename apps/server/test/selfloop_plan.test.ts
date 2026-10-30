@@ -13,6 +13,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { parseSelfLoopConfig } from "../src/config.js";
 import { createReflectService } from "../src/reflect_service.js";
+import { findOversightTouches } from "../src/trial_adoption.js";
 
 const T0 = 1_790_100_000_000;
 const PROFILE: TrialProfileSnapshot = {
@@ -60,6 +61,52 @@ describe("self loop config", () => {
         }),
       ),
     ).toThrow(/sessionId/);
+  });
+
+  it("validates oversight prefixes", () => {
+    const base = {
+      enabled: true,
+      sessionId: randomUUID(),
+      taskId: randomUUID(),
+    };
+    expect(
+      parseSelfLoopConfig(
+        JSON.stringify({
+          ...base,
+          oversightPaths: ["scripts/deploy", "apps/x"],
+        }),
+      ),
+    ).toMatchObject({ oversightPaths: ["scripts/deploy", "apps/x"] });
+    expect(parseSelfLoopConfig(JSON.stringify(base))).toMatchObject({
+      oversightPaths: [],
+    });
+    for (const bad of [["/abs"], [".."], ["a/../b"], ["a//b"], [1]]) {
+      expect(() =>
+        parseSelfLoopConfig(JSON.stringify({ ...base, oversightPaths: bad })),
+      ).toThrow(/oversightPaths/);
+    }
+  });
+});
+
+describe("oversight touches", () => {
+  it("flags tests and configured prefixes, nothing else", () => {
+    const files = [
+      { path: "apps/server/src/config.ts", kind: "modify" },
+      { path: "apps/server/test/config.test.ts", kind: "modify" },
+      { path: "e2e/trial.spec.ts", kind: "create" },
+      { path: "scripts/deploy/build.mts", kind: "modify" },
+      { path: "packages/kernel/test/x.ts", kind: "delete" },
+    ];
+    expect(findOversightTouches(files, ["scripts/deploy"])).toEqual([
+      "apps/server/test/config.test.ts",
+      "e2e/trial.spec.ts",
+      "packages/kernel/test/x.ts",
+      "scripts/deploy/build.mts",
+    ]);
+    expect(findOversightTouches(files.slice(0, 1), [])).toEqual([]);
+    expect(
+      findOversightTouches([{ path: "appsx/a.ts", kind: "modify" }], ["apps"]),
+    ).toEqual([]);
   });
 });
 
@@ -145,6 +192,7 @@ describe("daily plan", () => {
           taskId,
           minEvidence: 3,
           dailyProposals: 1,
+          oversightPaths: [],
         },
         trialProfile: PROFILE,
         workspaceAlias: "ws",
@@ -210,6 +258,7 @@ describe("daily plan", () => {
           taskId,
           minEvidence: 3,
           dailyProposals: 1,
+          oversightPaths: [],
         },
         trialProfile: PROFILE,
         workspaceAlias: "ws",
@@ -237,6 +286,7 @@ describe("daily plan", () => {
           taskId,
           minEvidence: 4,
           dailyProposals: 1,
+          oversightPaths: [],
         },
         trialProfile: PROFILE,
         workspaceAlias: "ws",

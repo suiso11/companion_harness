@@ -6019,8 +6019,10 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 `COMPANION_SELFLOOP_JSON` を設定したときだけ、日次で **読み取り専用の試行提案** を1件作ります。
 
 ```json
-{"enabled": true, "sessionId": "<uuid>", "taskId": "<uuid>", "minEvidence": 3, "dailyProposals": 1}
+{"enabled": true, "sessionId": "<uuid>", "taskId": "<uuid>", "minEvidence": 3, "dailyProposals": 1, "oversightPaths": ["scripts/deploy", "packages/kernel/migrations"]}
 ```
+
+`oversightPaths` は repo 相対の literal prefix のみ（絶対パス・`..`・空セグメントは起動時に拒否）。採用（adopt）時に候補がこれらの配下またはテストファイルを変更していれば、`http.trials.adopt_oversight` を warn し、自発チャットの本文に「チェック/テストを変更しています N 件。別途レビューが必要」を付ける。ブロックはしない（人間の判断を残す）。
 
 - `taskId` は**人間が作った standing task**（明示 goal の子）。ループは task を作りません
 - 対象は「staged hypothesis で、distinct な `run` evidence が `minEvidence` 件以上、まだ trial proposal が無いもの」

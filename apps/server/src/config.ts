@@ -686,6 +686,8 @@ export interface SelfLoopConfig {
   readonly taskId: string;
   readonly minEvidence: number;
   readonly dailyProposals: number;
+  /** Repo-relative prefixes whose changes need a separate human review. */
+  readonly oversightPaths: readonly string[];
 }
 
 const SELF_LOOP_KEYS = new Set([
@@ -694,6 +696,7 @@ const SELF_LOOP_KEYS = new Set([
   "taskId",
   "minEvidence",
   "dailyProposals",
+  "oversightPaths",
 ]);
 const SELF_LOOP_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -743,12 +746,34 @@ export function parseSelfLoopConfig(
   ) {
     throw configError("self loop dailyProposals must be an integer 1..10");
   }
+  const rawOversight = record.oversightPaths ?? [];
+  if (!Array.isArray(rawOversight) || rawOversight.length > 32) {
+    throw configError("self loop oversightPaths must be an array (max 32)");
+  }
+  const oversightPaths: string[] = [];
+  for (const entry of rawOversight) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > 256 ||
+      entry === "." ||
+      entry.startsWith("/") ||
+      entry.includes("\0") ||
+      entry.split("/").some((segment) => segment === ".." || segment === "")
+    ) {
+      throw configError(
+        "self loop oversightPaths must be repo-relative literal prefixes",
+      );
+    }
+    oversightPaths.push(entry);
+  }
   return Object.freeze({
     enabled: record.enabled,
     sessionId,
     taskId,
     minEvidence,
     dailyProposals,
+    oversightPaths: Object.freeze(oversightPaths),
   });
 }
 
