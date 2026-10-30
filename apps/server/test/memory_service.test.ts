@@ -1919,6 +1919,47 @@ describe("foreground preemption and shutdown", () => {
       f.close();
     }
   });
+
+  it("records numeric distill counts from the ack envelope", async () => {
+    const f = await openRepo();
+    try {
+      const cliCall: CliCall = async (_address, op) =>
+        op === "maintain.distill"
+          ? okEnvelope({
+              distill: {
+                applied: 1,
+                reviewed: 4,
+                failed: 0,
+                deferred: 1,
+                degraded: false,
+              },
+            })
+          : okEnvelope(null);
+      const service = makeService(f.repo, cliCall, { idleMs: 50 });
+      service.start();
+      const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
+      service.onRunCompleted(run.runId);
+      await waitFor(
+        () =>
+          f.repo
+            .listMemoryMaintenanceRuns({ limit: 100 })
+            .items.some((r) => r.op === "maintain.distill"),
+        5000,
+      );
+      const distill = f.repo
+        .listMemoryMaintenanceRuns({ limit: 100 })
+        .items.find((r) => r.op === "maintain.distill");
+      expect(distill?.counts).toEqual({
+        applied: 1,
+        reviewed: 4,
+        failed: 0,
+        deferred: 1,
+        degraded: 0,
+      });
+    } finally {
+      f.close();
+    }
+  });
 });
 
 describe("baseline regression contracts", () => {

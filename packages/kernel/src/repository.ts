@@ -645,7 +645,16 @@ const MEMORY_MAINTENANCE_COUNT_KEYS: Record<
     "failed",
     "degraded",
   ],
-  "maintain.associate": ["remaining", "degraded"],
+  "maintain.associate": [
+    "applied",
+    "embedded",
+    "edges_written",
+    "edges_removed",
+    "remaining",
+    "topics_written",
+    "topics_failed",
+    "degraded",
+  ],
   "maintain.consolidate": [
     "applied",
     "written",
@@ -662,8 +671,12 @@ const MEMORY_MAINTENANCE_COUNT_KEYS: Record<
     "would_retire",
     "would_reactivate",
     "degraded",
+    "learn_examples",
+    "learn_positives",
+    "learn_attempted",
+    "learn_accepted",
   ],
-  "maintain.distill": ["degraded"],
+  "maintain.distill": ["applied", "reviewed", "failed", "deferred", "degraded"],
 };
 
 export const MEMORY_MAINTENANCE_RETENTION_ROWS = 2000;
@@ -991,7 +1004,13 @@ function parseMaintenanceCounts(
   const allowed = new Set(MEMORY_MAINTENANCE_COUNT_KEYS[op]);
   const out: Record<string, number> = {};
   for (const [key, value] of Object.entries(counts)) {
-    if (!allowed.has(key)) {
+    if (
+      !allowed.has(key) &&
+      !(
+        op === "maintain.activation" &&
+        /^learn_skipped_[a-z0-9_]{1,64}$/.test(key)
+      )
+    ) {
       throw new RepositoryValidationError(
         "maintenance counts contain an unknown key",
       );

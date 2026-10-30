@@ -14,7 +14,6 @@ import {
   barPercent,
   dailyActivity,
   formatActivityTime,
-  formatRunCounts,
   type LearningProposal,
   latestLabel,
   type MemoryMaintenanceOp,
@@ -23,6 +22,7 @@ import {
   memoryKindBars,
   memoryStatusCards,
   opLabel,
+  outcomeText,
   parseActivityList,
   parseActivitySummary,
   parseLearningProposals,
@@ -30,6 +30,7 @@ import {
   proposalKindLabel,
   resultLabel,
   statusLabel,
+  statusTone,
   summaryCards,
 } from "./lib/memory_activity.js";
 
@@ -189,6 +190,9 @@ onMount(() => {
   <p class="activity-lead">
     バックグラウンドの記憶学習（統合・関連付け・重要度・トピック付与）の実行履歴です。保存されるのは件数のみです。
   </p>
+  <p class="activity-legend">
+    成功=変更が確定 / 縮退=状態を変えず継続 / 失敗=この回は反映されない（成功済みは保持） / 中断=後で再試行
+  </p>
   {#if status.length > 0}
     <p class="activity-notice" role="status">{status}</p>
   {/if}
@@ -295,15 +299,19 @@ onMount(() => {
     <div class="activity-table-wrap">
       <table id="memory-activity-runs">
         <thead>
-          <tr><th>時刻</th><th>処理</th><th>件数</th><th>結果</th></tr>
+          <tr><th>時刻</th><th>処理</th><th>結果</th><th>実際に起きたこと</th></tr>
         </thead>
         <tbody>
           {#each runs as run (run.id)}
-            <tr class:activity-failed={!run.ok}>
+            <tr>
               <td>{formatActivityTime(run.finishedAt)}</td>
               <td>{opLabel(run.op)}</td>
-              <td class="activity-counts">{formatRunCounts(run)}</td>
-              <td>{resultLabel(run)}</td>
+              <td>
+                <span class={`activity-status activity-status--${statusTone(run)}`}>
+                  {resultLabel(run)}
+                </span>
+              </td>
+              <td class="activity-outcome">{outcomeText(run)}</td>
             </tr>
           {:else}
             <tr><td colspan="4">まだ実行履歴がありません</td></tr>
@@ -356,7 +364,7 @@ onMount(() => {
   .activity-lead,
   .activity-updated,
   .activity-notice {
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
     font-size: 0.85rem;
   }
   .activity-cards {
@@ -374,7 +382,7 @@ onMount(() => {
   }
   .activity-card-label {
     font-size: 0.8rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
   .activity-card-value {
     font-size: 1.4rem;
@@ -382,7 +390,7 @@ onMount(() => {
   }
   .activity-card-detail {
     font-size: 0.7rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
   .activity-chart-wrap {
     margin: 0.75rem 0;
@@ -407,11 +415,11 @@ onMount(() => {
     width: 100%;
     min-height: 2px;
     border-radius: 0.2rem 0.2rem 0 0;
-    background: var(--accent, #7aa2f7);
+    background: var(--chart-4, var(--primary, #7aa2f7));
   }
   .activity-bar-label {
     font-size: 0.6rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
     white-space: nowrap;
   }
   .activity-latest {
@@ -419,7 +427,7 @@ onMount(() => {
     flex-wrap: wrap;
     gap: 0.35rem 0.9rem;
     font-size: 0.75rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
   .memory-stats-cards {
     display: grid;
@@ -437,7 +445,7 @@ onMount(() => {
   }
   .memory-stats-card-label {
     font-size: 0.75rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
   .memory-stats-card-value {
     font-size: 1.2rem;
@@ -457,7 +465,7 @@ onMount(() => {
     font-size: 0.8rem;
   }
   .memory-stats-label {
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
     white-space: nowrap;
   }
   .memory-stats-track {
@@ -471,7 +479,7 @@ onMount(() => {
     display: block;
     height: 100%;
     border-radius: 999px;
-    background: var(--accent, #7aa2f7);
+    background: var(--chart-4, var(--primary, #7aa2f7));
   }
   .memory-stats-value {
     text-align: right;
@@ -493,14 +501,36 @@ onMount(() => {
     vertical-align: top;
   }
   #memory-activity-runs th {
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
     font-weight: 500;
   }
   .activity-counts {
     font-variant-numeric: tabular-nums;
   }
-  .activity-failed td {
-    color: #f7768e;
+  .activity-outcome {
+    white-space: pre-line;
+  }
+  .activity-status {
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    font-size: 0.7rem;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .activity-status--ok {
+    color: var(--chart-2, #9ece6a);
+  }
+  .activity-status--degraded,
+  .activity-status--preempted {
+    color: var(--chart-3, #e0af68);
+  }
+  .activity-status--failed {
+    color: var(--destructive, #f7768e);
+  }
+  .activity-legend {
+    margin: 0 0 0.5rem;
+    font-size: 0.75rem;
+    color: var(--muted-foreground, #aaa);
   }
   .learning-proposals {
     list-style: none;
@@ -523,7 +553,7 @@ onMount(() => {
   }
   .proposal-kind,
   .proposal-time {
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
   .proposal-status {
     border-radius: 999px;
@@ -532,13 +562,13 @@ onMount(() => {
     border: 1px solid currentColor;
   }
   .proposal-status--pending {
-    color: #e0af68;
+    color: var(--chart-3, #e0af68);
   }
   .proposal-status--approved {
-    color: #9ece6a;
+    color: var(--chart-2, #9ece6a);
   }
   .proposal-status--rejected {
-    color: #f7768e;
+    color: var(--destructive, #f7768e);
   }
   .proposal-lesson {
     margin: 0.35rem 0 0.2rem;
@@ -546,6 +576,6 @@ onMount(() => {
   .proposal-meta {
     margin: 0;
     font-size: 0.75rem;
-    color: var(--muted, #aaa);
+    color: var(--muted-foreground, #aaa);
   }
 </style>
