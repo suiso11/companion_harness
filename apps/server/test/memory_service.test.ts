@@ -40,6 +40,7 @@ import {
   MEMORY_EXTRACT_MAX_ITEMS,
   MEMORY_EXTRACT_RETRY_MAX_ATTEMPTS,
   MEMORY_EXTRACT_SYSTEM_PROMPT,
+  MEMORY_RAW_CHUNK_CP,
   MEMORY_RECALL_RUN_MARKER,
   type MemoryService,
   normalizeRecalledEvidence,
@@ -47,6 +48,7 @@ import {
   parseExtractionOutcome,
   parseExtractionOutput,
   parseRecallData,
+  splitRawChunks,
   stableMemoryJobKey,
   stripOneJsonFence,
 } from "../src/memory_service.js";
@@ -1648,7 +1650,7 @@ describe("completion cultivation and cite-gated feedback", () => {
       // The raw event.append row exists for the failed-extraction run
       // (pending or already acked by the drain); no remember fan-out.
       await waitFor(
-        () => outboxRowsByKind(f, "event.append", run2.runId).length === 1,
+        () => outboxRowsByKind(f, "event.append", run2.runId).length === 2,
       );
       expect(outboxRowsByKind(f, "record.remember", run2.runId)).toHaveLength(
         0,
@@ -2248,6 +2250,85 @@ describe("parseRecallData provenance fields", () => {
   });
 });
 
+describe("raw originals: per-speaker storage", () => {
+  it("chunks long text without truncation and preserves surrogate pairs", () => {
+    const text = "あ".repeat(MEMORY_RAW_CHUNK_CP + 3) + "😀";
+    const chunks = splitRawChunks(text);
+    expect(chunks).toHaveLength(2);
+    expect(chunks.join("")).toBe(text);
+    expect(Array.from(chunks[0]!)).toHaveLength(MEMORY_RAW_CHUNK_CP);
+    expect(chunks[1]).toBe("あああ😀");
+    expect(splitRawChunks("")).toEqual([]);
+  });
+
+  it("writes user and assistant events separately and binds refs by kind", async () => {
+    const f = await openRepo();
+    try {
+      const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+      const cliCall: CliCall = async (_address, op, params) => {
+        seen.push({ op, params });
+        return okEnvelope(null);
+      };
+      const { gateway } = extractionGateway(
+        JSON.stringify({
+          memories: [
+            {
+              body: "user likes tea",
+              kind: "user_fact",
+              sensitivity: "normal",
+              evidence: "user likes tea",
+            },
+            { body: "turn digest", kind: "summary" },
+          ],
+        }),
+      );
+      const service = makeService(f.repo, cliCall, { gateway });
+      service.start();
+      const run = completeV2Run(
+        f.repo,
+        [{ text: "assistant answer", citations: [] }],
+        "user likes tea",
+      );
+      service.onRunCompleted(run.runId);
+      await waitFor(
+        () => seen.filter((call) => call.op === "event.append").length === 2,
+      );
+      const events = seen.filter((call) => call.op === "event.append");
+      expect(events).toHaveLength(2);
+      const bySpeaker = new Map(
+        events.map((call) => [call.params["speaker"], call.params]),
+      );
+      expect(bySpeaker.get("user")?.["body"]).toBe("user likes tea");
+      expect(bySpeaker.get("assistant")?.["body"]).toBe("assistant answer");
+      expect(bySpeaker.get("user")?.["chunk"]).toEqual({
+        docId: `evt-${run.runId}-user`,
+        seq: 0,
+      });
+      expect(bySpeaker.get("assistant")?.["chunk"]).toEqual({
+        docId: `evt-${run.runId}-assistant`,
+        seq: 0,
+      });
+      await service.drainOnce();
+      const remembers = seen.filter((call) => call.op === "record.remember");
+      const byBody = new Map(
+        remembers.map((call) => [
+          (call.params as { body: string }).body,
+          call.params,
+        ]),
+      );
+      expect(byBody.get("user likes tea")?.["sourceRefs"]).toEqual([
+        `evt-${run.runId}-user-c0000`,
+      ]);
+      expect(byBody.get("turn digest")?.["sourceRefs"]).toEqual([
+        `evt-${run.runId}-user-c0000`,
+        `evt-${run.runId}-assistant-c0000`,
+      ]);
+    } finally {
+      f.close();
+    }
+  });
+});
+
 describe("privacy metadata on memory writes (F-I01-05)", () => {
   it("sends fixed privacy on event.append and AI sensitivity on remember", async () => {
     const f = await openRepo();
@@ -2274,9 +2355,17 @@ describe("privacy metadata on memory writes (F-I01-05)", () => {
       const run = completeV2Run(f.repo, [{ text: "answered", citations: [] }]);
       service.onRunCompleted(run.runId);
       await waitFor(() => seen.some((call) => call.op === "event.append"));
-      const appended = seen.find((call) => call.op === "event.append");
-      expect(appended?.params).toMatchObject({
-        privacy: { sensitivity: "normal", origin: "conversation" },
+      const appended = seen.filter((call) => call.op === "event.append");
+      // One raw event per speaker, both fail-closed sensitive.
+      expect(appended).toHaveLength(2);
+      const bySpeaker = new Map(
+        appended.map((call) => [call.params["speaker"], call.params]),
+      );
+      expect(bySpeaker.get("user")).toMatchObject({
+        privacy: { sensitivity: "sensitive", origin: "conversation" },
+      });
+      expect(bySpeaker.get("assistant")).toMatchObject({
+        privacy: { sensitivity: "sensitive", origin: "conversation" },
       });
       await service.drainOnce();
       const remembered = seen.filter((call) => call.op === "record.remember");
@@ -2456,7 +2545,7 @@ describe("raw-first append and persistent extraction retries", () => {
       service.onRunCompleted(run.runId);
       // RAW-FIRST: the append enqueues BEFORE the extraction resolves.
       await waitFor(
-        () => outboxRowsByKind(f, "event.append", run.runId).length === 1,
+        () => outboxRowsByKind(f, "event.append", run.runId).length === 2,
       );
       await waitFor(() => startedCount() === 1);
       // Foreground preemption aborts the in-flight extraction...
@@ -2469,7 +2558,7 @@ describe("raw-first append and persistent extraction retries", () => {
         ),
       );
       // ...and the raw event.append row is still durable (never skipped):
-      expect(outboxRowsByKind(f, "event.append", run.runId)).toHaveLength(1);
+      expect(outboxRowsByKind(f, "event.append", run.runId)).toHaveLength(2);
       // No remember fan-out from the aborted extraction (sourceRefs stay
       // pending until a later bounded retry lands items):
       expect(outboxRowsByKind(f, "record.remember", run.runId)).toHaveLength(0);

@@ -135,7 +135,24 @@ export const MEMORY_TOPIC_BACKFILL_LIMIT = 8;
  */
 export const MEMORY_ACTIVATION_LIMIT = 20;
 export const MEMORY_EVENT_BODY_MAX_CP = 4000;
+/**
+ * Code-point chunk size for raw originals. Remind's default rawBodyMaxCp is
+ * 8000; 7000 leaves JSON/protocol headroom while avoiding ANY silent
+ * truncation of a user turn or assistant answer. Longer text is stored as
+ * ordered chunks (docId + seq), never sliced away.
+ */
+export const MEMORY_RAW_CHUNK_CP = 7000;
 export const MEMORY_RECALL_QUERY_MAX_CP = 500;
+/** Split a raw original into ordered non-empty code-point chunks. */
+export function splitRawChunks(text: string): string[] {
+  const chars = Array.from(text);
+  const chunks: string[] = [];
+  for (let i = 0; i < chars.length; i += MEMORY_RAW_CHUNK_CP) {
+    chunks.push(chars.slice(i, i + MEMORY_RAW_CHUNK_CP).join(""));
+  }
+  return chunks;
+}
+
 /** Fixed provenance source stamped on Companion-written events/records. */
 export const MEMORY_PROVENANCE_SOURCE = "companion:conversation";
 /** Fixed audit runId marker for pre-answer recall calls (never a real run). */
@@ -143,8 +160,8 @@ export const MEMORY_RECALL_RUN_MARKER = "companion-recall";
 
 /** Fixed privacy origin stamped on Companion-written events/records. */
 export const MEMORY_PRIVACY_ORIGIN_CONVERSATION = "conversation";
-/** Fixed privacy sensitivity for `event.append` (F-I01-05 P5). */
-export const MEMORY_PRIVACY_SENSITIVITY_NORMAL = "normal" as const;
+/** Raw originals may contain sensitive content; fail closed by default. */
+export const MEMORY_PRIVACY_SENSITIVITY_SENSITIVE = "sensitive" as const;
 export type MemoryPrivacySensitivity = "normal" | "sensitive";
 
 /**
@@ -1520,6 +1537,8 @@ export function createMemoryService(
       status?: number | string;
       downgraded_by_coverage?: number;
       downgraded_by_assistant_terms?: number;
+      speaker?: string;
+      chunks?: number;
     },
   ): void => {
     try {
@@ -1948,15 +1967,23 @@ export function createMemoryService(
     request: Record<string, unknown>,
     chain: Record<string, unknown>,
   ): void {
-    const { eventId, sessionId, runId, turnId, provenance, memories } =
-      chain as {
-        eventId?: unknown;
-        sessionId?: unknown;
-        runId?: unknown;
-        turnId?: unknown;
-        provenance?: unknown;
-        memories?: unknown;
-      };
+    const {
+      eventId,
+      sourceEventIds,
+      sessionId,
+      runId,
+      turnId,
+      provenance,
+      memories,
+    } = chain as {
+      eventId?: unknown;
+      sourceEventIds?: unknown;
+      sessionId?: unknown;
+      runId?: unknown;
+      turnId?: unknown;
+      provenance?: unknown;
+      memories?: unknown;
+    };
     if (
       typeof eventId !== "string" ||
       typeof sessionId !== "string" ||
@@ -1977,6 +2004,20 @@ export function createMemoryService(
       typeof queuedScope === "string" && queuedScope.length >= 1
         ? queuedScope
         : scope;
+    // Per-speaker provenance: user_fact points at the USER original; summary
+    // and model_inference may reference both originals. Legacy/correction
+    // chains without sourceEventIds keep the single eventId fallback.
+    const explicit = isRecord(sourceEventIds) ? sourceEventIds : null;
+    const explicitUser = explicit?.["user"];
+    const explicitAssistant = explicit?.["assistant"];
+    const userEvent =
+      typeof explicitUser === "string" && explicitUser.length > 0
+        ? explicitUser
+        : eventId;
+    const assistantEvent =
+      typeof explicitAssistant === "string" && explicitAssistant.length > 0
+        ? explicitAssistant
+        : null;
     const at = now();
     let index = 0;
     for (const memory of memories) {
@@ -2022,6 +2063,12 @@ export function createMemoryService(
         sendEvidence && kind === "user_fact"
           ? normalizeStoredEvidence(evidence)
           : null;
+      const sourceRefs =
+        kind === "user_fact"
+          ? [userEvent]
+          : assistantEvent === null
+            ? [userEvent]
+            : [...new Set([userEvent, assistantEvent])];
       try {
         repo.enqueueMemoryJob(
           "record.remember",
@@ -2042,7 +2089,7 @@ export function createMemoryService(
               scope: followScope,
               tags: rememberTags,
               links: [],
-              sourceRefs: [eventId],
+              sourceRefs,
               runId,
               ...(rememberEvidence !== null
                 ? { evidence: rememberEvidence }
@@ -3525,59 +3572,83 @@ export function createMemoryService(
       run.finishedAt !== null && Number.isFinite(run.finishedAt)
         ? new Date(run.finishedAt).toISOString()
         : new Date(now()).toISOString();
-    const eventId = `evt-${run.id}`;
-    const eventBody = sliceCodePoints(
-      `User: ${turnText}\nAssistant: ${answerText}`,
-      MEMORY_EVENT_BODY_MAX_CP,
-    );
     const provenance = {
       source: MEMORY_PROVENANCE_SOURCE,
       observedAt,
     };
-    const enqueueRawEvent = (): boolean => {
-      try {
-        repo.enqueueMemoryJob(
-          "event.append",
-          run.sessionId,
-          run.id,
-          scope,
-          stableMemoryJobKey("event", run.id),
-          JSON.stringify({
-            op: "event.append",
-            params: {
-              eventId,
-              sessionId: run.sessionId,
-              turnId: run.turnId,
-              body: eventBody,
-              provenance,
-              privacy: {
-                sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
-                origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+    // Raw originals are stored PER SPEAKER, never concatenated. Each text is
+    // chunked instead of truncated; the first chunk id is the provenance ref
+    // for extracted memories (the full text is reachable via event.range).
+    const userDocId = `evt-${run.id}-user`;
+    const assistantDocId = `evt-${run.id}-assistant`;
+    const userChunks = splitRawChunks(turnText);
+    const assistantChunks = splitRawChunks(answerText);
+    // Zero-pad the chunk id so event.range's (observedAt, eventId) ordering
+    // stays numeric beyond c9.
+    const chunkEventId = (docId: string, seq: number): string =>
+      `${docId}-c${String(seq).padStart(4, "0")}`;
+    const userEventId = userChunks.length > 0 ? chunkEventId(userDocId, 0) : "";
+    const assistantEventId =
+      assistantChunks.length > 0 ? chunkEventId(assistantDocId, 0) : "";
+    const enqueueRawEvent = (
+      speaker: "user" | "assistant",
+      docId: string,
+      chunks: readonly string[],
+    ): boolean => {
+      let ok = true;
+      for (let seq = 0; seq < chunks.length; seq += 1) {
+        const eventId = chunkEventId(docId, seq);
+        try {
+          repo.enqueueMemoryJob(
+            "event.append",
+            run.sessionId,
+            run.id,
+            scope,
+            stableMemoryJobKey("event", run.id, speaker, seq),
+            JSON.stringify({
+              op: "event.append",
+              params: {
+                eventId,
+                sessionId: run.sessionId,
+                turnId: run.turnId,
+                body: chunks[seq],
+                provenance,
+                privacy: {
+                  sensitivity: MEMORY_PRIVACY_SENSITIVITY_SENSITIVE,
+                  origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
+                },
+                scope,
+                runId: run.id,
+                speaker,
+                chunk: { docId, seq },
               },
-              scope,
-              runId: run.id,
-            },
-            // No remember fan-out rides on the raw event's chain:
-            // extracted memories enqueue their own remember jobs below.
-            chain: {
-              eventId,
-              sessionId: run.sessionId,
-              runId: run.id,
-              turnId: run.turnId,
-              provenance,
-              memories: [],
-            },
-          }),
-          { turnId: run.turnId, now: now() },
-        );
-      } catch {
-        return false;
+              // No remember fan-out rides on the raw event's chain:
+              // extracted memories enqueue their own remember jobs below.
+              chain: {
+                eventId,
+                sessionId: run.sessionId,
+                runId: run.id,
+                turnId: run.turnId,
+                provenance,
+                memories: [],
+              },
+            }),
+            { turnId: run.turnId, now: now() },
+          );
+        } catch {
+          ok = false;
+          break;
+        }
       }
-      log("info", "memory.event_queued", {
-        runId: run.id,
-        bytes: eventBody.length,
-      });
-      return true;
+      if (ok && chunks.length > 0) {
+        log("info", "memory.event_queued", {
+          runId: run.id,
+          speaker,
+          chunks: chunks.length,
+          bytes: chunks.reduce((n, c) => n + c.length, 0),
+        });
+      }
+      return ok;
     };
     // STOP/shutdown gate (authoritative, checked BEFORE any enqueue): a
     // CLOSED gate admits nothing new — no extraction AND no raw
@@ -3590,7 +3661,10 @@ export function createMemoryService(
     // RAW-FIRST enqueue: the committed turn's event.append lands here, in
     // every path below (aborted, invalid, busy, and success alike). The
     // remember fan-out references this event via `sourceRefs`.
-    if (!enqueueRawEvent()) {
+    if (
+      !enqueueRawEvent("user", userDocId, userChunks) ||
+      !enqueueRawEvent("assistant", assistantDocId, assistantChunks)
+    ) {
       return;
     }
     // Structured extraction (gateway-dependent, conservative noop).
@@ -3725,7 +3799,11 @@ export function createMemoryService(
     enqueueRememberChainMemories(
       { params: { scope } },
       {
-        eventId,
+        eventId: userEventId || assistantEventId,
+        sourceEventIds: {
+          user: userEventId,
+          assistant: assistantEventId,
+        },
         sessionId: run.sessionId,
         runId: run.id,
         turnId: run.turnId,
@@ -5725,11 +5803,12 @@ export function createMemoryService(
               body: eventBody,
               provenance,
               privacy: {
-                sensitivity: MEMORY_PRIVACY_SENSITIVITY_NORMAL,
+                sensitivity: MEMORY_PRIVACY_SENSITIVITY_SENSITIVE,
                 origin: MEMORY_PRIVACY_ORIGIN_CONVERSATION,
               },
               scope,
               runId: input.runId,
+              speaker: "user",
             },
             chain: {
               correct: {

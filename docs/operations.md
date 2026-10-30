@@ -6056,3 +6056,29 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - This kind deliberately has NO `user_text` semantics: no Run/retry, no
   autonomy source turn, no memory extraction, no external send. It is in-app
   only.
+
+## Raw conversation originals: per-speaker, chunked (2026-10-30)
+
+- Memory write is still RAW-FIRST, but a completed turn now writes TWO raw
+  events instead of one combined body:
+  `evt-<runId>-user-cNNNN` (`speaker: "user"`) and
+  `evt-<runId>-assistant-cNNNN` (`speaker: "assistant"`). The old
+  `User: …\nAssistant: …` concatenation and the 4000-cp slice are gone.
+- Each side is split at `MEMORY_RAW_CHUNK_CP` (7000) code points and stored
+  as ordered chunks (`chunk: { docId, seq }`), so a long turn/answer is never
+  silently truncated. The zero-padded chunk id keeps `event.range` ordering
+  numeric past `c9`.
+- Raw events are written with `privacy.sensitivity = "sensitive"` (fail
+  closed); extraction sensitivity still applies to `record.remember`.
+- `sourceRefs` are per kind: `user_fact` references the USER first chunk;
+  `summary` / `model_inference` reference both first chunks. Evidence remains
+  the user's verbatim quote.
+- Correction raw sources are stored with `speaker: "user"` and sensitive
+  privacy.
+- Legacy combined rows stay as-is (`speaker = NULL`); they are never split or
+  guessed. Original text is readable through remind `event.get` /
+  `event.range` / `record.sources` (speaker included); the memory-detail UI
+  view is a follow-up.
+- Requires remind v14 (`raw_events.speaker`). Merge/deploy remind first; an
+  older remind rejects the unknown `speaker` param (jobs retry rather than
+  silently falling back to a mixed body).
