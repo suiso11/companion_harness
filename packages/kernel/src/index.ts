@@ -548,6 +548,29 @@ export {
   LearningProposeToolOutputSchema,
 } from "./learning_tools.js";
 export type {
+  CalibrationPair,
+  DprimeResult,
+  LoopClassCoverage,
+  LoopCoverage,
+  LoopRunFacts,
+  LoopRunLabel,
+  LoopTaskClass,
+} from "./loop_metrics.js";
+export {
+  CONFIDENCE_THRESHOLD,
+  classifyTaskClass,
+  computeCoverage,
+  computeDprime,
+  DPRIME_MIN_PAIRS,
+  DPRIME_MIN_PER_CELL,
+  inverseNormal,
+  isQuarantinedRun,
+  LOOP_QUARANTINE_MODULUS,
+  LOOP_TASK_CLASSES,
+  LOOP_TOOL_FAILURE_OUTCOMES,
+  labelRun,
+} from "./loop_metrics.js";
+export type {
   CreateM1ToolRegistrationsOptions,
   MarkdownConnectorBinding,
   MarkdownConnectorPort,

@@ -337,6 +337,7 @@ import {
   stageHypothesisFromModel as learningStageFromModel,
   transitionHypothesis as learningTransition,
 } from "./learning.js";
+import type { CalibrationPair, LoopRunFacts } from "./loop_metrics.js";
 import {
   ackNotification as notifyAck,
   buildDeadlineSchedule as notifyBuildSchedule,
@@ -6665,6 +6666,65 @@ export function createKernelRepository(
     );
   }
 
+  /**
+   * Self-improvement loop measurement inputs (read-only). Labels are built
+   * from host-observed rows only; no model judgment is read here.
+   */
+  function readLoopRunFacts(limit = 2000): LoopRunFacts[] {
+    const capped = Math.max(1, Math.min(5000, Math.trunc(limit)));
+    const rows = db
+      .prepare(
+        `SELECT r.id AS runId, r.session_id AS sessionId, r.status,
+           (SELECT COUNT(*) FROM model_calls m
+              WHERE m.run_id = r.id AND m.error_code IS NOT NULL) AS modelErrors,
+           (SELECT COUNT(*) FROM tool_calls t
+              WHERE t.run_id = r.id
+                AND t.actual_outcome IN ('failed','invalid','denied','timed_out','unknown')) AS toolErrors,
+           (SELECT GROUP_CONCAT(DISTINCT t2.tool) FROM tool_calls t2
+              WHERE t2.run_id = r.id) AS tools
+         FROM runs r
+         WHERE r.status IN ('completed','failed','cancelled')
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT ?`,
+      )
+      .all(capped) as Array<{
+      runId: string;
+      sessionId: string;
+      status: string;
+      modelErrors: number;
+      toolErrors: number;
+      tools: string | null;
+    }>;
+    return rows.map((row) => ({
+      runId: row.runId,
+      sessionId: row.sessionId,
+      status: row.status,
+      modelErrors: row.modelErrors,
+      toolErrors: row.toolErrors,
+      tools:
+        row.tools === null || row.tools.length === 0
+          ? []
+          : row.tools.split(",").sort(),
+    }));
+  }
+
+  /** (stated confidence, host outcome) pairs for trial calibration. */
+  function readCalibrationPairs(): CalibrationPair[] {
+    const rows = db
+      .prepare(
+        `SELECT p.predicted_p AS predictedP, o.authorized AS authorized
+         FROM trial_proposals p
+         JOIN trial_grants g ON g.proposal_id = p.id
+         JOIN trial_worker_outcomes o ON o.execution_id = g.execution_id
+         WHERE p.predicted_p IS NOT NULL`,
+      )
+      .all() as Array<{ predictedP: number; authorized: number }>;
+    return rows.map((row) => ({
+      confident: row.predictedP >= 0.7,
+      ok: row.authorized === 1,
+    }));
+  }
+
   function getAutonomyControlState(): AutonomyControlView {
     return parseOrValidation(
       () => AutonomyControlViewSchema.parse(autonomyGetControl(db)),
@@ -8670,6 +8730,8 @@ export function createKernelRepository(
     cancelAutonomyTask,
     getAutonomyControlState,
     setAutonomyControlState,
+    readLoopRunFacts,
+    readCalibrationPairs,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
     stageConversationProposalFromModel,
