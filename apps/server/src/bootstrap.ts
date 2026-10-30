@@ -169,6 +169,10 @@ import {
   wrapRepoWithNotifications,
 } from "./notification_service.js";
 import {
+  createReflectService,
+  type ReflectService,
+} from "./reflect_service.js";
+import {
   loadRemotePasswordRecordSync,
   verifyPasswordAgainstRecord,
 } from "./remote_password.js";
@@ -981,6 +985,7 @@ export async function startServer(
   let memory: MemoryService | null = null;
   /** Conversation-learning service (null = disabled; set inside try). */
   let learning: LearningService | null = null;
+  let reflect: ReflectService | null = null;
   /**
    * Opt-in AGORA store. Independently config-enabled (never gated by Web or
    * memory) and always closed on shutdown/failure. No HTTP route is added.
@@ -1644,6 +1649,23 @@ export async function startServer(
      * wake/abort can never unwind a committed user command. Composes OUTSIDE
      * the memory wrapper so both observe every call.
      */
+    /** Reflect observer wrapper: a failed run wakes the loop's observer. */
+    const wrapRepoWithReflect = (
+      inner: KernelRepository,
+      service: ReflectService,
+    ): KernelRepository => ({
+      ...inner,
+      failRun: (...args) => {
+        const out = inner.failRun(...args);
+        try {
+          service.onRunSettled(args[0]);
+        } catch {
+          // Best effort: the failure already committed.
+        }
+        return out;
+      },
+    });
+
     const wrapRepoWithShadowPriority = (
       inner: KernelRepository,
       service: ShadowService,
@@ -2283,6 +2305,20 @@ export async function startServer(
       repo = wrapRepoWithLearningIntake(repo, learning);
       logger.info("server.learning_ready", { status: 1 });
     }
+
+    // Self-improvement loop observer (P2): independent of the learning
+    // service. One bounded call per failed run, gated by the shared
+    // background slot, the global pause and `learning_frozen`.
+    reflect = createReflectService({
+      repo,
+      gateway: modelGateway,
+      model: modelName,
+      logger,
+      now,
+      background: backgroundResource,
+    });
+    reflect.start();
+    repo = wrapRepoWithReflect(repo, reflect);
 
     // Opt-in AGORA composition (COMPANION_AGORA_JSON). The store exists
     // whenever the config is present, independent of Web/Markdown/memory.
@@ -3425,6 +3461,9 @@ export async function startServer(
         if (learning !== null) {
           await learning.stop();
         }
+        if (reflect !== null) {
+          await reflect.stop();
+        }
       } catch {
         // Best effort: the listen error carries the startup failure.
       }
@@ -3567,6 +3606,13 @@ export async function startServer(
         if (learning !== null) {
           try {
             await learning.stop();
+          } catch {
+            // Best effort: the engine drain below still runs.
+          }
+        }
+        if (reflect !== null) {
+          try {
+            await reflect.stop();
           } catch {
             // Best effort: the engine drain below still runs.
           }
@@ -3863,6 +3909,13 @@ export async function startServer(
     if (learning !== null) {
       try {
         await learning.stop();
+      } catch {
+        // Best effort: the original startup error carries the failure.
+      }
+    }
+    if (reflect !== null) {
+      try {
+        await reflect.stop();
       } catch {
         // Best effort: the original startup error carries the failure.
       }

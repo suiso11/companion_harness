@@ -6708,6 +6708,16 @@ export function createKernelRepository(
     }));
   }
 
+  /** Loop evidence rows created at or after `since` (daily budget counter). */
+  function countLoopEvidenceSince(since: number): number {
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM learning_evidence WHERE source_kind IN ('run','trial_outcome') AND created_at >= ?",
+      )
+      .get(since) as { n: number };
+    return row.n;
+  }
+
   /** (stated confidence, host outcome) pairs for trial calibration. */
   function readCalibrationPairs(): CalibrationPair[] {
     const rows = db
@@ -7549,6 +7559,9 @@ export function createKernelRepository(
       db,
       {
         paused: parsed.paused,
+        ...(parsed.learningFrozen !== undefined
+          ? { learningFrozen: parsed.learningFrozen }
+          : {}),
         expectedVersion: parsed.expectedVersion,
         ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
       },
@@ -8732,6 +8745,7 @@ export function createKernelRepository(
     setAutonomyControlState,
     readLoopRunFacts,
     readCalibrationPairs,
+    countLoopEvidenceSince,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
     stageConversationProposalFromModel,

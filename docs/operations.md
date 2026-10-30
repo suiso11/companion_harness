@@ -6000,6 +6000,20 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   `stateRoot`). They are NOT exposed through the trial API yet, so inspect that
   SQLite file directly for outcomes.
 
+### 自己改善ループの観測（P2、既定で有効）
+
+失敗した run のたびに、バックグラウンドで**1回だけ**モデルを呼び、行動の仮説を staged で記録します。実行も承認も memory 書き込みもしません。
+
+- トリガ: `failRun` が commit した直後。成功 run では動かない
+- 1 run につき 1 回、pending は最大 8、1 日の上限は 20（`learning_evidence` の `run`/`trial_outcome` 行で数える）
+- 共有 background slot を取れなければ保留（ゲートの release で再開）。foreground が優先
+- `paused` または `learning_frozen` の間は何もしない
+- 出力は厳格 JSON `{"statement","quote"}`。**quote はユーザーの発話に逐語で含まれること**（含まれなければ破棄）
+- 記録: `learning_hypotheses`（origin=model, staged=1）＋ `learning_evidence`（`source_kind='run'`, `source_id=<runId>`, polarity=supports）
+- 失敗は固定コード（`reflect.skipped` / `reflect.failed`）でログし、run の失敗処理には影響しない
+
+`learning_frozen` は `POST /api/autonomy/control` の body に `"learningFrozen": true|false` を足して切り替えます（省略時は現状維持）。グローバル pause の resume では解除されません。
+
 ### 自己改善ループの計測レポート（読み取り専用）
 
 `pnpm --filter @companion/server loop report [--limit N]` は、ループが使う**決定論的ラベル**の被覆を表示します。書き込みは一切しません。

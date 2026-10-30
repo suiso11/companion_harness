@@ -3764,6 +3764,8 @@ export function rejectConversationProposal(
 
 export interface AutonomyControlView {
   paused: boolean;
+  /** Loop-only freeze: separate from pause, cleared by a human only. */
+  learningFrozen: boolean;
   version: number;
   reason: string | null;
   updatedAt: number;
@@ -3771,17 +3773,19 @@ export interface AutonomyControlView {
 
 function readControlRow(db: Database.Database): {
   paused: number;
+  learning_frozen: number;
   version: number;
   reason: string | null;
   updated_at: number;
 } {
   const row = db
     .prepare(
-      "SELECT paused, version, reason, updated_at FROM autonomy_control WHERE id = 'global'",
+      "SELECT paused, learning_frozen, version, reason, updated_at FROM autonomy_control WHERE id = 'global'",
     )
     .get() as
     | {
         paused: number;
+        learning_frozen: number;
         version: number;
         reason: string | null;
         updated_at: number;
@@ -3795,11 +3799,12 @@ function readControlRow(db: Database.Database): {
     ).run();
     const healed = db
       .prepare(
-        "SELECT paused, version, reason, updated_at FROM autonomy_control WHERE id = 'global'",
+        "SELECT paused, learning_frozen, version, reason, updated_at FROM autonomy_control WHERE id = 'global'",
       )
       .get() as
       | {
           paused: number;
+          learning_frozen: number;
           version: number;
           reason: string | null;
           updated_at: number;
@@ -3819,6 +3824,7 @@ export function getAutonomyControl(db: Database.Database): AutonomyControlView {
     () =>
       AutonomyControlViewSchema.parse({
         paused: row.paused === 1,
+        learningFrozen: row.learning_frozen === 1,
         version: row.version,
         reason: row.reason,
         updatedAt: row.updated_at,
@@ -3836,8 +3842,15 @@ export function isAutonomousWorkAllowed(db: Database.Database): boolean {
   return !getAutonomyControl(db).paused;
 }
 
+/** True when the self-improvement loop must not write or promote anything. */
+export function isLearningFrozen(db: Database.Database): boolean {
+  return getAutonomyControl(db).learningFrozen;
+}
+
 export interface SetControlInput {
   paused: boolean;
+  /** Omitted = preserve the current freeze. Only a human clears it. */
+  learningFrozen?: boolean;
   expectedVersion: number;
   reason?: string;
 }
@@ -3855,6 +3868,7 @@ export function setAutonomyControl(
     IDEMPOTENCY_OPERATIONS.setAutonomyControl.schemaVersion,
     {
       paused: input.paused,
+      learningFrozen: input.learningFrozen ?? null,
       expectedVersion: input.expectedVersion,
       reason: input.reason ?? null,
     },
@@ -3878,12 +3892,17 @@ export function setAutonomyControl(
         row.version,
       );
     }
+    const learningFrozen =
+      input.learningFrozen === undefined
+        ? row.learning_frozen === 1
+        : input.learningFrozen;
     const moved = db
       .prepare(
-        "UPDATE autonomy_control SET paused = ?, version = ?, reason = ?, updated_at = ? WHERE id = 'global' AND version = ?",
+        "UPDATE autonomy_control SET paused = ?, learning_frozen = ?, version = ?, reason = ?, updated_at = ? WHERE id = 'global' AND version = ?",
       )
       .run(
         input.paused ? 1 : 0,
+        learningFrozen ? 1 : 0,
         row.version + 1,
         input.reason ?? null,
         now,
