@@ -118,12 +118,114 @@ export function errorLabel(code: string | null | undefined): string {
 /** Timeline result cell: success / degraded / fixed failure reason. */
 export function resultLabel(run: ActivityRun): string {
   if (!run.ok) {
+    if (run.errorCode === "preempted") return "中断";
     return `失敗（${errorLabel(run.errorCode)}）`;
   }
   if ((run.counts.degraded ?? 0) > 0) {
     return "縮退";
   }
   return "成功";
+}
+
+export type StatusTone = "ok" | "degraded" | "failed" | "preempted";
+
+export function statusTone(run: ActivityRun): StatusTone {
+  if (!run.ok) return run.errorCode === "preempted" ? "preempted" : "failed";
+  return (run.counts.degraded ?? 0) > 0 ? "degraded" : "ok";
+}
+
+const LEARN_SKIP_LABELS: Record<string, string> = {
+  learn_skipped_disabled: "学習が無効",
+  learn_skipped_interval: "前回から間隔不足",
+  learn_skipped_no_new_examples: "新しい例が不足",
+  learn_skipped_min_examples: "例が不足",
+  learn_skipped_min_positives: "正例が不足",
+  learn_skipped_deadline: "時間切れ",
+  learn_skipped_error: "エラー",
+};
+
+function learnLine(c: Readonly<Record<string, number>>): string {
+  if (!Object.keys(c).some((k) => k.startsWith("learn_"))) return "";
+  const examples = c.learn_examples ?? 0;
+  const positives = c.learn_positives ?? 0;
+  if ((c.learn_attempted ?? 0) === 0) {
+    const skipKey = Object.keys(c).find(
+      (k) => k.startsWith("learn_skipped_") && (c[k] ?? 0) > 0,
+    );
+    const reason =
+      skipKey === undefined
+        ? ""
+        : `、理由: ${LEARN_SKIP_LABELS[skipKey] ?? skipKey.replace("learn_skipped_", "")}`;
+    return `重み学習: 未試行（正例 ${positives} / 例 ${examples}${reason}）`;
+  }
+  return (c.learn_accepted ?? 0) > 0
+    ? "重み学習: 受理"
+    : "重み学習: 棄却（holdout 改善なし）";
+}
+
+/** Plain-Japanese "what actually happened" for the timeline (counts only). */
+export function outcomeText(run: ActivityRun): string {
+  const tone = statusTone(run);
+  if (tone === "failed") {
+    return `理由: ${errorLabel(run.errorCode)}。この回の変更は反映されていない可能性があります（成功済みは保持）`;
+  }
+  if (tone === "preempted") return "優先処理のため見送り、後で再試行";
+  if (tone === "degraded") {
+    return "モデル/索引が使えず、状態を変えずに継続";
+  }
+  const c = run.counts;
+  const n = (k: string) => c[k] ?? 0;
+  // Leading count always shown; the rest are omitted when zero.
+  const join = (head: string, items: readonly [string, number | string][]) => {
+    const t = items
+      .filter(([, v]) => v !== 0 && v !== "")
+      .map(([l, v]) => `${l} ${v}`)
+      .join("、");
+    return t.length > 0 ? `${head}、${t}` : head;
+  };
+  switch (run.op) {
+    case "maintain.consolidate":
+      return join(`統合を ${c.applied ?? n("written")} 件書き込み`, [
+        ["変更なし", n("unchanged")],
+        ["根拠不足", n("no_grounded")],
+        ["保留", n("deferred")],
+      ]);
+    case "maintain.distill":
+      return join(`蒸留を ${n("applied")} 件適用`, [
+        ["確認", n("reviewed")],
+        ["失敗", n("failed")],
+        ["保留", n("deferred")],
+      ]);
+    case "maintain.associate": {
+      const e = [
+        n("edges_written") > 0 ? `+${n("edges_written")}` : "",
+        n("edges_removed") > 0 ? `−${n("edges_removed")}` : "",
+      ]
+        .filter((s) => s.length > 0)
+        .join("/");
+      return join(`関連付けを ${n("applied")} 件更新`, [
+        ["埋め込み", n("embedded")],
+        ["辺", e],
+        ["トピック", n("topics_written")],
+        ["残り", n("remaining")],
+      ]);
+    }
+    case "maintain.activation": {
+      const base = join(`${n("scored")} 件を採点`, [
+        ["退役", n("retired")],
+        ["再活性化", n("reactivated")],
+        ["退役候補", n("would_retire")],
+        ["再活性候補", n("would_reactivate")],
+      ]);
+      const learn = learnLine(c);
+      return learn.length > 0 ? `${base}\n${learn}` : base;
+    }
+    case "topic.backfill":
+      return join(`${n("assigned")} 件にトピックを付与`, [
+        ["残り", n("remaining")],
+        ["失敗", n("failed")],
+      ]);
+  }
 }
 
 const COUNT_LABELS: Record<string, string> = {

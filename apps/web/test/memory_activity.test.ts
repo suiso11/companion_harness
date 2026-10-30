@@ -11,11 +11,13 @@ import {
   memoryImportanceBars,
   memoryKindBars,
   memoryStatusCards,
+  outcomeText,
   parseActivityList,
   parseActivitySummary,
   parseLearningProposals,
   parseMemoryStats,
   resultLabel,
+  statusTone,
   summaryCards,
 } from "../src/lib/memory_activity.js";
 
@@ -158,6 +160,117 @@ describe("parseActivitySummary + summaryCards", () => {
     expect(formatRunCounts({ ...run, ok: true, counts: { degraded: 1 } })).toBe(
       "縮退 1",
     );
+  });
+});
+
+describe("statusTone + outcomeText", () => {
+  const base = {
+    id: "r",
+    op: "maintain.consolidate" as const,
+    scope: "default",
+    startedAt: T0,
+    finishedAt: T0,
+    ok: true,
+    errorCode: null,
+    counts: {} as Record<string, number>,
+  };
+
+  it("consolidate omits zero counts", () => {
+    const run = {
+      ...base,
+      counts: { applied: 3, unchanged: 2, no_grounded: 1, deferred: 0 },
+    };
+    expect(statusTone(run)).toBe("ok");
+    expect(outcomeText(run)).toBe(
+      "統合を 3 件書き込み、変更なし 2、根拠不足 1",
+    );
+  });
+
+  it("distill / associate / topic.backfill", () => {
+    expect(
+      outcomeText({
+        ...base,
+        op: "maintain.distill",
+        counts: { applied: 2, reviewed: 5, failed: 1, deferred: 3 },
+      }),
+    ).toBe("蒸留を 2 件適用、確認 5、失敗 1、保留 3");
+    expect(
+      outcomeText({
+        ...base,
+        op: "maintain.associate",
+        counts: {
+          applied: 4,
+          embedded: 6,
+          edges_written: 9,
+          edges_removed: 2,
+          remaining: 7,
+          topics_written: 1,
+        },
+      }),
+    ).toBe("関連付けを 4 件更新、埋め込み 6、辺 +9/−2、トピック 1、残り 7");
+    expect(
+      outcomeText({
+        ...base,
+        op: "topic.backfill",
+        counts: { assigned: 5, remaining: 2, failed: 0 },
+      }),
+    ).toBe("5 件にトピックを付与、残り 2");
+  });
+
+  it("activation includes the weight-learning line", () => {
+    const act = {
+      ...base,
+      op: "maintain.activation" as const,
+      counts: { scored: 10, retired: 1, would_reactivate: 2 },
+    };
+    expect(outcomeText(act)).toBe("10 件を採点、退役 1、再活性候補 2");
+    expect(
+      outcomeText({
+        ...act,
+        counts: { scored: 10, learn_examples: 30, learn_positives: 29 },
+      }),
+    ).toBe("10 件を採点\n重み学習: 未試行（正例 29 / 例 30）");
+    expect(
+      outcomeText({
+        ...act,
+        counts: {
+          scored: 10,
+          learn_examples: 30,
+          learn_positives: 29,
+          learn_skipped_min_positives: 1,
+        },
+      }),
+    ).toBe(
+      "10 件を採点\n重み学習: 未試行（正例 29 / 例 30、理由: 正例が不足）",
+    );
+    expect(
+      outcomeText({
+        ...act,
+        counts: { scored: 10, learn_attempted: 1, learn_accepted: 1 },
+      }),
+    ).toBe("10 件を採点\n重み学習: 受理");
+    expect(
+      outcomeText({
+        ...act,
+        counts: { scored: 10, learn_attempted: 1, learn_accepted: 0 },
+      }),
+    ).toBe("10 件を採点\n重み学習: 棄却（holdout 改善なし）");
+  });
+
+  it("failure, preempted and degraded", () => {
+    const failed = { ...base, ok: false, errorCode: "timeout" };
+    expect(statusTone(failed)).toBe("failed");
+    expect(outcomeText(failed)).toBe(
+      "理由: タイムアウト。この回の変更は反映されていない可能性があります（成功済みは保持）",
+    );
+    const pre = { ...base, ok: false, errorCode: "preempted" };
+    expect(statusTone(pre)).toBe("preempted");
+    expect(resultLabel(pre)).toBe("中断");
+    expect(outcomeText(pre)).toBe("優先処理のため見送り、後で再試行");
+    const deg = { ...base, counts: { degraded: 1 } };
+    expect(statusTone(deg)).toBe("degraded");
+    expect(resultLabel(deg)).toBe("縮退");
+    expect(outcomeText(deg)).toBe("モデル/索引が使えず、状態を変えずに継続");
   });
 });
 

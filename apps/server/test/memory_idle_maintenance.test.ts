@@ -445,7 +445,18 @@ describe("background activity rows", () => {
     try {
       const cliCall: CliCall = async (_address, op) => {
         if (op === "maintain.associate") {
-          return okEnvelope({ associate: { remaining: 0 } });
+          return okEnvelope({
+            associate: {
+              applied: 3,
+              embedded: 2,
+              edgesWritten: 5,
+              edgesRemoved: 1,
+              remaining: 0,
+              topicsWritten: 1,
+              topicsFailed: 0,
+              degraded: false,
+            },
+          });
         }
         if (op === "maintain.consolidate") {
           return okEnvelope({
@@ -476,6 +487,13 @@ describe("background activity rows", () => {
             wouldRetire: 3,
             wouldReactivate: 2,
             degraded: false,
+            learn: {
+              examples: 9,
+              positives: 2,
+              attempted: true,
+              accepted: false,
+              skipped: "min-positives",
+            },
           });
         }
         return okEnvelope({});
@@ -492,6 +510,7 @@ describe("background activity rows", () => {
       const runs = f.repo.listMemoryMaintenanceRuns({ limit: 100 }).items;
       const consolidate = runs.find((run) => run.op === "maintain.consolidate");
       const activation = runs.find((run) => run.op === "maintain.activation");
+      const associate = runs.find((run) => run.op === "maintain.associate");
       expect(consolidate).toMatchObject({
         ok: true,
         errorCode: null,
@@ -514,6 +533,24 @@ describe("background activity rows", () => {
           reactivated: 1,
           would_retire: 3,
           would_reactivate: 2,
+          degraded: 0,
+          learn_examples: 9,
+          learn_positives: 2,
+          learn_attempted: 1,
+          learn_accepted: 0,
+          learn_skipped_min_positives: 1,
+        },
+      });
+      expect(associate).toMatchObject({
+        ok: true,
+        counts: {
+          applied: 3,
+          embedded: 2,
+          edges_written: 5,
+          edges_removed: 1,
+          remaining: 0,
+          topics_written: 1,
+          topics_failed: 0,
           degraded: 0,
         },
       });

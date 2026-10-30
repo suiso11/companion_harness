@@ -1872,9 +1872,10 @@ export function createMemoryService(
           startedAt,
           ok: true,
           counts:
-            isRecord(envelope.data) && envelope.data.degraded === true
+            distillCounts(envelope.data) ??
+            (isRecord(envelope.data) && envelope.data.degraded === true
               ? { degraded: 1 }
-              : {},
+              : {}),
         });
       }
       log("info", "memory.job_acked", { durationMs });
@@ -2544,6 +2545,91 @@ export function createMemoryService(
       : null;
   }
 
+  function numericFields<K extends string>(
+    raw: unknown,
+    keys: readonly K[],
+  ): Record<K, number> | null {
+    if (!isRecord(raw)) {
+      return null;
+    }
+    const out = {} as Record<K, number>;
+    for (const key of keys) {
+      const value = countOf(raw[key]);
+      if (value === null) {
+        return null;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
+  /** Strict `data.distill` -> fixed numeric counts (no text), else null. */
+  function distillCounts(data: unknown): Record<string, number> | null {
+    if (!isRecord(data) || !isRecord(data.distill)) {
+      return null;
+    }
+    const d = data.distill;
+    const n = numericFields(d, ["applied", "reviewed", "failed", "deferred"]);
+    if (n === null || typeof d.degraded !== "boolean") {
+      return null;
+    }
+    return { ...n, degraded: d.degraded ? 1 : 0 };
+  }
+
+  /** Strict `data.associate` -> fixed snake_case numeric counts, else null. */
+  function associateCounts(
+    data: Record<string, unknown> | null,
+  ): Record<string, number> | null {
+    const a = data?.associate;
+    const n = numericFields(a, [
+      "applied",
+      "embedded",
+      "edgesWritten",
+      "edgesRemoved",
+      "remaining",
+      "topicsWritten",
+      "topicsFailed",
+    ]);
+    if (n === null || !isRecord(a) || typeof a.degraded !== "boolean") {
+      return null;
+    }
+    return {
+      applied: n.applied,
+      embedded: n.embedded,
+      edges_written: n.edgesWritten,
+      edges_removed: n.edgesRemoved,
+      remaining: n.remaining,
+      topics_written: n.topicsWritten,
+      topics_failed: n.topicsFailed,
+      degraded: a.degraded ? 1 : 0,
+    };
+  }
+
+  /** Optional `data.learn` -> numeric counts; absent/invalid -> {}. */
+  function activationLearnCounts(
+    data: Record<string, unknown> | null,
+  ): Record<string, number> {
+    const learn = data?.learn;
+    const n = numericFields(learn, ["examples", "positives"]);
+    if (n === null || !isRecord(learn)) {
+      return {};
+    }
+    const out: Record<string, number> = {
+      learn_examples: n.examples,
+      learn_positives: n.positives,
+      learn_attempted: learn.attempted === true ? 1 : 0,
+      learn_accepted: learn.accepted === true ? 1 : 0,
+    };
+    if (typeof learn.skipped === "string" && learn.skipped.length > 0) {
+      const suffix = learn.skipped
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, "_")
+        .slice(0, 64);
+      if (suffix.length > 0) out[`learn_skipped_${suffix}`] = 1;
+    }
+    return out;
+  }
+
   /**
    * Strict parse of the real `maintain.consolidate` data (remind >=795c476):
    * `{clusters: [{topic, members, sentencesKept, outcome, ...}], applied,
@@ -2900,7 +2986,9 @@ export function createMemoryService(
           ...(associate.ok
             ? {}
             : { errorCode: maintenanceErrorCode(associate.code) }),
-          counts: associate.ok ? { remaining } : {},
+          counts: associate.ok
+            ? (associateCounts(associate.data) ?? { remaining })
+            : {},
         });
         if (!associate.ok && associate.code === "BAD_REQUEST") {
           associateUnsupported = true;
@@ -3058,6 +3146,7 @@ export function createMemoryService(
                 would_retire: summary.wouldRetire,
                 would_reactivate: summary.wouldReactivate,
                 degraded: summary.degraded ? 1 : 0,
+                ...activationLearnCounts(activation.data),
               },
             });
           }
