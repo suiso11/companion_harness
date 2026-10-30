@@ -29,6 +29,7 @@ export const REFLECT_TIMEOUT_MS = 30_000;
 export const REFLECT_MAX_OUTPUT_TOKENS = 400;
 export const REFLECT_MAX_STATEMENT_CP = 400;
 export const REFLECT_MAX_QUOTE_CP = 200;
+export const REFLECT_MIN_QUOTE_CP = 4;
 export const REFLECT_DAY_MS = 86_400_000;
 
 export const REFLECT_SYSTEM_PROMPT =
@@ -94,7 +95,8 @@ export function isGroundableProposal(
 ): boolean {
   return (
     proposal.statement.length > 0 &&
-    proposal.quote.length > 0 &&
+    codePoints(proposal.quote) >= REFLECT_MIN_QUOTE_CP &&
+    proposal.quote.trim().length > 0 &&
     userText.includes(proposal.quote)
   );
 }
@@ -132,6 +134,11 @@ export function createReflectService(
   let stopped = false;
   let started = false;
   let idleResolve: (() => void) | null = null;
+  let drainPromise: Promise<void> | null = null;
+  let activeController: AbortController | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let callDay = -1;
+  let callCount = 0;
 
   const log = (event: string, fields?: Record<string, unknown>): void => {
     options.logger?.info(event, fields);
@@ -160,7 +167,7 @@ export function createReflectService(
     }
     const lease = background.tryAcquire(BACKGROUND_OWNER_REFLECT);
     if (lease === null) return;
-    void drain(lease);
+    drainPromise = drain(lease);
   }
 
   async function drain(lease: BackgroundReservation | null): Promise<void> {
@@ -200,7 +207,12 @@ export function createReflectService(
       log("reflect.skipped", { reason: "frozen" });
       return;
     }
-    if (repo.countLoopEvidenceSince(utcDayStart(now())) >= cap) {
+    const day = utcDayStart(now());
+    if (day !== callDay) {
+      callDay = day;
+      callCount = 0;
+    }
+    if (callCount >= cap) {
       log("reflect.skipped", { reason: "budget" });
       return;
     }
@@ -210,12 +222,15 @@ export function createReflectService(
     if (turn.input.kind !== "user_text") return;
     const userText = turn.input.text;
     const controller = new AbortController();
+    activeController = controller;
     const timer = setTimeout(() => controller.abort(), REFLECT_TIMEOUT_MS);
+    callCount += 1;
     let text: string;
     try {
       const result = await gateway.chat(
         {
           model,
+          maxOutputTokens: REFLECT_MAX_OUTPUT_TOKENS,
           messages: [
             { role: "system", content: REFLECT_SYSTEM_PROMPT },
             {
@@ -237,6 +252,14 @@ export function createReflectService(
       return;
     } finally {
       clearTimeout(timer);
+      activeController = null;
+    }
+    // STOP or a freeze during the call must stop the write too.
+    if (stopped) return;
+    const after = repo.getAutonomyControlState();
+    if (after.paused || after.learningFrozen) {
+      log("reflect.skipped", { reason: "frozen" });
+      return;
     }
     const proposal = parseReflectProposal(text);
     if (proposal === null || !isGroundableProposal(proposal, userText)) {
@@ -275,12 +298,25 @@ export function createReflectService(
     },
     start(): void {
       started = true;
+      unsubscribe = background?.onSettled(wake) ?? null;
     },
     async stop(): Promise<void> {
       stopped = true;
       started = false;
+      unsubscribe?.();
+      unsubscribe = null;
+      activeController?.abort();
       pending.length = 0;
       queued.clear();
+      const inFlight = drainPromise;
+      drainPromise = null;
+      if (inFlight !== null) {
+        try {
+          await inFlight;
+        } catch {
+          // The drain already logs fixed codes; shutdown never throws.
+        }
+      }
     },
   };
 }

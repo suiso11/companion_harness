@@ -47,6 +47,16 @@ describe("reflect proposal parsing", () => {
     ).toBeNull();
   });
 
+  it("rejects a trivial span that happens to occur in the text", () => {
+    const user = "もっと短く答えて。あと敬語はなしで。";
+    expect(
+      isGroundableProposal({ statement: "be shorter", quote: "。" }, user),
+    ).toBe(false);
+    expect(
+      isGroundableProposal({ statement: "be shorter", quote: " " }, user),
+    ).toBe(false);
+  });
+
   it("grounds only on a verbatim span of the user text", () => {
     const user = "もっと短く答えて。あと敬語はなしで。";
     expect(
@@ -187,6 +197,46 @@ describe("reflect observer", () => {
       service.start();
       service.onRunSettled(runId);
       await service.onIdle();
+      expect(
+        repo.listLearningHypotheses(sessionId, { limit: 10 }).items,
+      ).toHaveLength(0);
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("aborts an in-flight call on stop and writes nothing", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    try {
+      const repo = createKernelRepository(handle.raw);
+      const { sessionId, runId } = await failedRun(repo);
+      let aborted = false;
+      const gateway: ModelGateway = {
+        provider: "ollama",
+        capabilities: { toolCalling: false },
+        baseUrl: "http://127.0.0.1:11434",
+        chatUrl: "http://127.0.0.1:11434/api/chat",
+        // Hangs until the service aborts it; Promise.withResolvers needs a
+        // newer lib than this repo targets.
+        chat: (_request: ChatRequest, options?: { signal?: AbortSignal }) =>
+          new Promise<ChatResult>((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () => {
+              aborted = true;
+              reject(new Error("aborted"));
+            });
+          }),
+      };
+      const service = createReflectService({
+        repo,
+        gateway,
+        model: "test",
+        now: () => T0 + 10,
+      });
+      service.start();
+      service.onRunSettled(runId);
+      await service.stop();
+      expect(aborted).toBe(true);
       expect(
         repo.listLearningHypotheses(sessionId, { limit: 10 }).items,
       ).toHaveLength(0);
