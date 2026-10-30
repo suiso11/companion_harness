@@ -147,6 +147,8 @@ const SPEECH_SYSTEM = `You are the companion speaking first, in Japanese.
 Using the supplied private note, sources, and recent conversation, either stay silent or write ONE natural message.
 The message must contain a concrete observation and exactly ONE open question that deepens the user's own experience.
 Rules:
+- Exactly one question mark in the whole message; never ask a second question.
+- Do not mention the private note, sources, analysis, or that you were thinking/connecting memories. Just speak the observation naturally.
 - No memory recitation, no "ユーザーは", no IDs/URLs, no analysis jargon, no pressure to answer.
 - At most the requested character count; 1-3 sentences.
 - If the note is not worth sharing right now, return silent.
@@ -606,7 +608,8 @@ export function createSpontaneousService(
     if (/ユーザーは/.test(message)) return null;
     if (/https?:\/\//i.test(message)) return null;
     if (UUID_RE.test(message)) return null;
-    if (!/[?？]/.test(message)) return null;
+    const questions = message.match(/[?？]/g)?.length ?? 0;
+    if (questions !== 1) return null;
     return message;
   }
 

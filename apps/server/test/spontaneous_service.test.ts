@@ -296,6 +296,36 @@ describe("spontaneous speech pass", () => {
     }
   });
 
+  it("requires exactly one question mark", async () => {
+    const { handle, repo, store, sessionId, service } = await setup({
+      gateway: gatewayWith([
+        JSON.stringify({
+          action: "speak",
+          message: "何が決め手だった？ 次はどうする？",
+        }),
+      ]),
+    });
+    try {
+      store.insert({
+        sessionId,
+        kind: "question",
+        body: "道具の話",
+        topics: [],
+        memoryIds: [],
+        sources: [],
+        now: T0 + 3,
+      });
+      expect(await service.runSpeechPass()).toBe("skipped");
+      expect(
+        repo
+          .getHistory(sessionId, { limit: 10 })
+          .items.some((item) => item.kind === "companion_text"),
+      ).toBe(false);
+    } finally {
+      close(handle, service);
+    }
+  });
+
   it("does not post a message without an open question", async () => {
     const { handle, repo, store, sessionId, service } = await setup({
       gateway: gatewayWith([
