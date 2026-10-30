@@ -990,15 +990,15 @@ describe("background resource live proof (production server + real sockets)", ()
         entry.respond();
       }
       await new Promise((resolve) => setTimeout(resolve, 800));
-      // Raw-first: the committed turn's event.append enqueued at commit
-      // (before the abort) and is the ONLY outbox job for this run — the
-      // aborted extraction never became a payload verdict, so no late
-      // record.remember write landed even after the late output responded
-      // above (STOP still yields no late remember writes).
+      // Raw-first: the committed turn's per-speaker event.append jobs
+      // (user + assistant) enqueued at commit (before the abort) and are the
+      // ONLY outbox jobs for this run — the aborted extraction never became
+      // a payload verdict, so no late record.remember write landed even
+      // after the late output responded above.
       const abortedKinds = queryOutboxKinds(dbPath, turn3.runId).map(
         (job) => job.kind,
       );
-      expect(abortedKinds).toEqual(["event.append"]);
+      expect(abortedKinds).toEqual(["event.append", "event.append"]);
 
       // Foreground chat still works while STOPped.
       const fourth = await postJson(
