@@ -472,14 +472,19 @@ export function createSpontaneousService(
       500,
       controller,
     );
-    if (parsed === null || !isThoughtKind(parsed.kind)) return null;
-    const body = boundedString(parsed.body, 1, 400);
-    if (body === null) return null;
-    if (
-      /ユーザーは/.test(body) ||
-      /https?:\/\//i.test(body) ||
-      UUID_RE.test(body)
-    ) {
+    if (parsed === null) {
+      log("warn", "speech.thought_invalid_json");
+      return null;
+    }
+    if (!isThoughtKind(parsed.kind)) {
+      log("warn", "speech.thought_invalid_kind");
+      return null;
+    }
+    // The thought is private: only bound the size here. Style/URL/pronoun
+    // constraints belong to the public speech message, not the journal.
+    const body = boundedString(parsed.body, 1, 600);
+    if (body === null) {
+      log("warn", "speech.thought_invalid_body");
       return null;
     }
     const topics: string[] = [];
@@ -507,6 +512,7 @@ export function createSpontaneousService(
         now: now(),
       });
     } catch {
+      log("warn", "speech.thought_store_failed");
       return null;
     }
   }
