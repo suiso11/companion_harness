@@ -243,48 +243,64 @@ export function createSpontaneousService(
   }
 
   async function memoryItems(): Promise<MemoryItem[]> {
-    let envelope: MemoryCliEnvelope;
-    try {
-      envelope = await readMemory(
-        memory,
-        "record.list",
-        { scope, limit: memoryLimit },
-        undefined,
-      );
-    } catch {
-      return [];
-    }
-    if (!envelope.ok || !isRecord(envelope.data)) return [];
-    const items = envelope.data.items;
-    if (!Array.isArray(items)) return [];
+    // record.list is byte-budgeted (8 KiB by default): requesting the whole
+    // memoryLimit at once can answer LIMIT_EXCEEDED and yield nothing. Page
+    // backwards with `until` (10 rows/page) until enough normal candidates.
+    const PAGE = 10;
     const out: MemoryItem[] = [];
-    for (const item of items) {
-      if (!isRecord(item)) continue;
-      const id = boundedString(item.id, 1, 256);
-      const kind = item.kind;
-      const snippet = boundedString(item.snippet, 1, 2000);
-      const status = item.status;
-      const privacy = item.privacy;
-      const sensitivity = isRecord(privacy) ? privacy.sensitivity : null;
-      const createdAt = boundedString(item.createdAt, 1, 64);
-      if (
-        id === null ||
-        snippet === null ||
-        createdAt === null ||
-        status !== "active" ||
-        (kind !== "user_fact" && kind !== "summary") ||
-        // Older remind builds do not expose privacy: fail closed.
-        sensitivity !== "normal"
-      ) {
-        continue;
+    const seen = new Set<string>();
+    let until: string | undefined;
+    for (let page = 0; page < 6 && out.length < memoryLimit; page += 1) {
+      let envelope: MemoryCliEnvelope;
+      try {
+        envelope = await readMemory(
+          memory,
+          "record.list",
+          until === undefined
+            ? { scope, limit: PAGE }
+            : { scope, limit: PAGE, until },
+          undefined,
+        );
+      } catch {
+        break;
       }
-      out.push({
-        id,
-        kind,
-        snippet,
-        evidence: boundedString(item.evidence, 1, 500),
-        createdAt,
-      });
+      if (!envelope.ok || !isRecord(envelope.data)) break;
+      const items = envelope.data.items;
+      if (!Array.isArray(items) || items.length === 0) break;
+      let lastCreatedAt: string | undefined;
+      for (const item of items) {
+        if (!isRecord(item)) continue;
+        const id = boundedString(item.id, 1, 256);
+        const kind = item.kind;
+        const snippet = boundedString(item.snippet, 1, 2000);
+        const status = item.status;
+        const privacy = item.privacy;
+        const sensitivity = isRecord(privacy) ? privacy.sensitivity : null;
+        const createdAt = boundedString(item.createdAt, 1, 64);
+        if (typeof item.createdAt === "string") lastCreatedAt = item.createdAt;
+        if (
+          id === null ||
+          snippet === null ||
+          createdAt === null ||
+          seen.has(id) ||
+          status !== "active" ||
+          (kind !== "user_fact" && kind !== "summary") ||
+          // Older remind builds do not expose privacy: fail closed.
+          sensitivity !== "normal"
+        ) {
+          continue;
+        }
+        seen.add(id);
+        out.push({
+          id,
+          kind,
+          snippet,
+          evidence: boundedString(item.evidence, 1, 500),
+          createdAt,
+        });
+      }
+      if (items.length < PAGE || lastCreatedAt === undefined) break;
+      until = lastCreatedAt;
     }
     return out;
   }
@@ -416,14 +432,7 @@ export function createSpontaneousService(
           signal: controller.signal,
         });
       } catch (error) {
-        const code =
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          typeof error.code === "string"
-            ? error.code
-            : "unknown";
-        log("warn", "speech.web_search_failed", { code });
+        log("warn", "speech.web_search_failed");
         continue;
       }
       for (const result of results) {
@@ -518,13 +527,13 @@ export function createSpontaneousService(
       if (sessionId === null) return "skipped";
       const memories = await memoryItems();
       if (memories.length === 0) {
-        log("info", "speech.thought_skipped", { reason: "no_memories" });
+        log("info", "speech.thought_skipped_no_memories");
         return "skipped";
       }
       const context = recentContext(sessionId);
       const plan = await research(memories, context, controller);
       if (plan === null) {
-        log("info", "speech.thought_skipped", { reason: "no_topic" });
+        log("info", "speech.thought_skipped_no_topic");
         return "skipped";
       }
       const results = await searchWeb(plan.queries, controller);
@@ -537,7 +546,7 @@ export function createSpontaneousService(
         controller,
       );
       if (thought === null) {
-        log("info", "speech.thought_skipped", { reason: "invalid_thought" });
+        log("info", "speech.thought_skipped_invalid");
         return "skipped";
       }
       log("info", "speech.thought_created", {
@@ -636,7 +645,7 @@ export function createSpontaneousService(
         controller,
       );
       if (message === null) {
-        log("info", "speech.skipped", { reason: "model_silent" });
+        log("info", "speech.skipped_model_silent");
         return "skipped";
       }
       if (config.mode === "dry-run") {
