@@ -33,8 +33,13 @@ export const REFLECT_MAX_STATEMENT_CP = 400;
 export const REFLECT_MAX_QUOTE_CP = 200;
 export const REFLECT_MIN_QUOTE_CP = 4;
 export const REFLECT_DAY_MS = 86_400_000;
-/** One clock trigger: the loop may stage proposals once per UTC day. */
-export const REFLECT_PLAN_INTERVAL_MS = REFLECT_DAY_MS;
+/**
+ * The plan is checked every 10 minutes but stages at most once per UTC day
+ * (the day guard below). A short interval matters because the restart fence
+ * re-pauses the control on every start: the startup pass is skipped while
+ * paused, and the next check must not wait a whole day after a resume.
+ */
+export const REFLECT_PLAN_INTERVAL_MS = 10 * 60_000;
 export const REFLECT_PROPOSAL_EXPIRY_MS = 3 * 3_600_000;
 
 export const REFLECT_SYSTEM_PROMPT =
