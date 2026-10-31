@@ -393,10 +393,7 @@ async function refreshSessions(): Promise<void> {
     for (const value of body.sessions) {
       if (typeof value !== "object" || value === null) continue;
       const r = value as Record<string, unknown>;
-      if (
-        typeof r.id === "string" &&
-        typeof r.title === "string"
-      ) {
+      if (typeof r.id === "string" && typeof r.title === "string") {
         parsed.push({
           id: r.id,
           title: r.title,
