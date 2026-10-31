@@ -180,6 +180,9 @@ import {
   RunStatusSchema,
   retryScope,
   SearchLimitSchema,
+  type SessionSummary,
+  SessionsListQuerySchema,
+  SessionsListResponseSchema,
   ShadowExplicitRequestSchema,
   ShadowFailRequestSchema,
   ShadowHoldRequestSchema,
@@ -3337,6 +3340,90 @@ export function createKernelRepository(
       )
       .get() as { id: string } | undefined;
     return row?.id ?? null;
+  }
+
+  /**
+   * Bounded session summaries for the selector: first user text as title,
+   * newest turn kind/preview, and the last user-turn time. Bounded SQL
+   * substr + JS code-point truncation; fake titles are never stored.
+   */
+  function listSessions(query: { limit?: number } = {}): {
+    sessions: SessionSummary[];
+  } {
+    const parsed = parseOrValidation(
+      () => SessionsListQuerySchema.parse({ limit: query.limit }),
+      "sessions list query",
+    );
+    const rows = db
+      .prepare(
+        `WITH first_user AS (
+           SELECT session_id, input_json,
+                  ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY seq ASC) rn
+           FROM turns
+           WHERE json_extract(input_json, '$.kind') = 'user_text'
+         ), last_turn AS (
+           SELECT session_id, input_json, created_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY session_id ORDER BY created_at DESC, id DESC
+                  ) rn
+           FROM turns
+         ), last_user AS (
+           SELECT session_id, MAX(created_at) AS lastUserAt
+           FROM turns
+           WHERE json_extract(input_json, '$.kind') = 'user_text'
+           GROUP BY session_id
+         )
+         SELECT s.id AS id,
+                s.created_at AS createdAt,
+                s.last_active_at AS lastActiveAt,
+                substr(json_extract(f.input_json, '$.text'), 1, 200) AS title,
+                substr(json_extract(l.input_json, '$.text'), 1, 200) AS preview,
+                json_extract(l.input_json, '$.kind') AS lastKind,
+                l.created_at AS lastTurnAt,
+                u.lastUserAt AS lastUserAt
+         FROM sessions s
+         LEFT JOIN first_user f ON f.session_id = s.id AND f.rn = 1
+         LEFT JOIN last_turn l ON l.session_id = s.id AND l.rn = 1
+         LEFT JOIN last_user u ON u.session_id = s.id
+         ORDER BY s.last_active_at DESC, s.created_at DESC, s.id DESC
+         LIMIT ?`,
+      )
+      .all(parsed.limit) as Array<{
+      id: string;
+      createdAt: number;
+      lastActiveAt: number;
+      title: string | null;
+      preview: string | null;
+      lastKind: string | null;
+      lastTurnAt: number | null;
+      lastUserAt: number | null;
+    }>;
+    const previewText = (value: unknown, max: number): string | null => {
+      if (typeof value !== "string") return null;
+      const text = value.replace(/\s+/g, " ").trim();
+      if (text.length === 0) return null;
+      return Array.from(text).slice(0, max).join("");
+    };
+    const sessions = rows.map((row) => {
+      const title = previewText(row.title, 40) ?? "新しい会話";
+      return {
+        id: row.id,
+        title,
+        createdAt: row.createdAt,
+        lastActiveAt: row.lastActiveAt,
+        lastUserAt: row.lastUserAt,
+        lastTurnAt: row.lastTurnAt,
+        lastTurnKind:
+          typeof row.lastKind === "string" && row.lastKind.length > 0
+            ? row.lastKind
+            : null,
+        preview: previewText(row.preview, 60),
+      };
+    });
+    return parseOrValidation(
+      () => SessionsListResponseSchema.parse({ sessions }),
+      "sessions list response",
+    );
   }
 
   /** Ordered, already-completed proposals first (bounded read, no writes). */
@@ -8672,6 +8759,7 @@ export function createKernelRepository(
     postCompanionMessage,
     listCompanionMessagesForward,
     latestSessionId,
+    listSessions,
     postRetry,
     startRun,
     completeRun,

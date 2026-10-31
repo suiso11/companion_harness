@@ -134,6 +134,38 @@ export const CancelRunResponseSchema = z.strictObject({
 export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
 
 /* ------------------------------------------------------------------ */
+/* Sessions                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One human-readable session summary for the selector. Titles/previews are
+ * derived server-side from stored turns (bounded code points), never from
+ * model output. `lastTurnKind` lets the UI mark an unanswered companion
+ * message; no read/ack state is invented.
+ */
+export const SessionSummarySchema = z.strictObject({
+  id: UuidSchema,
+  title: z.string().min(1).max(80),
+  createdAt: UnixMsSchema,
+  lastActiveAt: UnixMsSchema,
+  lastUserAt: UnixMsSchema.nullable(),
+  lastTurnAt: UnixMsSchema.nullable(),
+  lastTurnKind: z.string().min(1).max(64).nullable(),
+  preview: z.string().min(1).max(120).nullable(),
+});
+export type SessionSummary = z.infer<typeof SessionSummarySchema>;
+
+export const SessionsListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type SessionsListQuery = z.infer<typeof SessionsListQuerySchema>;
+
+export const SessionsListResponseSchema = z.strictObject({
+  sessions: z.array(SessionSummarySchema).max(50),
+});
+export type SessionsListResponse = z.infer<typeof SessionsListResponseSchema>;
+
+/* ------------------------------------------------------------------ */
 /* History                                                             */
 /* ------------------------------------------------------------------ */
 

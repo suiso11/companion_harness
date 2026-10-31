@@ -81,6 +81,7 @@ import {
   ReferenceSetDetailResponseSchema,
   RunStatusResponseSchema,
   retryScope,
+  SessionsListQuerySchema,
   ShadowExplicitRequestSchema,
   shadowRequestScope,
   TaskCreateRequestSchema,
@@ -150,6 +151,7 @@ import {
   remoteSessionSetCookie,
   remoteTokenFromCookieHeader,
 } from "./remote_session.js";
+import type { SessionPresence } from "./session_presence.js";
 import type { RunDeltaSource } from "./sse.js";
 import {
   createNotificationFeedSseResponse,
@@ -458,6 +460,8 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /** In-memory viewed-session registry for spontaneous speech targeting. */
+  sessionPresence?: SessionPresence;
   /**
    * Narrow human-STOP hook for auto-dispatch intake (server-owned). Called
    * after the committed policy revocations so the service aborts only its
@@ -1990,6 +1994,48 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   /* ---------------- sessions ---------------- */
+
+  // Bounded, human-readable session list for the chat selector. Titles and
+  // previews are derived from stored turns; no read/ack state is invented.
+  app.get("/api/sessions", (c) => {
+    const gated = strictQuery(c, ["limit"]);
+    if (!gated.ok) {
+      return validationError(c);
+    }
+    const parsed = SessionsListQuerySchema.safeParse(gated.values);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    try {
+      return c.json(repo.listSessions({ limit: parsed.data.limit }), 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
+  // Chat-page heartbeat: the spontaneous service targets the session the
+  // user is actually looking at when this is fresh. In-memory only.
+  app.post("/api/sessions/:sessionId/presence", async (c) => {
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const body: unknown = raw.value;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 0
+    ) {
+      return validationError(c);
+    }
+    deps.sessionPresence?.touch(session.id, now());
+    return c.json({ ok: true }, 200);
+  });
 
   app.post("/api/sessions", async (c) => {
     const started = now();
