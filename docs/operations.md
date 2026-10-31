@@ -6165,3 +6165,26 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   history, so a user reply sees the message it answers.
 - No UI panel for the journal yet; it is internal. Raw conversation originals
   stay in remind (per-speaker chunks); thoughts never write remind memory.
+
+## Session clarity and spontaneous-speech targeting (2026-10-31)
+
+- `GET /api/sessions?limit=1..50` returns bounded, derived summaries:
+  `{id, title, createdAt, lastActiveAt, lastUserAt, lastTurnAt,
+  lastTurnKind, preview}`. `title` is the first user message (40 cp,
+  whitespace-collapsed, default `新しい会話`); `preview` is the newest turn
+  text (60 cp); `lastTurnKind` lets the UI mark an unanswered companion
+  message. No titles are stored; no read/ack state is invented.
+- The chat selector fetches this list on boot, after send/new session, after
+  a live companion message, on visibility, and every 60s while visible.
+  Labels are `● <title> · <relative time>` for the current session and
+  append `（自発）` when another session's newest turn is `companion_text`.
+- `POST /api/sessions/:id/presence` is a keyless, body-`{}` chat heartbeat.
+  It updates an in-memory registry (10-minute TTL, 100 sessions max); no DB
+  write. The chat page sends it on boot/switch/visibility and every 60s
+  while visible.
+- The spontaneous speech service targets the freshest presence session
+  (validated against the DB), falling back to the newest session. This makes
+  the daily message arrive in the conversation the user is actually viewing,
+  instead of an arbitrary `last_active_at` session.
+- Presence is process-local: after a restart the next heartbeat or the
+  latest-session fallback covers the gap. No cross-user/remote sharing.

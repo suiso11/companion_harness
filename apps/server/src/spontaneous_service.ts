@@ -64,6 +64,8 @@ export interface SpontaneousServiceDeps {
   > | null;
   readonly timeZone: string;
   readonly logger?: ServerLogger;
+  /** Most recently viewed chat session (in-memory presence), when available. */
+  readonly presence?: { active(at?: number): string | null };
   readonly now?: () => number;
   /** Test seam: local time-of-day minutes (defaults to Intl in timeZone). */
   readonly minutesOfDay?: (now: number) => number;
@@ -242,6 +244,19 @@ export function createSpontaneousService(
     return start < end
       ? minute >= start && minute < end
       : minute >= start || minute < end;
+  }
+
+  function targetSession(at: number): string | null {
+    const active = deps.presence?.active(at) ?? null;
+    if (active !== null) {
+      try {
+        repo.getSession(active);
+        return active;
+      } catch {
+        // Stale/foreign presence: fall through to the latest session.
+      }
+    }
+    return repo.latestSessionId();
   }
 
   async function memoryItems(): Promise<MemoryItem[]> {
@@ -531,7 +546,7 @@ export function createSpontaneousService(
     if (background !== null && lease === null) return "skipped";
     const controller = newController();
     try {
-      const sessionId = repo.latestSessionId();
+      const sessionId = targetSession(at);
       if (sessionId === null) return "skipped";
       const memories = await memoryItems();
       if (memories.length === 0) {
@@ -625,7 +640,7 @@ export function createSpontaneousService(
     ) {
       return "skipped";
     }
-    const sessionId = repo.latestSessionId();
+    const sessionId = targetSession(at);
     if (sessionId === null) return "skipped";
     const lastUser = store.lastUserTurnAt(sessionId);
     if (lastUser === null || at - lastUser < config.minQuietMs) {

@@ -192,6 +192,7 @@ import {
   RESCHEDULE_WRITE_PROFILE_ENV,
   type RescheduleWriteConnectorHint,
 } from "./rescheduleWriteProfile.js";
+import { createSessionPresence } from "./session_presence.js";
 import { createShadowService, type ShadowService } from "./shadow_service.js";
 import {
   createSpontaneousService,
@@ -1027,6 +1028,7 @@ export async function startServer(
   // teardown path — including the outer startup-failure catch — can shut it
   // down; construction never throws and touches no I/O).
   const backgroundResource = createBackgroundResourceGate();
+  const sessionPresence = createSessionPresence();
   const removeSignalHandlers = (): void => {
     if (onSigint !== undefined) {
       try {
@@ -1786,6 +1788,7 @@ export async function startServer(
           gateway: modelGateway,
           model: modelName,
           background: backgroundResource,
+          presence: sessionPresence,
           timeZone: config.timeZone,
           logger,
           now,
@@ -3374,6 +3377,7 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       ...(memory !== null ? { memory } : {}),
+      sessionPresence,
       ...(learning !== null ? { learningStore: learning.store } : {}),
       // Human STOP aborts only this service's owned in-flight intake; the
       // narrow app port never kills a worker/global process.

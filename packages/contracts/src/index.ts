@@ -534,6 +534,9 @@ export type {
   RunParams,
   RunStatusResponse,
   SessionParams,
+  SessionSummary,
+  SessionsListQuery,
+  SessionsListResponse,
   TurnParams,
   UserTextHistoryItem,
 } from "./http.js";
@@ -570,6 +573,9 @@ export {
   RunParamsSchema,
   RunStatusResponseSchema,
   SessionParamsSchema,
+  SessionSummarySchema,
+  SessionsListQuerySchema,
+  SessionsListResponseSchema,
   TurnParamsSchema,
   UserTextHistoryItemSchema,
 } from "./http.js";

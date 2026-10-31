@@ -91,6 +91,11 @@ interface HistoryRun {
   executionStatus?: string | null;
   targetCitation?: unknown;
 }
+interface SessionSummary {
+  id: string;
+  title: string;
+  lastTurnKind: string | null;
+}
 interface Turn {
   turnId: string;
   seq?: number;
@@ -167,6 +172,8 @@ function lsDel(key: string): void {
 // --- state ---
 let sessionId: string | null = $state(null);
 let sessions: string[] = $state([]);
+let sessionSummaries: SessionSummary[] = $state([]);
+let presenceTimer: number | null = null;
 let booted = $state(false);
 let turns: Turn[] = $state([]);
 let olderBefore: number | null = $state(null);
@@ -377,6 +384,51 @@ function rememberSession(id: string): void {
   }
 }
 
+async function refreshSessions(): Promise<void> {
+  try {
+    const res = await fetchJson("/api/sessions?limit=30");
+    const body = res.body as { sessions?: unknown };
+    if (res.status !== 200 || !Array.isArray(body.sessions)) return;
+    const parsed: SessionSummary[] = [];
+    for (const value of body.sessions) {
+      if (typeof value !== "object" || value === null) continue;
+      const r = value as Record<string, unknown>;
+      if (
+        typeof r.id === "string" &&
+        typeof r.title === "string"
+      ) {
+        parsed.push({
+          id: r.id,
+          title: r.title,
+          lastTurnKind:
+            typeof r.lastTurnKind === "string" ? r.lastTurnKind : null,
+        });
+      }
+    }
+    sessionSummaries = parsed;
+    sessions = parsed.map((item) => item.id);
+  } catch {
+    // Best effort: the local storage list stays usable.
+  }
+}
+
+function sessionLabel(id: string): string {
+  const s = sessionSummaries.find((item) => item.id === id);
+  const current = id === sessionId;
+  return `${current ? "● " : ""}${s?.title ?? id.slice(0, 8)}${
+    s?.lastTurnKind === "companion_text" && !current ? "（自発）" : ""
+  }`;
+}
+
+function touchPresence(): void {
+  if (sessionId === null) return;
+  void fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/presence`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  }).catch(() => undefined);
+}
+
 async function ensureSession(): Promise<void> {
   const stored = lsGet(LS_SESSION);
   if (stored !== null && stored.length > 0) {
@@ -427,6 +479,8 @@ async function switchSession(id: string): Promise<void> {
   setSessionId(id);
   resetChatState();
   await bootSession();
+  touchPresence();
+  void refreshSessions();
 }
 
 async function newSession(): Promise<void> {
@@ -444,6 +498,8 @@ async function newSession(): Promise<void> {
   rememberSession(body.sessionId);
   resetChatState();
   await bootSession();
+  touchPresence();
+  void refreshSessions();
 }
 
 function resetChatState(): void {
@@ -875,6 +931,7 @@ async function send(): Promise<void> {
     runTurns.set(runId, body.turnId);
     turnKinds.set(body.turnId, "user_text");
     subscribe(runId);
+    void refreshSessions();
     return;
   }
   const code = errorCode(posted.body);
@@ -1093,6 +1150,7 @@ function openCompanionStream(sid: string): void {
         run: null,
       },
     ];
+    void refreshSessions();
   });
   source.onerror = () => {
     // Native EventSource reconnects, but a persistent 401/404 must not spin.
@@ -3156,18 +3214,29 @@ onMount(() => {
     if (sessionId !== null) {
       rememberSession(sessionId);
       await bootSession();
+      touchPresence();
+      await refreshSessions();
     }
     booted = true;
+    presenceTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") touchPresence();
+    }, 60_000);
   })();
   const onVisibility = (): void => {
     if (document.visibilityState === "visible") {
       reconcilePendingExpiry();
+      touchPresence();
+      void refreshSessions();
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
   return () => {
     closeStream();
     closeCompanionStream();
+    if (presenceTimer !== null) {
+      window.clearInterval(presenceTimer);
+      presenceTimer = null;
+    }
     stopElapsedTimer();
     for (const timer of watchTimers.values()) window.clearInterval(timer);
     watchTimers.clear();
@@ -3276,7 +3345,7 @@ function evidenceForTurn(turn: Turn): {
         {/if}
         {#each sessions as id (id)}
           <option value={id} selected={id === sessionId}>
-            {id === sessionId ? `● ${id.slice(0, 8)}` : id.slice(0, 8)}
+            {sessionLabel(id)}
           </option>
         {/each}
       </select>
