@@ -84,8 +84,12 @@ function createWindow() {
       win.hide();
     }
   });
-  // Unreachable server: say so instead of showing a blank window.
-  win.webContents.on("did-fail-load", () => {
+  // Unreachable server: say so instead of showing a blank window. A
+  // sub-frame or aborted (-3) navigation is not a failed app load.
+  win.webContents.on("did-fail-load", (_event, errorCode, _desc, _url, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) {
+      return;
+    }
     win.loadURL(
       "data:text/html;charset=utf-8," +
         encodeURIComponent(
@@ -94,6 +98,14 @@ function createWindow() {
             `サーバを起動してから、トレイの「表示」を選んでください。</body>`,
         ),
     );
+  });
+  // The shell only ever shows the harness: no new windows, no foreign origin.
+  const origin = new URL(base).origin;
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, url) => {
+    if (new URL(url).origin !== origin) {
+      event.preventDefault();
+    }
   });
   void win.loadURL(`${base}/pet`);
 

@@ -22,18 +22,23 @@ export async function captureCameraFrame(): Promise<string | null> {
     video.srcObject = stream;
     video.muted = true;
     await video.play();
-    // createImageBitmap waits for a decoded frame: drawImage on a just-started
-    // video can capture an empty one.
+    // Cameras need a moment to settle exposure/white balance: an immediate
+    // frame is often black and the vision model then describes darkness.
+    const settled = Promise.withResolvers<void>();
+    setTimeout(() => settled.resolve(), 500);
+    await settled.promise;
     const bitmap = await createImageBitmap(video);
     try {
+      // Bound the request: a 4K webcam still describes fine at 640px.
+      const width = Math.min(bitmap.width, 640);
       const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+      canvas.width = width;
+      canvas.height = Math.round((bitmap.height * width) / bitmap.width);
       const context = canvas.getContext("2d");
       if (context === null) {
         return null;
       }
-      context.drawImage(bitmap, 0, 0);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       return canvas.toDataURL("image/jpeg", 0.8);
     } finally {
       bitmap.close();

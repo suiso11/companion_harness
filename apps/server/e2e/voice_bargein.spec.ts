@@ -75,7 +75,9 @@ test.beforeEach(async ({ request }) => {
 });
 
 test("speech becomes a turn, then interrupts the reply", async ({ page }) => {
+  let transcriptions = 0;
   await page.route("**/api/transcribe", async (route) => {
+    transcriptions += 1;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -105,12 +107,18 @@ test("speech becomes a turn, then interrupts the reply", async ({ page }) => {
     timeout: 20_000,
   });
 
-  // The answer is spoken, then the next spoken frame barges in and stops it.
+  // The answer is spoken, then the next spoken frame barges in and stops it
+  // long before the 20 s clip could end on its own.
   await expect(voice).toHaveAttribute("data-speaking", "true", {
     timeout: 20_000,
   });
+  const speakingSince = Date.now();
   await expect(voice).toHaveAttribute("data-speaking", "false", {
     timeout: 30_000,
   });
+  expect(Date.now() - speakingSince).toBeLessThan(8_000);
+  // The interruption came from a second captured utterance, not from a
+  // playback failure: the next loop's speech was transcribed again.
+  await expect.poll(() => transcriptions, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
   await page.locator("[data-voice-mode]").click();
 });

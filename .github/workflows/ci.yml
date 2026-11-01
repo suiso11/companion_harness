@@ -54,6 +54,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        env:
+          # The desktop pet shell runs on a client machine; CI only needs the
+          # lockfile and the pure bounds test.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: pnpm install --frozen-lockfile
 
       - name: Build pinned remind CLI (real dependency, no models)
@@ -180,6 +184,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        env:
+          # The desktop pet shell runs on a client machine; CI only needs the
+          # lockfile and the pure bounds test.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: pnpm install --frozen-lockfile
 
       - name: Build pinned remind CLI (real dependency, no models)

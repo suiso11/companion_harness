@@ -8,6 +8,6 @@
     "smoke": "COMPANION_PET_SMOKE=1 electron ."
   },
   "devDependencies": {
-    "electron": "^39.0.0"
+    "electron": "39.8.10"
   }
 }

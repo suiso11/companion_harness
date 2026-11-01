@@ -24,7 +24,7 @@ importers:
   apps/desktop:
     devDependencies:
       electron:
-        specifier: ^39.0.0
+        specifier: 39.8.10
         version: 39.8.10
 
   apps/server:

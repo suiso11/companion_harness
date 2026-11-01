@@ -177,7 +177,7 @@ onMount(() => {
         }
         // One lid channel only: b_blink already drives both eyes on most
         // rigs, and adding the L/R pair would double the weight.
-        const blink = dictionary["b_blink"];
+        const blink = dictionary.b_blink;
         if (blink !== undefined) {
           blinks.push({ mesh: object, index: blink });
         } else {
