@@ -153,6 +153,31 @@ body {
   min-width: 0;
 }
 
+.feature-links a,
+.feature-links-dev summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.nav-icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.nav-icon {
+  flex: none;
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .feature-links a {
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
