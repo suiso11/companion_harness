@@ -19,6 +19,7 @@ export const STRICT_CSP =
   "script-src 'self'; " +
   "style-src 'self'; " +
   "img-src 'self' data:; " +
+  "media-src 'self' blob:; " +
   "connect-src 'self'; " +
   "object-src 'none'; " +
   "base-uri 'self'; " +
