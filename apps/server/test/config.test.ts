@@ -132,6 +132,23 @@ describe("server config defaults", () => {
     expect(Object.isFrozen(config)).toBe(true);
   });
 
+  it("defaults the avatar directory under the app-data directory", () => {
+    const config = loadServerConfig(baseEnv(tempDbPath()));
+    expect(config.avatarDir).toBe(join(defaultDbPath(), "..", "avatar"));
+    expect(
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AVATAR_DIR: "/srv/avatar",
+      }).avatarDir,
+    ).toBe("/srv/avatar");
+    expect(() =>
+      loadServerConfig({
+        ...baseEnv(tempDbPath()),
+        COMPANION_AVATAR_DIR: "relative/avatar",
+      }),
+    ).toThrow("avatar dir must be an absolute path");
+  });
+
   it("places the default DB under the OS app-data directory", () => {
     expect(defaultDbPath()).toContain("companion-harness");
     expect(defaultDbPath().endsWith("companion.sqlite")).toBe(true);
