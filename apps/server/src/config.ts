@@ -3051,7 +3051,9 @@ export function loadServerConfig(
   const avatarRaw = env.COMPANION_AVATAR_DIR;
   if (
     avatarRaw !== undefined &&
-    (avatarRaw.length === 0 || avatarRaw.length > 4096 || !isAbsolute(avatarRaw))
+    (avatarRaw.length === 0 ||
+      avatarRaw.length > 4096 ||
+      !isAbsolute(avatarRaw))
   ) {
     throw configError("avatar dir must be an absolute path");
   }

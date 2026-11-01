@@ -105,8 +105,8 @@ test("a configured but broken VRM fails gracefully", async ({ page }) => {
   await page.goto("/character");
   // The 3D chunk loads and the loader fails; the panel keeps the notice and
   // the rest of the page usable instead of crashing.
-  await expect(
-    page.getByText("3Dモデルを読み込めませんでした"),
-  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText("3Dモデルを読み込めませんでした")).toBeVisible({
+    timeout: 20_000,
+  });
   await expect(page.getByPlaceholder("試聴する文")).toBeVisible();
 });

@@ -143,10 +143,10 @@ import {
   MAX_TRANSCRIBE_BODY_BYTES,
   transcribeVoice,
 } from "./asr.js";
+import { avatarUrl, resolveAvatarFile } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
-import { avatarUrl, resolveAvatarFile } from "./avatar_files.js";
 import {
   createMonitorSampler,
   createWebSearchHealth,
@@ -5320,10 +5320,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!strictQuery(c, []).ok) {
       return validationError(c);
     }
-    return c.json(
-      { version: 1, vrmUrl: avatarUrl(config.avatarDir) },
-      200,
-    );
+    return c.json({ version: 1, vrmUrl: avatarUrl(config.avatarDir) }, 200);
   });
 
   app.get("/avatar/:file", (c) => {
