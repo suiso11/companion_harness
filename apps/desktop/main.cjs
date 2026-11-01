@@ -101,7 +101,7 @@ function createWindow() {
     win.webContents.once("did-finish-load", () =>
       setTimeout(async () => {
         if (!win.webContents.getURL().startsWith(base)) {
-          console.error("pet smoke: page did not load from " + base);
+          console.error(`pet smoke: page did not load from ${base}`);
           app.exit(1);
           return;
         }
@@ -132,14 +132,23 @@ function createTray() {
       {
         label: "表示",
         click: () => {
-          // The error page cannot recover by itself; reload the pet page.
-          if (win.webContents.getURL().startsWith("data:")) {
+          // The error or login page cannot recover by itself.
+          if (!win.webContents.getURL().startsWith(`${base}/pet`)) {
             void win.loadURL(`${base}/pet`);
           }
           win.show();
         },
       },
       { label: "隠す", click: () => win.hide() },
+      {
+        // Remote mode needs the session cookie: log in once in the chat page,
+        // then pick 表示 to return to the pet.
+        label: "ログイン（チャットを開く）",
+        click: () => {
+          void win.loadURL(`${base}/`);
+          win.show();
+        },
+      },
       {
         label: "マウスを透過",
         type: "checkbox",

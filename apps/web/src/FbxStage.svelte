@@ -181,7 +181,7 @@ onMount(() => {
         if (blink !== undefined) {
           blinks.push({ mesh: object, index: blink });
         } else {
-          for (const name of ["b_blink_L", "b_blink_R"]) {
+          for (const name of ["b_blink_L", "b_blink_R"] as const) {
             const lid = dictionary[name];
             if (lid !== undefined) {
               blinks.push({ mesh: object, index: lid });

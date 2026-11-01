@@ -167,7 +167,7 @@ async function lookWithCamera(): Promise<void> {
     status = `見えているもの: ${seen}`;
     // The poller speaks the run this observation produces; the previous
     // answer must not be replayed here.
-    if (!(await postObservation(`カメラを見て。映っているもの: ${seen}`))) {
+    if (!(await postObservation(seen))) {
       status = "観察を送信できませんでした";
     }
   } finally {

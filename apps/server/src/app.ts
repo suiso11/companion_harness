@@ -144,7 +144,6 @@ import {
   MAX_TRANSCRIBE_BODY_BYTES,
   transcribeVoice,
 } from "./asr.js";
-import { askVision, decodeJpegBase64, MAX_VISION_BODY_BYTES } from "./vision.js";
 import {
   avatarConfig,
   resolveAvatarBrotli,
@@ -195,6 +194,11 @@ import {
   STRICT_CSP,
 } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
+import {
+  askVision,
+  decodeJpegBase64,
+  MAX_VISION_BODY_BYTES,
+} from "./vision.js";
 
 /**
  * PR-5: non-chat feature pages. Every path returns the SAME Svelte shell as

@@ -660,7 +660,9 @@ export const DEFAULT_VISION_TIMEOUT_MS = 60_000;
 export const MAX_VISION_PROMPT_LENGTH = 500;
 export const MAX_VISION_MODEL_LENGTH = 200;
 
-export function parseVisionConfig(raw: string | undefined): VisionConfig | null {
+export function parseVisionConfig(
+  raw: string | undefined,
+): VisionConfig | null {
   if (raw === undefined) {
     return null;
   }

@@ -316,6 +316,13 @@ export interface ProjectPromptArgs {
    * llama.cpp prefix cache keeps its prefix).
    */
   readonly temporal?: TemporalContext;
+  /**
+   * Machine-generated description of a camera/screen frame the client
+   * attached to this turn (`uiContext.observation`). Rendered after the user
+   * request and explicitly attributed to the appliance, never to the user.
+   * Bounded by `renderObservation` before it reaches this function.
+   */
+  readonly observation?: string | null;
 }
 
 /** Fixed repair instructions (no raw model output echoed back). */
@@ -445,6 +452,33 @@ export function agentHarnessFingerprint(args: {
   );
 }
 
+/** Maximum characters of `uiContext.observation` rendered to the model. */
+export const MAX_OBSERVATION_LENGTH = 2_000;
+
+/**
+ * The client-set appliance observation for this turn, or null. It is
+ * untrusted input: trimmed, control-character free, and bounded so a broken
+ * or hostile client cannot inflate the prompt.
+ */
+export function renderObservation(
+  uiContext: Record<string, unknown>,
+): string | null {
+  const value = uiContext.observation;
+  if (typeof value !== "string") {
+    return null;
+  }
+  let cleaned = "";
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    cleaned += code < 0x20 || code === 0x7f ? " " : character;
+  }
+  const text = cleaned.replace(/\s+/g, " ").trim();
+  if (text.length === 0 || text.length > MAX_OBSERVATION_LENGTH) {
+    return null;
+  }
+  return text;
+}
+
 export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
   const system = args.systemPrompt ?? AGENT_SYSTEM_PROMPT;
   const messages: ChatRequest["messages"] = [
@@ -488,7 +522,11 @@ export function projectPrompt(args: ProjectPromptArgs): ChatRequest {
       : formatCurrentDateTimeLine(args.temporal.now, args.temporal.timeZone);
   const temporalPrefix =
     currentDateTimeLine === null ? "" : `${currentDateTimeLine}\n`;
-  const head = `${temporalPrefix}User request:\n${args.requestText}\n`;
+  const observationPrefix =
+    args.observation === undefined || args.observation === null
+      ? ""
+      : `Observation from the user's camera (machine-generated; not the user's words):\n${args.observation}\n`;
+  const head = `${temporalPrefix}User request:\n${args.requestText}\n${observationPrefix}`;
   const trailer =
     "Call ordinary tools for evidence when needed, then submit exactly one answer.submit call alone.";
   const header = "Session references (frozen structural summary):";
@@ -3276,6 +3314,7 @@ export function createAgentStrategy(
         model,
         systemPrompt,
         temporal,
+        observation: renderObservation(ctx.turn.frozenContext.uiContext),
       }).messages;
       // Authoritative recheck after synchronous preparation and before the
       // first gateway call: preparation that consumes/exceeds the wall budget

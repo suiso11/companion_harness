@@ -66,8 +66,12 @@ export async function describeVision(
   return text.trim();
 }
 
-/** Append the observation to the newest session (creating one if needed). */
-export async function postObservation(text: string): Promise<boolean> {
+/**
+ * Attach the observation to the newest session (creating one if needed).
+ * The caption travels in `uiContext.observation`, so the turn's user text
+ * stays the user's own words and memory never records the caption as speech.
+ */
+export async function postObservation(observation: string): Promise<boolean> {
   const list = await fetchJson("/api/sessions?limit=1");
   let sessionId = list.status === 200 ? newestSessionId(list.body) : null;
   if (sessionId === null) {
@@ -80,7 +84,7 @@ export async function postObservation(text: string): Promise<boolean> {
   }
   const posted = await postJson(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
-    { text, uiContext: {} },
+    { text: "カメラを見て", uiContext: { observation } },
     randomUuid(),
   );
   return posted.status === 202;

@@ -884,6 +884,12 @@ COMPANION_VISION_JSON='{"url":"http://127.0.0.1:8081","model":"qwen2.5-vl","time
   chars; else the configured `prompt`, else a fixed Japanese default).
   Anything else is `validation_error` and never reaches the engine.
 - Response is `{ "version": 1, "text": "..." }` (trimmed, 1..4000 chars).
+- The character page puts the returned description in
+  `uiContext.observation` of the user turn (the turn text stays the user's
+  own words, 「カメラを見て」). The kernel renders it only for that turn as
+  `Observation from the user's camera (machine-generated; not the user's
+  words)` (trimmed, control characters removed, ≤2000 chars); memory intake
+  never sees it as user speech.
 - Same JSON-only mutation gate and Origin/Host guards as `/api/speech`; no
   idempotency key. The image is forwarded once and never stored or logged;
   no run event or SSE frame is produced and there is no retry. A missing or
@@ -6345,4 +6351,4 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 
 ## デスクトップペット (Electron シェル)
 
-`pnpm pet` で透明・枠なし・常に手前のウィンドウに `/pet` を表示する（アバターのみ・自動読み上げ・ドラッグで移動）。サーバーは別途起動しておく。接続先は `COMPANION_PET_URL`（既定 `http://127.0.0.1:3000`）。トレイメニューから表示/隠す/マウス透過/常に手前/終了を操作する。位置とサイズは userData の `pet-window.json` に保存される。`COMPANION_PET_SMOKE=1` でスクリーンショット1枚を撮って終了する（`pnpm --filter @companion/desktop smoke`、出力先 `COMPANION_PET_SMOKE_OUT`）。
+クライアント側マシン（Electron を直接動かせる PC）で `pnpm pet` を実行し、`COMPANION_PET_URL` でサーバのオリジンを渡す（既定 `http://127.0.0.1:3000`、Tailscale 経由なら `https://<host>.ts.net` など）。透明・枠なし・常に手前のウィンドウに `/pet` を表示する（アバターのみ・新しい回答の自動読み上げ・ドラッグで移動）。リモート認証が有効なときはトレイの「ログイン（チャットを開く）」でログインし（cookie は Electron 側プロファイルに残る）、「表示」でペットに戻る。トレイから表示/隠す/マウス透過/常に手前/終了を操作する。位置とサイズは userData の `pet-window.json` に保存される。透過にはコンポジタが必要（X11 は合成マネージャ、Wayland は既定で合成）。`COMPANION_PET_SMOKE=1` でスクリーンショット1枚を撮って終了する（`pnpm --filter @companion/desktop smoke`、出力先 `COMPANION_PET_SMOKE_OUT`）。
