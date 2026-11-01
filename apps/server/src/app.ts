@@ -62,6 +62,7 @@ import {
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
+  PostSpeechRequestSchema,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
   ProposalExecutionViewSchema,
@@ -171,6 +172,7 @@ import {
   TrialCandidateError,
   type TrialCandidateErrorCode,
 } from "./trial_candidate.js";
+import { synthesizeSpeech } from "./tts.js";
 import {
   renderConversationShell,
   renderRemoteLogin,
@@ -1677,6 +1679,36 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return remoteUnauthenticated(c);
     }
     await next();
+  });
+
+  // Voice output for the avatar client (POST /api/speech): one finished
+  // answer in, one WAV out. Config-gated (COMPANION_TTS_JSON): unset keeps
+  // the exact previous 404. Same JSON-only mutation gate and session cookie
+  // as every other route; nothing is persisted and SSE is untouched, so a
+  // synthesis failure can only leave the avatar silent, never delay or
+  // corrupt the answer.
+  app.post("/api/speech", async (c) => {
+    const tts = config.tts;
+    if (tts === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = PostSpeechRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const speech = await synthesizeSpeech(
+      tts,
+      parsedBody.data.parts.map((part) => part.text),
+    );
+    if (!speech.ok) {
+      return apiError(c, 502, "internal_error", "speech synthesis failed");
+    }
+    c.header("cache-control", "no-store");
+    return c.body(speech.wav, 200, { "content-type": "audio/wav" });
   });
 
   app.onError((error, c) => mapDomainError(c, error));

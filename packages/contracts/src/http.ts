@@ -11,7 +11,8 @@ import {
   UnixMsSchema,
   UuidSchema,
 } from "./ids.js";
-import { RunResultSchema } from "./run_result.js";
+import { countCodePoints } from "./references.js";
+import { RunResultSchema, VoiceRenderPartSchema } from "./run_result.js";
 import {
   ActiveStatusSchema,
   RunMemoryStatusSchema,
@@ -84,6 +85,33 @@ export const PostMessageRequestSchema = z.strictObject({
   uiContext: z.record(z.string(), z.json()).optional().default({}),
 });
 export type PostMessageRequest = z.infer<typeof PostMessageRequestSchema>;
+
+/**
+ * POST /api/speech request: spoken rendering of one finished answer.
+ *
+ * `parts` is exactly the rendered voice projection (`RunResult.voice.parts`):
+ * one text per answer part, in order, so the caller never re-derives what to
+ * say. The server joins the parts into ONE synthesis call and returns the
+ * whole answer as a single WAV. No timing metadata: lip sync is the client's
+ * own analyser. The total is bounded — this is a rendering of an already
+ * bounded answer, not a general TTS proxy.
+ */
+export const MAX_SPEECH_PARTS = 64;
+export const MAX_SPEECH_CODE_POINTS = 2_000;
+
+export const PostSpeechRequestSchema = z
+  .strictObject({
+    parts: z.array(VoiceRenderPartSchema).min(1).max(MAX_SPEECH_PARTS),
+  })
+  .refine(
+    (value) =>
+      value.parts.reduce((sum, part) => sum + countCodePoints(part.text), 0) <=
+      MAX_SPEECH_CODE_POINTS,
+    {
+      message: `speech text must be at most ${MAX_SPEECH_CODE_POINTS} code points`,
+    },
+  );
+export type PostSpeechRequest = z.infer<typeof PostSpeechRequestSchema>;
 
 export const AcceptedRunSchema = z.strictObject({
   id: UuidSchema,

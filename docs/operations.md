@@ -786,6 +786,43 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
   voice call). Because `voice` extends the strict RunResult schema, a
   pre-voice build cannot read rows that contain it.
 
+## Speech output (`POST /api/speech`, strict opt-in, local only)
+
+Unset `COMPANION_TTS_JSON` (default) keeps the route a fixed 404. When set,
+the value must be a strict JSON object with only `{ url, speaker, timeoutMs? }`
+pointing at a loopback VOICEVOX-compatible engine (VOICEVOX / AivisSpeech):
+
+```sh
+COMPANION_TTS_JSON='{"url":"http://127.0.0.1:10101","speaker":8,"timeoutMs":20000}'
+```
+
+- `url` follows the model-local loopback rules (plain http,
+  `127.0.0.1`/`localhost`/`::1`, no credentials/query/fragment; normalized).
+  `speaker` is the engine's speaker/style id (integer `0..2147483647`).
+  `timeoutMs` is an integer `1000..120000`, default `20000`. Unknown keys,
+  malformed JSON, non-loopback URLs, and out-of-range values fail startup
+  closed.
+- Request body is strict JSON `{ parts: [{ text }] }`: exactly
+  `RunResult.voice.parts` from the finished answer, in order. 1..64 parts,
+  at most 2000 code points in total; unknown keys and empty text are
+  rejected with the shared `validation_error`. Like every mutation, the body
+  must be `application/json` and carry an allowed Origin.
+- The parts are joined with a newline (a phrase break for the engine) and
+  synthesized by one `audio_query` + `synthesis` pair, so the response is
+  the whole answer as one `audio/wav` with `cache-control: no-store`. No
+  timing metadata is returned: lip sync is the client's own analyser.
+  Sentence-level fetching is future work; the current shape is one request
+  per answer.
+- Auth is the existing session cookie (remote mode included). Nothing is
+  persisted, no run event or SSE frame is produced, and there is no retry:
+  a missing/unreachable engine, a non-2xx engine response, a malformed query
+  body, an empty response, or more than 8 MiB of audio is a fixed
+  `502 {"error":{"code":"internal_error","message":"speech synthesis failed"}}`.
+  The avatar then stays silent; answer generation and display are untouched.
+- The engine itself is a separate local process and the server never spawns
+  it. The endpoint is a renderer of an already-bounded answer, not a general
+  TTS proxy: it does not accept arbitrary text outside the request bound.
+
 ## Fixed-task comparison CLI (experimental)
 
 `pnpm compare -- /abs/input.json` is an operator experiment, not a
