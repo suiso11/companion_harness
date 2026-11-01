@@ -46,9 +46,7 @@ function textGateway(text: string): {
   }));
 }
 
-function answer(
-  texts: string[] = ["明日は晴れです。r1", "10:00に会います。"],
-) {
+function answer(texts: string[] = ["明日は晴れです。r1", "10:00に会います。"]) {
   return {
     version: 1 as const,
     parts: texts.map((text) => ({ text, citations: [] as string[] })),
@@ -107,10 +105,7 @@ describe("createVoiceRenderer", () => {
     // The user payload uses the same object shape as the required output.
     expect(user?.content).toContain(
       JSON.stringify({
-        parts: [
-          { text: "明日は晴れです。r1" },
-          { text: "10:00に会います。" },
-        ],
+        parts: [{ text: "明日は晴れです。r1" }, { text: "10:00に会います。" }],
       }),
     );
   });
