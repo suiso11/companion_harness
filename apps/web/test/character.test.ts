@@ -5,10 +5,7 @@ import {
   newestSessionId,
 } from "../src/lib/character.js";
 
-function v2(
-  canonical: string[],
-  voiced?: string[],
-): Record<string, unknown> {
+function v2(canonical: string[], voiced?: string[]): Record<string, unknown> {
   return {
     version: 2,
     text: canonical.join("\n\n"),
@@ -42,9 +39,9 @@ describe("mouthOpen", () => {
 
 describe("newestSessionId", () => {
   it("reads the first session id", () => {
-    expect(
-      newestSessionId({ sessions: [{ id: "abc", title: "t" }] }),
-    ).toBe("abc");
+    expect(newestSessionId({ sessions: [{ id: "abc", title: "t" }] })).toBe(
+      "abc",
+    );
   });
   it("returns null for an empty or malformed list", () => {
     expect(newestSessionId({ sessions: [] })).toBeNull();

@@ -12,8 +12,8 @@ import { onMount } from "svelte";
 import {
   fetchLatestAnswer,
   fetchSpeech,
-  mouthOpen,
   type LatestAnswer,
+  mouthOpen,
 } from "./lib/character.js";
 
 const POLL_MS = 3000;

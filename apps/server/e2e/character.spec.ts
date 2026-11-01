@@ -65,9 +65,11 @@ test("character page renders the avatar and speaks a draft", async ({
   await page.getByPlaceholder("試聴する文").fill("テストです");
   await page.getByRole("button", { name: "試聴", exact: true }).click();
 
-  await expect(
-    page.locator("[data-character-panel] .stage"),
-  ).toHaveAttribute("data-speaking", "true", { timeout: 10_000 });
+  await expect(page.locator("[data-character-panel] .stage")).toHaveAttribute(
+    "data-speaking",
+    "true",
+    { timeout: 10_000 },
+  );
   await expect(page.locator("[data-character-status]")).toContainText(
     "話しています",
   );
