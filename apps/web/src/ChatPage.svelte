@@ -173,6 +173,8 @@ function lsDel(key: string): void {
 let sessionId: string | null = $state(null);
 let sessions: string[] = $state([]);
 let sessionSummaries: SessionSummary[] = $state([]);
+let sidebarOpen = $state(false);
+let sidebarLoaded = $state(false);
 let presenceTimer: number | null = null;
 let booted = $state(false);
 let turns: Turn[] = $state([]);
@@ -407,14 +409,6 @@ async function refreshSessions(): Promise<void> {
   } catch {
     // Best effort: the local storage list stays usable.
   }
-}
-
-function sessionLabel(id: string): string {
-  const s = sessionSummaries.find((item) => item.id === id);
-  const current = id === sessionId;
-  return `${current ? "● " : ""}${s?.title ?? id.slice(0, 8)}${
-    s?.lastTurnKind === "companion_text" && !current ? "（自発）" : ""
-  }`;
 }
 
 function touchPresence(): void {
@@ -3327,25 +3321,20 @@ function evidenceForTurn(turn: Turn): {
     <h1>会話</h1>
     <FeatureNav {activePath} />
     <div class="sessions">
-      <label for="session-list">セッション</label>
-      <select
-        id="session-list"
-        value={sessionId ?? ""}
-        onchange={(e) => {
-          const v = (e.target as HTMLSelectElement).value;
-          if (v.length > 0) void switchSession(v);
+      <button
+        id="session-toggle"
+        type="button"
+        data-session-id={sessionId ?? ""}
+        aria-haspopup="dialog"
+        aria-expanded={sidebarOpen}
+        onclick={() => {
+          sidebarLoaded = true;
+          sidebarOpen = true;
         }}
-        disabled={sending || activeRunId !== null}
       >
-        {#if sessionId === null}
-          <option value="">読み込み中</option>
-        {/if}
-        {#each sessions as id (id)}
-          <option value={id} selected={id === sessionId}>
-            {sessionLabel(id)}
-          </option>
-        {/each}
-      </select>
+        会話一覧
+        <span class="session-count">{sessions.length}</span>
+      </button>
       <button
         id="session-new"
         type="button"
@@ -3356,6 +3345,29 @@ function evidenceForTurn(turn: Turn): {
       </button>
     </div>
   </header>
+
+  {#if sidebarLoaded}
+    {#await import("./SessionSidebar.svelte") then module}
+      <module.default
+        open={sidebarOpen}
+        sessions={sessions}
+        summaries={sessionSummaries}
+        sessionId={sessionId}
+        disabled={sending || activeRunId !== null}
+        onClose={() => {
+          sidebarOpen = false;
+        }}
+        onSelect={(id) => {
+          sidebarOpen = false;
+          void switchSession(id);
+        }}
+        onNew={() => {
+          sidebarOpen = false;
+          void newSession();
+        }}
+      />
+    {/await}
+  {/if}
 
   {#if activePath === "/"}
     {#await import("./lib/AutonomyPausedBanner.svelte") then banner}
