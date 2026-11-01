@@ -171,6 +171,7 @@ onMount(() => {
           this={mod.default}
           url={avatar.url}
           texturesUrl={avatar.texturesUrl}
+          version={avatar.assetVersion}
           {level}
         />
       {:catch}

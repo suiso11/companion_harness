@@ -67,9 +67,29 @@ export type AvatarKind = "vrm" | "fbx";
 
 export interface AvatarConfig {
   readonly kind: AvatarKind;
+  /** Same-origin URL with a `v=<mtime>` query (safe to cache immutably). */
   readonly url: string;
   /** Present when the FBX path has a `textures.json` mapping. */
   readonly texturesUrl: string | null;
+  /** Cache key: the newest mtime of the model and texture mapping. */
+  readonly assetVersion: string;
+}
+
+/** `<dir>/<name>.br` for pre-compressed model files (contained, real file). */
+export function resolveAvatarBrotli(
+  dir: string | null,
+  name: string,
+): string | null {
+  const base = resolveAvatarFile(dir, name);
+  if (base === null) {
+    return null;
+  }
+  const target = `${base.path}.br`;
+  try {
+    return statSync(target).isFile() ? target : null;
+  } catch {
+    return null;
+  }
 }
 
 /** What the character page should load, or null when no model exists. */
@@ -84,10 +104,19 @@ export function avatarConfig(dir: string | null): AvatarConfig | null {
     }
     const kind = extname(name).slice(1) as AvatarKind;
     const textures = resolveAvatarFile(dir, AVATAR_TEXTURES_FILE);
+    const mtimes = [statSync(file.path).mtimeMs];
+    if (textures !== null) {
+      mtimes.push(statSync(textures.path).mtimeMs);
+    }
+    const assetVersion = String(Math.floor(Math.max(...mtimes)));
     return {
       kind,
-      url: `/avatar/${basename(file.path)}`,
-      texturesUrl: textures === null ? null : `/avatar/${AVATAR_TEXTURES_FILE}`,
+      url: `/avatar/${basename(file.path)}?v=${assetVersion}`,
+      texturesUrl:
+        textures === null
+          ? null
+          : `/avatar/${AVATAR_TEXTURES_FILE}?v=${assetVersion}`,
+      assetVersion,
     };
   }
   return null;
