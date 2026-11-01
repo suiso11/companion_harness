@@ -52,15 +52,19 @@
 
 口パクはフロント側で完結する: 取得した音声を `AudioContext` に接続し、`AnalyserNode` の振幅を `ParamMouthOpenY` に写像する。音声側からタイミング情報を受け取る必要はない。
 
-### 3.2 アバター(Web)
-- 依存: `pixi.js` + `pixi-live2d-display`(Cubism 4 ランタイム)。**CDN 不可**(CSP が厳格)。バンドルして self 配信。
-- 新規 `apps/web/src/CharacterPage.svelte`:
-  - Live2D モデルを読み込み、待機モーション。
-  - 回答完了時に TTS を取得して再生。
-  - 口パク: `AudioContext` + `AnalyserNode` の振幅 → `ParamMouthOpenY` を毎フレーム更新。音素タイミング不要。
-  - トグル: 自動発話 ON/OFF、原文/話し方の切替は既存チャットと共用。
-- ルーティング: `routeForPath` に `/character` を追加(サーバ側のルート表も同様)。
-- モデルはリポジトリに同梱しない。`COMPANION_AVATAR_JSON`(モデルパス、話者ID、口パクパラメータ名)で指定。
+### 3.2 アバター(Web、VRM)
+- モデルは **VRM**(ユーザーが BOOTH で購入した VRChat 用)。Live2D は採用しない。
+- 依存: `three` + `@pixiv/three-vrm`(遅延チャンク。CSP のため self 配信、CDN 不可)。
+- 新規 `apps/web/src/VrmStage.svelte`:
+  - VRM を読み込み、VRM 0.x は 180° 回転して正面を向ける。
+  - 口パク: `AudioContext` + `AnalyserNode` の RMS → VRM expression `aa`。音素タイミング不要。
+  - 瞬き: 数秒間隔の `blink`。
+- `apps/web/src/CharacterPage.svelte` + `CharacterPanel.svelte`:
+  - 回答完了時に TTS を取得して再生(音声トラックの契約)。
+  - 自動発話 ON/OFF、試聴欄、音声未接続時の案内。
+- ルーティング: `routeForPath` に `/character` を追加(サーバ側の feature path も同様)。
+- モデル配信: `COMPANION_AVATAR_DIR`(絶対パス)配下の `model.vrm` を `GET /avatar/model.vrm` で配信。`GET /api/character/config` が `{vrmUrl}` を返し、未設定なら SVG のフォールバック表示。
+- バンドル予算: 3D チャンクのみ例外(`svelte-app-VrmStage.js` 320KB gz)。他のルートは 120KB のまま。
 
 ### 3.3 受入基準(Phase 1)
 - `/character` でアバターが表示され、回答完了後に声が出る。
@@ -81,7 +85,7 @@
 
 | 項目 | リスク | 対応 |
 |---|---|---|
-| Live2D Cubism SDK | 収益条件付きライセンス。同梱素材の再配布不可 | SDK は self 配信、モデルは非同梱。`docs/` にライセンス明記 |
+| VRM モデル(BOOTH) | 作者ごとの利用規約。再配布不可 | モデルは非同梱、`COMPANION_AVATAR_DIR` でローカル指定のみ |
 | VOICEVOX | エンジンと音声ライブラリで規約が異なる | 個人利用の範囲を明記。話者IDは設定で差し替え可能に |
 | GPU 競合 | TTS が 35B と VRAM を奪う | TTS は CPU 既定。GPU は明示オプトイン |
 | レイテンシ | 回答完了→音声開始が遅い | キャッシュ+文単位先読み(Phase 2) |
@@ -92,7 +96,7 @@
 
 | Phase | 内容 | 工数 |
 |---|---|---|
-| 1 | `/character` + Live2D + 口パク | 3〜4日 |
+| 1 | `/character` + VRM ステージ + 口パク | 3〜4日 |
 | 1 | 音声トラックとの結線(契約の合意+再生+中断) | 1日 |
 | 1 | ライセンス文書・CSP 確認・E2E | 1日 |
 | 2 | 表情マッピング + 文単位先読みの消費 | 2〜3日 |

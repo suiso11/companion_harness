@@ -58,6 +58,14 @@ test("character page renders the avatar and speaks a draft", async ({
     });
   });
 
+  // No VRM is configured in the e2e harness: the server reports null and the
+  // panel falls back to the SVG avatar.
+  const config = await page.request.get("/api/character/config");
+  expect(config.ok()).toBe(true);
+  expect(await config.json()).toEqual({ version: 1, vrmUrl: null });
+  const model = await page.request.get("/avatar/model.vrm");
+  expect(model.status()).toBe(404);
+
   await page.goto("/character");
   await expect(page.locator("[data-character-avatar]")).toBeVisible();
   await expect(page.locator("[data-character-panel]")).toBeVisible();
@@ -76,4 +84,29 @@ test("character page renders the avatar and speaks a draft", async ({
   expect(speechCalls).toBe(1);
 
   expect(cspViolations).toEqual([]);
+});
+
+test("a configured but broken VRM fails gracefully", async ({ page }) => {
+  await page.route("**/api/character/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: 1, vrmUrl: "/avatar/model.vrm" }),
+    });
+  });
+  await page.route("**/avatar/model.vrm", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "model/gltf-binary",
+      body: Buffer.from("not a vrm"),
+    });
+  });
+
+  await page.goto("/character");
+  // The 3D chunk loads and the loader fails; the panel keeps the notice and
+  // the rest of the page usable instead of crashing.
+  await expect(page.getByText("3Dモデルを読み込めませんでした")).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByPlaceholder("試聴する文")).toBeVisible();
 });

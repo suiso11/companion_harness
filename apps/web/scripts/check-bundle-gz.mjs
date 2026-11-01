@@ -14,6 +14,10 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const BUDGET_GZ_KB = 120;
+// The character route lazy-loads three.js + @pixiv/three-vrm for the 3D
+// avatar (VRM). It is the ONLY route allowed above the shared budget: the
+// chunk is fetched only on /character when a model is configured.
+const ROUTE_GZ_KB_ALLOWANCE = { "svelte-app-VrmStage.js": 320 };
 const dir = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -51,16 +55,23 @@ for (const name of [...fixedFiles, ...chunkFiles]) {
 // load). The BUDGET is enforced per route — the browser never loads two
 // route chunks at once, so the sum over chunks is not the served payload.
 let worstRouteGz = entryGz + cssGz;
+let exceeded = false;
 for (const name of chunkFiles) {
   const routeTotal = entryGz + cssGz + gzOf(name).length;
+  const cap = (ROUTE_GZ_KB_ALLOWANCE[name] ?? BUDGET_GZ_KB) * 1024;
   worstRouteGz = Math.max(worstRouteGz, routeTotal);
-  console.log(`route ${name}: entry + css + chunk = ${kb(routeTotal)}KB gz`);
+  console.log(
+    `route ${name}: entry + css + chunk = ${kb(routeTotal)}KB gz (cap ${kb(cap)}KB)`,
+  );
+  if (routeTotal > cap) {
+    exceeded = true;
+  }
 }
 
 console.log(
-  `worst-route total gz: ${(worstRouteGz / 1024).toFixed(2)}KB (budget ${BUDGET_GZ_KB}KB)`,
+  `worst-route total gz: ${(worstRouteGz / 1024).toFixed(2)}KB (default budget ${BUDGET_GZ_KB}KB)`,
 );
-if (worstRouteGz > BUDGET_GZ_KB * 1024) {
+if (exceeded) {
   console.error("bundle budget exceeded");
   process.exit(1);
 }
