@@ -490,6 +490,159 @@ export function parseVoiceConfig(raw: string | undefined): VoiceConfig | null {
   });
 }
 
+/**
+ * Strict opt-in local TTS config (COMPANION_TTS_JSON).
+ *
+ * - Unset means `null`: `POST /api/speech` stays a fixed 404.
+ * - Must be an exact object with only `{ url, speaker, timeoutMs? }`.
+ * - `url` is validated with model-local's loopback URL rules (plain http,
+ *   127.0.0.1/localhost/::1, no credentials/query/fragment); normalized.
+ * - `speaker` is the VOICEVOX-compatible speaker/style id (0..2147483647).
+ * - `timeoutMs` defaults to 20000 and is bounded to 1000..120000.
+ * - Failures carry fixed messages only: no URL escapes.
+ * - The returned object is frozen.
+ */
+export interface TtsConfig {
+  readonly url: string;
+  readonly speaker: number;
+  readonly timeoutMs: number;
+}
+
+export const DEFAULT_TTS_TIMEOUT_MS = 20_000;
+export const MIN_TTS_TIMEOUT_MS = 1_000;
+export const MAX_TTS_TIMEOUT_MS = 120_000;
+export const MAX_TTS_SPEAKER_ID = 2_147_483_647;
+
+export function parseTtsConfig(raw: string | undefined): TtsConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("tts config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("tts config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== "url" && key !== "speaker" && key !== "timeoutMs") {
+      throw configError("tts config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    url?: unknown;
+    speaker?: unknown;
+    timeoutMs?: unknown;
+  };
+  let url: string;
+  try {
+    url = normalizeLoopbackBaseUrl(record.url);
+  } catch {
+    throw configError("tts url is invalid");
+  }
+  const speaker = record.speaker;
+  if (
+    typeof speaker !== "number" ||
+    !Number.isInteger(speaker) ||
+    speaker < 0 ||
+    speaker > MAX_TTS_SPEAKER_ID
+  ) {
+    throw configError("tts speaker is invalid");
+  }
+  const timeoutMs =
+    record.timeoutMs === undefined ? DEFAULT_TTS_TIMEOUT_MS : record.timeoutMs;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < MIN_TTS_TIMEOUT_MS ||
+    timeoutMs > MAX_TTS_TIMEOUT_MS
+  ) {
+    throw configError("tts timeoutMs is out of bounds");
+  }
+  return Object.freeze({ url, speaker, timeoutMs });
+}
+
+/**
+ * Strict opt-in local ASR config (COMPANION_ASR_JSON).
+ *
+ * - Unset means `null`: `POST /api/transcribe` stays a fixed 404.
+ * - Must be an exact object with only `{ url, prompt?, timeoutMs? }`.
+ * - `url` is validated with model-local's loopback URL rules (plain http,
+ *   127.0.0.1/localhost/::1, no credentials/query/fragment); normalized.
+ * - `prompt` (1..500 chars) is the decoding bias: the operator's vocabulary
+ *   for names and domain terms, which is the only misrecognition defense
+ *   that is both local and deterministic.
+ * - `timeoutMs` defaults to 20000 and is bounded to 1000..120000.
+ * - Failures carry fixed messages only: no URL or prompt escapes.
+ * - The returned object is frozen.
+ */
+export interface AsrConfig {
+  readonly url: string;
+  readonly prompt: string | null;
+  readonly timeoutMs: number;
+}
+
+export const DEFAULT_ASR_TIMEOUT_MS = 20_000;
+export const MIN_ASR_TIMEOUT_MS = 1_000;
+export const MAX_ASR_TIMEOUT_MS = 120_000;
+export const MAX_ASR_PROMPT_LENGTH = 500;
+
+export function parseAsrConfig(raw: string | undefined): AsrConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("asr config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("asr config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== "url" && key !== "prompt" && key !== "timeoutMs") {
+      throw configError("asr config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    url?: unknown;
+    prompt?: unknown;
+    timeoutMs?: unknown;
+  };
+  let url: string;
+  try {
+    url = normalizeLoopbackBaseUrl(record.url);
+  } catch {
+    throw configError("asr url is invalid");
+  }
+  let prompt: string | null = null;
+  if (record.prompt !== undefined) {
+    if (
+      typeof record.prompt !== "string" ||
+      record.prompt.length === 0 ||
+      record.prompt.length > MAX_ASR_PROMPT_LENGTH ||
+      record.prompt.includes("\0")
+    ) {
+      throw configError("asr prompt is invalid");
+    }
+    prompt = record.prompt;
+  }
+  const timeoutMs =
+    record.timeoutMs === undefined ? DEFAULT_ASR_TIMEOUT_MS : record.timeoutMs;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < MIN_ASR_TIMEOUT_MS ||
+    timeoutMs > MAX_ASR_TIMEOUT_MS
+  ) {
+    throw configError("asr timeoutMs is out of bounds");
+  }
+  return Object.freeze({ url, prompt, timeoutMs });
+}
+
 export interface ServerConfig {
   readonly dbPath: string;
   readonly host: ServerHost;
@@ -524,6 +677,10 @@ export interface ServerConfig {
   readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
   readonly voice: VoiceConfig | null;
+  /** Strict opt-in local TTS; null (unset) keeps /api/speech a fixed 404. */
+  readonly tts: TtsConfig | null;
+  /** Strict opt-in local ASR; null (unset) keeps /api/transcribe a 404. */
+  readonly asr: AsrConfig | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
   readonly remote: RemoteConfig;
   /**
@@ -2910,6 +3067,8 @@ export function loadServerConfig(
   const selfLoop = parseSelfLoopConfig(env.COMPANION_SELFLOOP_JSON);
   const agora = parseAgoraConfig(env.COMPANION_AGORA_JSON);
   const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
+  const tts = parseTtsConfig(env.COMPANION_TTS_JSON);
+  const asr = parseAsrConfig(env.COMPANION_ASR_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
     throw configError(
@@ -2982,6 +3141,8 @@ export function loadServerConfig(
     selfLoop,
     agora,
     voice,
+    tts,
+    asr,
     remote,
     trial,
     autodispatch,

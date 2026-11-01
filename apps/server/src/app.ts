@@ -40,6 +40,7 @@ import {
   LearningHypothesisCreateRequestSchema,
   LearningHypothesisDecisionRequestSchema,
   LearningHypothesisTransitionRequestSchema,
+  MAX_TRANSCRIBE_AUDIO_BYTES,
   MemoryDetailResponseSchema,
   MemoryGraphGlobalQuerySchema,
   MemoryGraphLocalQuerySchema,
@@ -62,6 +63,8 @@ import {
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
+  PostSpeechRequestSchema,
+  PostTranscribeRequestSchema,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
   ProposalExecutionViewSchema,
@@ -134,6 +137,11 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
+import {
+  decodeWavBase64,
+  MAX_TRANSCRIBE_BODY_BYTES,
+  transcribeVoice,
+} from "./asr.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
@@ -171,6 +179,7 @@ import {
   TrialCandidateError,
   type TrialCandidateErrorCode,
 } from "./trial_candidate.js";
+import { synthesizeSpeech } from "./tts.js";
 import {
   renderConversationShell,
   renderRemoteLogin,
@@ -1011,6 +1020,7 @@ function requireUuid(
 
 async function readJsonBody(
   c: Context,
+  maxBytes = MAX_BODY_BYTES,
 ): Promise<{ ok: true; value: unknown; bytes: number } | { ok: false }> {
   // Early Content-Length gate: reject without streaming when the declared
   // size already exceeds the byte cap. Malformed lengths fail closed.
@@ -1021,7 +1031,7 @@ async function readJsonBody(
       return { ok: false };
     }
     const declared = Number(trimmed);
-    if (!Number.isSafeInteger(declared) || declared > MAX_BODY_BYTES) {
+    if (!Number.isSafeInteger(declared) || declared > maxBytes) {
       try {
         await c.req.raw.body?.cancel();
       } catch {
@@ -1048,7 +1058,7 @@ async function readJsonBody(
       }
       if (value !== undefined) {
         total += value.byteLength;
-        if (total > MAX_BODY_BYTES) {
+        if (total > maxBytes) {
           try {
             await reader.cancel();
           } catch {
@@ -1678,6 +1688,70 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return remoteUnauthenticated(c);
     }
     await next();
+  });
+
+  // Voice output for the avatar client (POST /api/speech): one finished
+  // answer in, one WAV out. Config-gated (COMPANION_TTS_JSON): unset keeps
+  // the exact previous 404. Same JSON-only mutation gate and session cookie
+  // as every other route; nothing is persisted and SSE is untouched, so a
+  // synthesis failure can only leave the avatar silent, never delay or
+  // corrupt the answer.
+  app.post("/api/speech", async (c) => {
+    const tts = config.tts;
+    if (tts === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = PostSpeechRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const speech = await synthesizeSpeech(
+      tts,
+      parsedBody.data.parts.map((part) => part.text),
+    );
+    if (!speech.ok) {
+      return apiError(c, 502, "internal_error", "speech synthesis failed");
+    }
+    c.header("cache-control", "no-store");
+    return c.body(speech.wav, 200, { "content-type": "audio/wav" });
+  });
+
+  // Voice input (POST /api/transcribe): one captured utterance in, one
+  // normalized transcript out. Config-gated (COMPANION_ASR_JSON): unset keeps
+  // a fixed 404. The base64 body exists because every mutation is JSON-only;
+  // the decoded audio is re-checked (bounds + RIFF/WAVE) before any engine
+  // call. An empty transcript is a normal 200: the client keeps listening
+  // instead of sending a turn. Nothing is persisted; SSE is untouched.
+  app.post("/api/transcribe", async (c) => {
+    const asr = config.asr;
+    if (asr === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c, MAX_TRANSCRIBE_BODY_BYTES);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = PostTranscribeRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const wav = decodeWavBase64(
+      parsedBody.data.audioBase64,
+      MAX_TRANSCRIBE_AUDIO_BYTES,
+    );
+    if (wav === null) {
+      return validationError(c);
+    }
+    const result = await transcribeVoice(asr, wav);
+    if (!result.ok) {
+      return apiError(c, 502, "internal_error", "speech recognition failed");
+    }
+    c.header("cache-control", "no-store");
+    return c.json({ text: result.text });
   });
 
   app.onError((error, c) => mapDomainError(c, error));
