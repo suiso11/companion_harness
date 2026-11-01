@@ -4,8 +4,8 @@
 // mouth follows the audio level passed by the panel, and the eyes blink on a
 // simple timer. Any load failure flips to a visible notice, never a crash.
 
+import { type VRM, VRMLoaderPlugin } from "@pixiv/three-vrm";
 import { onMount } from "svelte";
-import { VRMLoaderPlugin, type VRM } from "@pixiv/three-vrm";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
@@ -20,7 +20,10 @@ onMount(() => {
 
   void (async () => {
     try {
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+      });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(host.clientWidth, Math.max(host.clientHeight, 240));
       host.appendChild(renderer.domElement);
