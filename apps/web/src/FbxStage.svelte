@@ -25,6 +25,7 @@ let {
 
 let host: HTMLDivElement;
 let failed = $state(false);
+let loading = $state(true);
 
 onMount(() => {
   let disposed = false;
@@ -32,6 +33,9 @@ onMount(() => {
 
   void (async () => {
     try {
+      // Let the loading notice paint before the (synchronous, ~9s for a
+      // 17MB FBX) parse blocks the main thread.
+      await new Promise((resolve) => setTimeout(resolve, 50));
       const loader = new FBXLoader();
       const group = await loader.loadAsync(url);
       if (disposed) {
@@ -86,7 +90,7 @@ onMount(() => {
         antialias: true,
         alpha: true,
       });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
       renderer.setSize(host.clientWidth, Math.max(host.clientHeight, 240));
       host.appendChild(renderer.domElement);
 
@@ -173,11 +177,10 @@ onMount(() => {
             blinkAt = now + 2400 + Math.random() * 2600;
           }
         }
-        // FBX is not animated here; update world matrices for skinning.
-        group.updateMatrixWorld(true);
         renderer.render(scene, camera);
         raf = requestAnimationFrame(frame);
       };
+      loading = false;
       frame();
 
       const resize = (): void => {
@@ -196,6 +199,7 @@ onMount(() => {
         host.removeChild(renderer.domElement);
       };
     } catch {
+      loading = false;
       failed = true;
     }
   })();
@@ -208,6 +212,11 @@ onMount(() => {
 </script>
 
 <div class="fbx" bind:this={host} data-fbx-stage="true"></div>
+{#if loading}
+  <p class="notice" data-fbx-loading="true">
+    3Dモデルを読み込み中…（初回は数秒かかります）
+  </p>
+{/if}
 {#if failed}
   <p class="notice">3Dモデルを読み込めませんでした（ファイルの配置を確認してください）</p>
 {/if}
