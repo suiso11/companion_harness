@@ -53,8 +53,13 @@
 口パクはフロント側で完結する: 取得した音声を `AudioContext` に接続し、`AnalyserNode` の振幅を `ParamMouthOpenY` に写像する。音声側からタイミング情報を受け取る必要はない。
 
 ### 3.2 アバター(Web、VRM)
-- モデルは **VRM**(ユーザーが BOOTH で購入した VRChat 用)。Live2D は採用しない。
+- モデルは **VRM または FBX**(ユーザーが BOOTH で購入した VRChat 用)。Live2D は採用しない。
+- BOOTH パッケージは `.unitypackage` + FBX + テクスチャのことが多いため、FBX を直接読む経路も持つ(VRM 変換不要)。
 - 依存: `three` + `@pixiv/three-vrm`(遅延チャンク。CSP のため self 配信、CDN 不可)。
+- 新規 `apps/web/src/FbxStage.svelte`(FBX):
+  - `vrc.v_aa` などの VRChat ビゼームと `b_blink` を直接駆動(VRM変換不要)。
+  - T-pose を緩める(Upperarm_L/R を下げる)。
+  - テクスチャは FBX に埋め込まれないため、`textures.json`(material名→ファイル名)で `/avatar/` から割り当てる。
 - 新規 `apps/web/src/VrmStage.svelte`:
   - VRM を読み込み、VRM 0.x は 180° 回転して正面を向ける。
   - 口パク: `AudioContext` + `AnalyserNode` の RMS → VRM expression `aa`。音素タイミング不要。

@@ -8,7 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { avatarUrl, resolveAvatarFile } from "../src/avatar_files.js";
+import { avatarConfig, resolveAvatarFile } from "../src/avatar_files.js";
 
 const dirs: string[] = [];
 
@@ -25,39 +25,75 @@ afterEach(() => {
 });
 
 describe("resolveAvatarFile", () => {
-  it("resolves the default model file inside the directory", () => {
+  it("resolves a whitelisted file with its content type", () => {
     const dir = tempDir();
-    const file = join(dir, "model.vrm");
-    writeFileSync(file, "vrm");
-    expect(resolveAvatarFile(dir)).toBe(file);
-    expect(avatarUrl(dir)).toBe("/avatar/model.vrm");
+    writeFileSync(join(dir, "model.fbx"), "fbx");
+    writeFileSync(join(dir, "textures.json"), "{}");
+    writeFileSync(join(dir, "Body.png"), "png");
+    expect(resolveAvatarFile(dir, "model.fbx")).toEqual({
+      path: join(dir, "model.fbx"),
+      contentType: "application/octet-stream",
+    });
+    expect(resolveAvatarFile(dir, "textures.json")?.contentType).toBe(
+      "application/json",
+    );
+    expect(resolveAvatarFile(dir, "Body.png")?.contentType).toBe("image/png");
   });
 
   it("returns null when the directory or file is absent", () => {
-    expect(resolveAvatarFile(null)).toBeNull();
-    expect(resolveAvatarFile(tempDir())).toBeNull();
+    expect(resolveAvatarFile(null, "model.fbx")).toBeNull();
+    expect(resolveAvatarFile(tempDir(), "model.fbx")).toBeNull();
   });
 
-  it("rejects traversal and non-vrm names", () => {
+  it("rejects traversal and non-whitelisted names", () => {
     const dir = tempDir();
-    writeFileSync(join(dir, "model.vrm"), "vrm");
-    expect(resolveAvatarFile(dir, "../model.vrm")).toBeNull();
+    writeFileSync(join(dir, "model.fbx"), "fbx");
+    expect(resolveAvatarFile(dir, "../model.fbx")).toBeNull();
     expect(resolveAvatarFile(dir, "/etc/passwd")).toBeNull();
-    expect(resolveAvatarFile(dir, "model.glb")).toBeNull();
-    expect(resolveAvatarFile(dir, "a/b.vrm")).toBeNull();
+    expect(resolveAvatarFile(dir, "model.exe")).toBeNull();
+    expect(resolveAvatarFile(dir, "a/b.fbx")).toBeNull();
   });
 
   it("rejects a symlink pointing outside the directory", () => {
     const dir = tempDir();
     const outside = tempDir();
-    writeFileSync(join(outside, "real.vrm"), "vrm");
-    symlinkSync(join(outside, "real.vrm"), join(dir, "link.vrm"));
-    expect(resolveAvatarFile(dir, "link.vrm")).toBeNull();
+    writeFileSync(join(outside, "real.fbx"), "fbx");
+    symlinkSync(join(outside, "real.fbx"), join(dir, "link.fbx"));
+    expect(resolveAvatarFile(dir, "link.fbx")).toBeNull();
   });
 
   it("rejects a directory named like a model", () => {
     const dir = tempDir();
-    mkdirSync(join(dir, "model.vrm"));
-    expect(resolveAvatarFile(dir)).toBeNull();
+    mkdirSync(join(dir, "model.fbx"));
+    expect(resolveAvatarFile(dir, "model.fbx")).toBeNull();
+  });
+});
+
+describe("avatarConfig", () => {
+  it("prefers a VRM over an FBX", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "model.fbx"), "fbx");
+    writeFileSync(join(dir, "model.vrm"), "vrm");
+    expect(avatarConfig(dir)).toEqual({
+      kind: "vrm",
+      url: "/avatar/model.vrm",
+      texturesUrl: null,
+    });
+  });
+
+  it("reports the FBX and its texture mapping", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "model.fbx"), "fbx");
+    writeFileSync(join(dir, "textures.json"), "{}");
+    expect(avatarConfig(dir)).toEqual({
+      kind: "fbx",
+      url: "/avatar/model.fbx",
+      texturesUrl: "/avatar/textures.json",
+    });
+  });
+
+  it("returns null without a model", () => {
+    expect(avatarConfig(null)).toBeNull();
+    expect(avatarConfig(tempDir())).toBeNull();
   });
 });

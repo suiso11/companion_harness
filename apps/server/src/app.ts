@@ -143,7 +143,7 @@ import {
   MAX_TRANSCRIBE_BODY_BYTES,
   transcribeVoice,
 } from "./asr.js";
-import { avatarUrl, resolveAvatarFile } from "./avatar_files.js";
+import { avatarConfig, resolveAvatarFile } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
@@ -5320,7 +5320,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!strictQuery(c, []).ok) {
       return validationError(c);
     }
-    return c.json({ version: 1, vrmUrl: avatarUrl(config.avatarDir) }, 200);
+    return c.json({ version: 1, avatar: avatarConfig(config.avatarDir) }, 200);
   });
 
   app.get("/avatar/:file", (c) => {
@@ -5330,12 +5330,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     let body: Uint8Array<ArrayBuffer>;
     try {
-      body = new Uint8Array(readFileSync(file));
+      body = new Uint8Array(readFileSync(file.path));
     } catch {
       return apiError(c, 404, "not_found", "resource not found");
     }
     return c.newResponse(body, 200, {
-      "content-type": "model/gltf-binary",
+      "content-type": file.contentType,
       "cache-control": "private, max-age=3600",
     });
   });

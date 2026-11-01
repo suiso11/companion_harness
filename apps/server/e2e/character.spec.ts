@@ -62,7 +62,7 @@ test("character page renders the avatar and speaks a draft", async ({
   // panel falls back to the SVG avatar.
   const config = await page.request.get("/api/character/config");
   expect(config.ok()).toBe(true);
-  expect(await config.json()).toEqual({ version: 1, vrmUrl: null });
+  expect(await config.json()).toEqual({ version: 1, avatar: null });
   const model = await page.request.get("/avatar/model.vrm");
   expect(model.status()).toBe(404);
 
@@ -91,7 +91,10 @@ test("a configured but broken VRM fails gracefully", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ version: 1, vrmUrl: "/avatar/model.vrm" }),
+      body: JSON.stringify({
+        version: 1,
+        avatar: { kind: "vrm", url: "/avatar/model.vrm", texturesUrl: null },
+      }),
     });
   });
   await page.route("**/avatar/model.vrm", async (route) => {
@@ -105,6 +108,32 @@ test("a configured but broken VRM fails gracefully", async ({ page }) => {
   await page.goto("/character");
   // The 3D chunk loads and the loader fails; the panel keeps the notice and
   // the rest of the page usable instead of crashing.
+  await expect(page.getByText("3Dモデルを読み込めませんでした")).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByPlaceholder("試聴する文")).toBeVisible();
+});
+
+test("a configured but broken FBX fails gracefully", async ({ page }) => {
+  await page.route("**/api/character/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        avatar: { kind: "fbx", url: "/avatar/model.fbx", texturesUrl: null },
+      }),
+    });
+  });
+  await page.route("**/avatar/model.fbx", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/octet-stream",
+      body: Buffer.from("not an fbx"),
+    });
+  });
+
+  await page.goto("/character");
   await expect(page.getByText("3Dモデルを読み込めませんでした")).toBeVisible({
     timeout: 20_000,
   });

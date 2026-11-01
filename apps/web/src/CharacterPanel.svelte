@@ -10,6 +10,7 @@
 
 import { onMount } from "svelte";
 import {
+  type CharacterAvatar,
   fetchCharacterConfig,
   fetchLatestAnswer,
   fetchSpeech,
@@ -25,7 +26,7 @@ let speaking = $state(false);
 let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
-let vrmUrl = $state<string | null>(null);
+let avatar = $state<CharacterAvatar | null>(null);
 
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
@@ -139,7 +140,7 @@ async function speakDraft(): Promise<void> {
 
 onMount(() => {
   void (async () => {
-    vrmUrl = await fetchCharacterConfig();
+    avatar = await fetchCharacterConfig();
   })();
   void refresh();
   const timer = setInterval(() => {
@@ -158,9 +159,20 @@ onMount(() => {
 
 <section class="character" data-character-panel="true">
   <div class="stage" data-speaking={speaking ? "true" : "false"}>
-    {#if vrmUrl !== null}
+    {#if avatar?.kind === "vrm"}
       {#await import("./VrmStage.svelte") then mod}
-        <svelte:component this={mod.default} url={vrmUrl} {level} />
+        <svelte:component this={mod.default} url={avatar.url} {level} />
+      {:catch}
+        <p class="notice">3Dステージを読み込めませんでした</p>
+      {/await}
+    {:else if avatar?.kind === "fbx"}
+      {#await import("./FbxStage.svelte") then mod}
+        <svelte:component
+          this={mod.default}
+          url={avatar.url}
+          texturesUrl={avatar.texturesUrl}
+          {level}
+        />
       {:catch}
         <p class="notice">3Dステージを読み込めませんでした</p>
       {/await}
