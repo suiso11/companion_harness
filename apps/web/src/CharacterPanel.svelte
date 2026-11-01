@@ -10,6 +10,7 @@
 
 import { onMount } from "svelte";
 import {
+  fetchCharacterConfig,
   fetchLatestAnswer,
   fetchSpeech,
   type LatestAnswer,
@@ -24,6 +25,7 @@ let speaking = $state(false);
 let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
+let vrmUrl = $state<string | null>(null);
 
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
@@ -136,6 +138,9 @@ async function speakDraft(): Promise<void> {
 }
 
 onMount(() => {
+  void (async () => {
+    vrmUrl = await fetchCharacterConfig();
+  })();
   void refresh();
   const timer = setInterval(() => {
     if (document.visibilityState === "visible") {
@@ -153,7 +158,14 @@ onMount(() => {
 
 <section class="character" data-character-panel="true">
   <div class="stage" data-speaking={speaking ? "true" : "false"}>
-    <svg
+    {#if vrmUrl !== null}
+      {#await import("./VrmStage.svelte") then mod}
+        <svelte:component this={mod.default} url={vrmUrl} {level} />
+      {:catch}
+        <p class="notice">3Dステージを読み込めませんでした</p>
+      {/await}
+    {:else}
+      <svg
       class="avatar"
       viewBox="0 0 200 220"
       role="img"
@@ -174,7 +186,8 @@ onMount(() => {
         rx="12"
         ry={3 + 10 * level}
       />
-    </svg>
+      </svg>
+    {/if}
   </div>
 
   <div class="controls">
@@ -255,6 +268,11 @@ onMount(() => {
     align-items: center;
   }
   .status {
+    margin: 0;
+    color: var(--muted, #666);
+    font-size: 0.9em;
+  }
+  .notice {
     margin: 0;
     color: var(--muted, #666);
     font-size: 0.9em;

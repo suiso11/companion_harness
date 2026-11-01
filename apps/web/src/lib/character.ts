@@ -76,6 +76,16 @@ export function newestSessionId(body: unknown): string | null {
   return typeof id === "string" ? id : null;
 }
 
+/** Same-origin VRM URL from the server, or null when no model is set up. */
+export async function fetchCharacterConfig(): Promise<string | null> {
+  const res = await fetchJson("/api/character/config");
+  if (res.status !== 200) {
+    return null;
+  }
+  const body = res.body as { vrmUrl?: unknown };
+  return typeof body.vrmUrl === "string" ? body.vrmUrl : null;
+}
+
 /** Read the newest completed answer, or null when there is none yet. */
 export async function fetchLatestAnswer(): Promise<LatestAnswer | null> {
   const list = await fetchJson("/api/sessions?limit=1");
@@ -106,7 +116,7 @@ export async function fetchSpeech(text: string): Promise<Blob | null> {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json", accept: "audio/wav" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ parts: [{ text }] }),
     });
   } catch {
     return null;
