@@ -85,7 +85,7 @@ describe("createVoiceRenderer", () => {
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice.status).toBe("rendered");
     expect(voice.profileId).toBe("shunkin");
-    expect(voice.profileVersion).toMatch(/^6-[0-9a-f]{12}$/);
+    expect(voice.profileVersion).toMatch(/^11-[0-9a-f]{12}$/);
     expect(voice.parts).toEqual(voiced.map((text) => ({ text })));
 
     expect(calls).toHaveLength(1);
@@ -141,6 +141,17 @@ describe("createVoiceRenderer", () => {
 
   it("falls back on malformed JSON (invalid_output)", async () => {
     const { renderer } = rendererFor("not json at all");
+    const voice = await renderer(answer(), { runId: "run-1" });
+    expect(voice).toMatchObject({
+      status: "fallback",
+      reason: "invalid_output",
+    });
+  });
+
+  it("falls back on an ungrammatical verb + copula rendering", async () => {
+    const { renderer } = rendererFor(
+      renderedText(["予定を確認しましたどす。r1", "10:00に見るどす。"]),
+    );
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice).toMatchObject({
       status: "fallback",
