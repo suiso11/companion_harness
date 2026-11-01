@@ -6174,10 +6174,12 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   whitespace-collapsed, default `新しい会話`); `preview` is the newest turn
   text (60 cp); `lastTurnKind` lets the UI mark an unanswered companion
   message. No titles are stored; no read/ack state is invented.
-- The chat selector fetches this list on boot, after send/new session, after
-  a live companion message, on visibility, and every 60s while visible.
-  Labels are `● <title> · <relative time>` for the current session and
-  append `（自発）` when another session's newest turn is `companion_text`.
+- The chat page's `会話一覧` button opens an animated left drawer (lazy
+  chunk). It lists the same summaries, marks the current row with
+  `aria-current="page"`, and appends a `自発` badge when another session's
+  newest turn is `companion_text`. The topbar keeps `新規作成`. The list
+  refreshes on boot, after send/new session, after a live companion message,
+  on visibility, and every 60s while visible.
 - `POST /api/sessions/:id/presence` is a keyless, body-`{}` chat heartbeat.
   It updates an in-memory registry (10-minute TTL, 100 sessions max); no DB
   write. The chat page sends it on boot/switch/visibility and every 60s

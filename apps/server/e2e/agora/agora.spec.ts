@@ -176,10 +176,15 @@ test("agent proposal renders exact untrusted text; approve sends nothing and one
   expect(afterReload.success.posts).toHaveLength(1);
 
   // Session switch: the prior session's rows and decision controls are gone.
-  const sessionA = await page.locator("#session-list").inputValue();
-  expect(sessionA.length).toBeGreaterThan(0);
+  const sessionA = await page
+    .locator("#session-toggle")
+    .getAttribute("data-session-id");
+  expect(sessionA).toBeTruthy();
   await page.locator("#session-new").click();
-  await expect(page.locator("#session-list")).not.toHaveValue(sessionA);
+  await expect(page.locator("#session-toggle")).not.toHaveAttribute(
+    "data-session-id",
+    sessionA ?? "",
+  );
   await expect(page.locator("#agora-panel [data-agora-proposal]")).toHaveCount(
     0,
   );
@@ -189,7 +194,8 @@ test("agent proposal renders exact untrusted text; approve sends nothing and one
   await expect(page.locator("#agora-panel [data-agora-reject]")).toHaveCount(0);
   await expect(page.locator("#agora-panel [data-agora-send]")).toHaveCount(0);
   // Switching back re-reads only that session's durable rows.
-  await page.locator("#session-list").selectOption(sessionA);
+  await page.locator("#session-toggle").click();
+  await page.locator(`[data-session-id="${sessionA}"]`).click();
   const restored = await panelItem(page);
   await expect(restored.locator("[data-agora-status]")).toHaveAttribute(
     "data-agora-status",
