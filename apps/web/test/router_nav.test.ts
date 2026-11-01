@@ -18,6 +18,7 @@ describe("feature navigation grouping", () => {
       "/proposals",
       "/notifications",
       "/monitor",
+      "/character",
     ]);
     expect(PRIMARY_NAV.map((item) => item.label)).toEqual([
       "チャット",
@@ -26,6 +27,7 @@ describe("feature navigation grouping", () => {
       "候補",
       "通知",
       "モニター",
+      "キャラクター",
     ]);
   });
 

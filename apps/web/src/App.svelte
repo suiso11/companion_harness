@@ -69,4 +69,10 @@ const feature = routeForPath(pathname);
   {:catch}
     <p>ページを読み込めませんでした</p>
   {/await}
+{:else if feature.path === "/character"}
+  {#await import("./CharacterPage.svelte") then module}
+    <svelte:component this={module.default} />
+  {:catch}
+    <p>ページを読み込めませんでした</p>
+  {/await}
 {/if}

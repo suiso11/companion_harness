@@ -196,6 +196,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/proposals",
   "/handoff",
   "/monitor",
+  "/character",
 ]);
 
 /**

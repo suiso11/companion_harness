@@ -70,6 +70,12 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     sectionId: "monitor",
     title: "モニター",
   },
+  {
+    path: "/character",
+    label: "キャラクター",
+    sectionId: "character",
+    title: "キャラクター",
+  },
 ];
 
 export interface NavItem {
@@ -98,6 +104,7 @@ export const PRIMARY_NAV: readonly NavItem[] = [
   navItem("/proposals", "候補"),
   navItem("/notifications", "通知"),
   navItem("/monitor", "モニター"),
+  navItem("/character", "キャラクター"),
 ];
 
 export const DEV_NAV_LABEL = "開発・運用";

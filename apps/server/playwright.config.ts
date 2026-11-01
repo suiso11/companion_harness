@@ -64,6 +64,7 @@ export default defineConfig({
               "learning.spec.ts",
               "handoff.spec.ts",
               "monitor.spec.ts",
+              "character.spec.ts",
               "mobile_layout.spec.ts",
               "svelte_shell.spec.ts",
               "thinking_status.spec.ts",
