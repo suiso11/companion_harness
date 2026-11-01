@@ -7,8 +7,9 @@
 // part per canonical part. No structural fidelity gate runs here: the
 // profile prompt still asks the model to preserve facts, numbers, URLs,
 // citations, and code, but the rendered text is always shown when usable.
-// The one exception is grammar: a verb + copula form (「〜するどす」) is
-// rejected deterministically and the canonical answer is shown instead.
+// Two exceptions are rejected deterministically, with the canonical answer
+// shown instead: a verb + copula form (「〜するどす」) and a fidelity break
+// (speech act, negation, or literal tokens changed; see speech_act.ts).
 //
 // Failure is always conservative and total: `render()` never throws. Any
 // timeout, provider error, malformed response, or wrong part count yields
@@ -34,6 +35,7 @@ import type {
 import { z } from "zod";
 import type { ExecutionRecorder } from "../execution_records.js";
 import { type VoiceProfile, voiceProfileFingerprint } from "./profile.js";
+import { checkFidelity } from "./speech_act.js";
 
 /** Default auxiliary voice-call budget (30s). */
 export const DEFAULT_VOICE_TIMEOUT_MS = 30_000;
@@ -397,6 +399,19 @@ export function createVoiceRenderer(
         );
       }
       if (voicedTexts.some((text) => VERB_COPULA.test(text))) {
+        return finish(
+          fallback(profileId, profileVersion, "invalid_output"),
+          rawText,
+        );
+      }
+      // Speech act and content must survive the rewrite: a first-person
+      // commitment turned into a request, a dropped negation, or a changed
+      // number/URL/citation is a hard failure, not a style choice.
+      if (
+        canonicalTexts.some(
+          (text, index) => !checkFidelity(text, voicedTexts[index] ?? "").ok,
+        )
+      ) {
         return finish(
           fallback(profileId, profileVersion, "invalid_output"),
           rawText,

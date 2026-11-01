@@ -779,12 +779,15 @@ COMPANION_VOICE_JSON='{"profile":"shunkin","timeoutMs":30000}'
   「原文」/「話し方」 toggle per answer. Voiced text is never streamed: the
   draft streams canonical and the voiced version appears at completion.
 - The `shunkin` profile draws on 谷崎潤一郎『春琴抄』 (青空文庫, public
-  domain) and 船場言葉 features documented at Wikipedia 大阪弁#船場言葉.
-- Limits: without the gate, a voiced rendering can change negation or
-  ASCII wording if the model drifts; prompt-based style can drift across
-  models; LoRA is future work (a per-request LoRA would apply only to the
-  voice call). Because `voice` extends the strict RunResult schema, a
-  pre-voice build cannot read rows that contain it.
+  domain) and a Kyoto-style register (京ことば); Semba merchant forms
+  (だす/でおます/まっせ/さかい/やで) are avoided.
+- Limits: the renderer rejects a rendering and falls back to the canonical
+  answer when it carries a verb + copula form (「確認するどす」), changes the
+  speech act (a first-person commitment turned into a request), flips
+  negation, or changes numbers/URLs/citations. Prompt-based style can still
+  drift across models; LoRA is future work (a per-request LoRA would apply
+  only to the voice call). Because `voice` extends the strict RunResult
+  schema, a pre-voice build cannot read rows that contain it.
 
 ## Fixed-task comparison CLI (experimental)
 

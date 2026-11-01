@@ -47,7 +47,7 @@ function textGateway(text: string): {
 }
 
 function answer(
-  texts: string[] = ["明日は晴れです。r1", "10:00に会いましょう。"],
+  texts: string[] = ["明日は晴れです。r1", "10:00に会います。"],
 ) {
   return {
     version: 1 as const,
@@ -55,7 +55,7 @@ function answer(
   };
 }
 
-const voiced = ["明日は晴れでござります。r1", "10:00にお会いしとくれやす。"];
+const voiced = ["明日は晴れでござります。r1", "10:00にお会いしまっさ。"];
 
 function rendererFor(
   text: string,
@@ -85,7 +85,7 @@ describe("createVoiceRenderer", () => {
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice.status).toBe("rendered");
     expect(voice.profileId).toBe("shunkin");
-    expect(voice.profileVersion).toMatch(/^11-[0-9a-f]{12}$/);
+    expect(voice.profileVersion).toMatch(/^12-[0-9a-f]{12}$/);
     expect(voice.parts).toEqual(voiced.map((text) => ({ text })));
 
     expect(calls).toHaveLength(1);
@@ -109,7 +109,7 @@ describe("createVoiceRenderer", () => {
       JSON.stringify({
         parts: [
           { text: "明日は晴れです。r1" },
-          { text: "10:00に会いましょう。" },
+          { text: "10:00に会います。" },
         ],
       }),
     );
@@ -161,9 +161,12 @@ describe("createVoiceRenderer", () => {
 
   it("keeps noun + copula renderings such as 「あなたどす」", async () => {
     const { renderer } = rendererFor(
-      renderedText(["それはあなたどす。r1", "明日は晴れどす。"]),
+      renderedText(["明日は晴れどす。r1", "それはあなたどす。"]),
     );
-    const voice = await renderer(answer(), { runId: "run-1" });
+    const voice = await renderer(
+      answer(["明日は晴れです。r1", "それはあなたどす。"]),
+      { runId: "run-1" },
+    );
     expect(voice.status).toBe("rendered");
   });
 
