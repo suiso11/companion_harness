@@ -11,9 +11,18 @@ import { routeForPath } from "./lib/router.js";
 const pathname = typeof location === "undefined" ? "/" : location.pathname;
 // `/` (and any unknown path) has no feature route; unknown paths 404 server-side.
 const feature = routeForPath(pathname);
+// The desktop pet shell loads this page in a transparent, frameless window:
+// avatar only, no navigation shell.
+const pet = pathname === "/pet" || pathname === "/pet/";
 </script>
 
-{#if feature === null}
+{#if pet}
+  {#await import("./PetPage.svelte") then module}
+    <svelte:component this={module.default} />
+  {:catch}
+    <p>ページを読み込めませんでした</p>
+  {/await}
+{:else if feature === null}
   <ChatPage />
 {:else if feature.path === "/memory"}
   {#await import("./MemoryPage.svelte") then module}

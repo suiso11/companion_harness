@@ -151,6 +151,29 @@ export type PostTranscribeResponse = z.infer<
   typeof PostTranscribeResponseSchema
 >;
 
+/** POST /api/vision: one JPEG (base64, canonical) plus an optional question. */
+export const MAX_VISION_IMAGE_BYTES = 2_800_000;
+export const MAX_VISION_IMAGE_BASE64_LENGTH = 3_800_000;
+
+export const PostVisionRequestSchema = z.strictObject({
+  imageBase64: z
+    .string()
+    .min(16)
+    .max(MAX_VISION_IMAGE_BASE64_LENGTH)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, {
+      message: "imageBase64 must be canonical base64",
+    }),
+  question: z.string().min(1).max(2000).optional(),
+});
+export type PostVisionRequest = z.infer<typeof PostVisionRequestSchema>;
+
+export const MAX_VISION_TEXT_LENGTH = 4000;
+export const PostVisionResponseSchema = z.strictObject({
+  version: z.literal(1),
+  text: z.string().min(1).max(MAX_VISION_TEXT_LENGTH),
+});
+export type PostVisionResponse = z.infer<typeof PostVisionResponseSchema>;
+
 export const AcceptedRunSchema = z.strictObject({
   id: UuidSchema,
   attempt: z.number().int().min(1),

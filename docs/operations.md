@@ -862,6 +862,35 @@ COMPANION_ASR_JSON='{"url":"http://127.0.0.1:8080","prompt":"春琴抄、京こ�
   without `text` is a fixed
   `502 {"error":{"code":"internal_error","message":"speech recognition failed"}}`.
 
+## Vision recognition (`POST /api/vision`, strict opt-in, local only)
+
+Unset `COMPANION_VISION_JSON` (default) keeps the route a fixed 404. When set,
+the value must be a strict JSON object with only `{ url, model, timeoutMs?, prompt? }`
+pointing at a loopback OpenAI-compatible server (`/v1/chat/completions`)
+that accepts `image_url` content parts:
+
+```sh
+COMPANION_VISION_JSON='{"url":"http://127.0.0.1:8081","model":"qwen2.5-vl","timeoutMs":60000,"prompt":"この画像を簡潔に説明してください。"}'
+```
+
+- `url` follows the model-local loopback rules (a base already ending in
+  `/v1` is not doubled); `model` is a non-empty string; `prompt` (1..500
+  chars) is the default question; `timeoutMs` is an integer `1000..120000`,
+  default `60000`. Unknown keys, malformed JSON, non-loopback URLs, and
+  out-of-range values fail startup closed.
+- Request body is strict JSON `{ imageBase64, question? }`: one JPEG
+  (base64, at most 3,800,000 chars; decoded at most 2,800,000 bytes, must
+  start with the JPEG magic `FF D8 FF`) and an optional question (1..2000
+  chars; else the configured `prompt`, else a fixed Japanese default).
+  Anything else is `validation_error` and never reaches the engine.
+- Response is `{ "version": 1, "text": "..." }` (trimmed, 1..4000 chars).
+- Same JSON-only mutation gate and Origin/Host guards as `/api/speech`; no
+  idempotency key. The image is forwarded once and never stored or logged;
+  no run event or SSE frame is produced and there is no retry. A missing or
+  unreachable engine, timeout, non-200 response, or empty/oversize/non-string
+  content is a fixed
+  `502 {"error":{"code":"internal_error","message":"vision recognition failed"}}`.
+
 ## Hands-free voice (browser client + the dictated-write gate)
 
 The chat page has one opt-in `音声` toggle (`#composer-mic`). With it on the
@@ -6313,3 +6342,7 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   instead of an arbitrary `last_active_at` session.
 - Presence is process-local: after a restart the next heartbeat or the
   latest-session fallback covers the gap. No cross-user/remote sharing.
+
+## デスクトップペット (Electron シェル)
+
+`pnpm pet` で透明・枠なし・常に手前のウィンドウに `/pet` を表示する（アバターのみ・自動読み上げ・ドラッグで移動）。サーバーは別途起動しておく。接続先は `COMPANION_PET_URL`（既定 `http://127.0.0.1:3000`）。トレイメニューから表示/隠す/マウス透過/常に手前/終了を操作する。位置とサイズは userData の `pet-window.json` に保存される。`COMPANION_PET_SMOKE=1` でスクリーンショット1枚を撮って終了する（`pnpm --filter @companion/desktop smoke`、出力先 `COMPANION_PET_SMOKE_OUT`）。

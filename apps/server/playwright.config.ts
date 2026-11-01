@@ -71,6 +71,8 @@ export default defineConfig({
               "draft_answer.spec.ts",
               "web_search.spec.ts",
               "voice.spec.ts",
+              "voice_bargein.spec.ts",
+              "vision.spec.ts",
             ],
   timeout: 60_000,
   expect: { timeout: 15_000 },

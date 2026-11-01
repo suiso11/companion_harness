@@ -17,12 +17,20 @@ import {
   type LatestAnswer,
   mouthOpen,
 } from "./lib/character.js";
+import {
+  captureCameraFrame,
+  describeVision,
+  postObservation,
+} from "./lib/vision.js";
 
 const POLL_MS = 3000;
 
-let auto = $state(false);
+let { pet = false }: { pet?: boolean } = $props();
+
+let auto = $state(pet);
 let level = $state(0);
 let speaking = $state(false);
+let visionBusy = $state(false);
 let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
@@ -138,11 +146,52 @@ async function speakDraft(): Promise<void> {
   await speak(draft);
 }
 
+/** One camera frame → local vision model → a turn the companion answers. */
+async function lookWithCamera(): Promise<void> {
+  if (visionBusy) {
+    return;
+  }
+  visionBusy = true;
+  status = "カメラを確認しています";
+  try {
+    const frame = await captureCameraFrame();
+    if (frame === null) {
+      status = "カメラを使えません";
+      return;
+    }
+    const seen = await describeVision(frame);
+    if (seen === null) {
+      status = "視覚側が未接続です（COMPANION_VISION_JSON 未設定）";
+      return;
+    }
+    status = `見えているもの: ${seen}`;
+    // The poller speaks the run this observation produces; the previous
+    // answer must not be replayed here.
+    if (!(await postObservation(`カメラを見て。映っているもの: ${seen}`))) {
+      status = "観察を送信できませんでした";
+    }
+  } finally {
+    visionBusy = false;
+  }
+}
+
 onMount(() => {
   void (async () => {
     avatar = await fetchCharacterConfig();
   })();
-  void refresh();
+  // Remember the newest existing answer without voicing it on load: only
+  // answers that complete while the panel is open are spoken.
+  void (async () => {
+    const answer = await fetchLatestAnswer();
+    if (destroyed) {
+      return;
+    }
+    if (answer !== null) {
+      latest = answer;
+      lastRunId = answer.runId;
+    }
+    await refresh();
+  })();
   const timer = setInterval(() => {
     if (document.visibilityState === "visible") {
       void refresh();
@@ -157,7 +206,7 @@ onMount(() => {
 });
 </script>
 
-<section class="character" data-character-panel="true">
+<section class="character" class:pet data-character-panel="true">
   <div class="stage" data-speaking={speaking ? "true" : "false"}>
     {#if avatar?.kind === "vrm"}
       {#await import("./VrmStage.svelte") then mod}
@@ -203,27 +252,38 @@ onMount(() => {
     {/if}
   </div>
 
-  <div class="controls">
-    <div class="row">
-      <button type="button" onclick={() => void speakLatest()}>
-        最新の回答を話す
-      </button>
-      <label class="toggle">
-        <input type="checkbox" bind:checked={auto} />
-        自動で話す
-      </label>
+  {#if !pet}
+    <div class="controls">
+      <div class="row">
+        <button type="button" onclick={() => void speakLatest()}>
+          最新の回答を話す
+        </button>
+        <label class="toggle">
+          <input type="checkbox" bind:checked={auto} />
+          自動で話す
+        </label>
+      </div>
+      <div class="row">
+        <input
+          class="draft"
+          type="text"
+          placeholder="試聴する文"
+          bind:value={draft}
+        />
+        <button type="button" onclick={() => void speakDraft()}>試聴</button>
+      </div>
+      <div class="row">
+        <button
+          type="button"
+          disabled={visionBusy}
+          onclick={() => void lookWithCamera()}
+        >
+          カメラで見る
+        </button>
+        <p class="status" data-character-status="true">{status}</p>
+      </div>
     </div>
-    <div class="row">
-      <input
-        class="draft"
-        type="text"
-        placeholder="試聴する文"
-        bind:value={draft}
-      />
-      <button type="button" onclick={() => void speakDraft()}>試聴</button>
-    </div>
-    <p class="status" data-character-status="true">{status}</p>
-  </div>
+  {/if}
 </section>
 
 <style>
@@ -233,6 +293,19 @@ onMount(() => {
     gap: 16px;
     align-items: center;
     padding: 24px;
+  }
+  /* Pet window: transparent, edge-to-edge avatar, no page chrome. */
+  .character.pet {
+    height: 100vh;
+    padding: 0;
+    gap: 0;
+    justify-content: flex-end;
+  }
+  .character.pet .stage,
+  .character.pet :global([data-vrm-stage]),
+  .character.pet :global([data-fbx-stage]) {
+    width: 100%;
+    height: 100vh;
   }
   .stage {
     width: min(320px, 70vw);

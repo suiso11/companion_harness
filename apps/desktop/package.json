@@ -1,0 +1,13 @@
+{
+  "name": "@companion/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "COMPANION_PET_SMOKE=1 electron ."
+  },
+  "devDependencies": {
+    "electron": "^39.0.0"
+  }
+}

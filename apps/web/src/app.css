@@ -1355,3 +1355,14 @@ button[data-action-evidence="before"] {
     height: 60vh;
   }
 }
+
+/* Desktop pet window (apps/desktop): the PET page is transparent, and its
+ * avatar area doubles as the OS window drag handle. Browsers ignore the
+ * app-region property, so `/pet` stays usable as a plain page. */
+html[data-pet],
+html[data-pet] body {
+  background: transparent;
+}
+html[data-pet] .character {
+  -webkit-app-region: drag;
+}

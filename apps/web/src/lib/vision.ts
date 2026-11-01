@@ -1,0 +1,87 @@
+/// <reference lib="dom" />
+// Camera vision for the character page.
+//
+// One capture is one request: the camera is opened, one JPEG frame is taken
+// and the device is released. `POST /api/vision` runs the local vision model
+// (strict opt-in server side); the answer is attached to the newest session
+// as the user's message, so the companion replies and the existing auto-speak
+// path voices it. No frame is stored.
+
+import { fetchJson, postJson, randomUuid } from "./api.js";
+import { newestSessionId } from "./character.js";
+
+/** Grab one camera frame as a JPEG data URL, or null without a camera. */
+export async function captureCameraFrame(): Promise<string | null> {
+  let stream: MediaStream | null = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480 },
+      audio: false,
+    });
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    video.muted = true;
+    await video.play();
+    // createImageBitmap waits for a decoded frame: drawImage on a just-started
+    // video can capture an empty one.
+    const bitmap = await createImageBitmap(video);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext("2d");
+      if (context === null) {
+        return null;
+      }
+      context.drawImage(bitmap, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.8);
+    } finally {
+      bitmap.close();
+    }
+  } catch {
+    return null;
+  } finally {
+    for (const track of stream?.getTracks() ?? []) {
+      track.stop();
+    }
+  }
+}
+
+/** One description of the frame, or null when vision is unset/failed. */
+export async function describeVision(
+  imageDataUrl: string,
+): Promise<string | null> {
+  const base64 = imageDataUrl.slice(imageDataUrl.indexOf(",") + 1);
+  if (base64 === "") {
+    return null;
+  }
+  const result = await postJson("/api/vision", { imageBase64: base64 }, null);
+  if (result.status !== 200) {
+    return null;
+  }
+  const text = (result.body as { text?: unknown } | null)?.text;
+  if (typeof text !== "string" || text.trim() === "") {
+    return null;
+  }
+  return text.trim();
+}
+
+/** Append the observation to the newest session (creating one if needed). */
+export async function postObservation(text: string): Promise<boolean> {
+  const list = await fetchJson("/api/sessions?limit=1");
+  let sessionId = list.status === 200 ? newestSessionId(list.body) : null;
+  if (sessionId === null) {
+    const created = await postJson("/api/sessions", {}, randomUuid());
+    const id = (created.body as { sessionId?: unknown } | null)?.sessionId;
+    if (created.status !== 201 || typeof id !== "string") {
+      return false;
+    }
+    sessionId = id;
+  }
+  const posted = await postJson(
+    `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    { text, uiContext: {} },
+    randomUuid(),
+  );
+  return posted.status === 202;
+}
