@@ -9,7 +9,7 @@ describe("bundled shunkin voice profile", () => {
   it("loads the bundled profile with the verified format", () => {
     const profile = loadBundledVoiceProfile("shunkin");
     expect(profile.id).toBe("shunkin");
-    expect(profile.version).toBe("6");
+    expect(profile.version).toBe("11");
     expect(profile.displayName).toBe("春琴");
     expect(profile.rules.length).toBeGreaterThan(0);
     expect(profile.avoid.length).toBeGreaterThan(0);
@@ -31,7 +31,7 @@ describe("bundled shunkin voice profile", () => {
     expect(voiceProfileFingerprint(first)).toBe(
       voiceProfileFingerprint(second),
     );
-    expect(voiceProfileFingerprint(first)).toMatch(/^6-[0-9a-f]{12}$/);
+    expect(voiceProfileFingerprint(first)).toMatch(/^11-[0-9a-f]{12}$/);
     const changed = parseVoiceProfile({
       ...first,
       description: `${first.description}!`,

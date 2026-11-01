@@ -7,6 +7,8 @@
 // part per canonical part. No structural fidelity gate runs here: the
 // profile prompt still asks the model to preserve facts, numbers, URLs,
 // citations, and code, but the rendered text is always shown when usable.
+// The one exception is grammar: a verb + copula form (「〜するどす」) is
+// rejected deterministically and the canonical answer is shown instead.
 //
 // Failure is always conservative and total: `render()` never throws. Any
 // timeout, provider error, malformed response, or wrong part count yields
@@ -63,6 +65,14 @@ export function resolveVoiceMaxOutputTokens(
 const VoiceResponseSchema = z.strictObject({
   parts: z.array(VoiceRenderPartSchema),
 });
+
+/**
+ * Ungrammatical verb + copula forms (「確認しましたどす」「見るどす」「ないどす」).
+ * 「どす」 attaches only to nouns and adjectives; a match means the model
+ * mechanically appended it, so the rendering is rejected and the canonical
+ * answer is shown instead.
+ */
+const VERB_COPULA = /(?:する|した|します|しました|なる|なった|ない|た|る)どす/;
 
 export interface VoiceRendererOptions {
   readonly gateway: ModelGateway;
@@ -382,6 +392,12 @@ export function createVoiceRenderer(
       if (voicedTexts.length !== canonicalTexts.length) {
         return finish(
           fallback(profileId, profileVersion, "part_count"),
+          rawText,
+        );
+      }
+      if (voicedTexts.some((text) => VERB_COPULA.test(text))) {
+        return finish(
+          fallback(profileId, profileVersion, "invalid_output"),
           rawText,
         );
       }
