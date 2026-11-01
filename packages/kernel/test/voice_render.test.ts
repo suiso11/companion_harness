@@ -159,6 +159,14 @@ describe("createVoiceRenderer", () => {
     });
   });
 
+  it("keeps noun + copula renderings such as 「あなたどす」", async () => {
+    const { renderer } = rendererFor(
+      renderedText(["それはあなたどす。r1", "明日は晴れどす。"]),
+    );
+    const voice = await renderer(answer(), { runId: "run-1" });
+    expect(voice.status).toBe("rendered");
+  });
+
   it("falls back on empty content (invalid_output)", async () => {
     const { renderer } = rendererFor("   ");
     const voice = await renderer(answer(), { runId: "run-1" });

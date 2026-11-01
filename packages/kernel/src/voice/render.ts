@@ -72,7 +72,8 @@ const VoiceResponseSchema = z.strictObject({
  * mechanically appended it, so the rendering is rejected and the canonical
  * answer is shown instead.
  */
-const VERB_COPULA = /(?:する|した|します|しました|なる|なった|ない|た|る)どす/;
+const VERB_COPULA =
+  /(?:する|した|します|しました|なる|なった|ない|る|(?<![あなか])た)どす/;
 
 export interface VoiceRendererOptions {
   readonly gateway: ModelGateway;
