@@ -82,6 +82,8 @@ export interface CharacterAvatar {
   readonly kind: CharacterAvatarKind;
   readonly url: string;
   readonly texturesUrl: string | null;
+  /** Cache key appended to texture URLs (`?v=`). */
+  readonly assetVersion: string;
 }
 
 /** What the character page should load, or null when no model is set up. */
@@ -99,6 +101,7 @@ export async function fetchCharacterConfig(): Promise<CharacterAvatar | null> {
     kind?: unknown;
     url?: unknown;
     texturesUrl?: unknown;
+    assetVersion?: unknown;
   };
   if (record.kind !== "vrm" && record.kind !== "fbx") {
     return null;
@@ -111,6 +114,8 @@ export async function fetchCharacterConfig(): Promise<CharacterAvatar | null> {
     url: record.url,
     texturesUrl:
       typeof record.texturesUrl === "string" ? record.texturesUrl : null,
+    assetVersion:
+      typeof record.assetVersion === "string" ? record.assetVersion : "",
   };
 }
 

@@ -8,7 +8,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { avatarConfig, resolveAvatarFile } from "../src/avatar_files.js";
+import {
+  avatarConfig,
+  resolveAvatarBrotli,
+  resolveAvatarFile,
+} from "../src/avatar_files.js";
 
 const dirs: string[] = [];
 
@@ -69,14 +73,26 @@ describe("resolveAvatarFile", () => {
   });
 });
 
+describe("resolveAvatarBrotli", () => {
+  it("returns the pre-compressed sibling when present", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "model.fbx"), "fbx");
+    writeFileSync(join(dir, "model.fbx.br"), "br");
+    expect(resolveAvatarBrotli(dir, "model.fbx")).toBe(
+      join(dir, "model.fbx.br"),
+    );
+    expect(resolveAvatarBrotli(dir, "model.vrm")).toBeNull();
+  });
+});
+
 describe("avatarConfig", () => {
   it("prefers a VRM over an FBX", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "model.fbx"), "fbx");
     writeFileSync(join(dir, "model.vrm"), "vrm");
-    expect(avatarConfig(dir)).toEqual({
+    expect(avatarConfig(dir)).toMatchObject({
       kind: "vrm",
-      url: "/avatar/model.vrm",
+      url: expect.stringMatching(/^\/avatar\/model\.vrm\?v=\d+$/),
       texturesUrl: null,
     });
   });
@@ -85,10 +101,10 @@ describe("avatarConfig", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "model.fbx"), "fbx");
     writeFileSync(join(dir, "textures.json"), "{}");
-    expect(avatarConfig(dir)).toEqual({
+    expect(avatarConfig(dir)).toMatchObject({
       kind: "fbx",
-      url: "/avatar/model.fbx",
-      texturesUrl: "/avatar/textures.json",
+      url: expect.stringMatching(/^\/avatar\/model\.fbx\?v=\d+$/),
+      texturesUrl: expect.stringMatching(/^\/avatar\/textures\.json\?v=\d+$/),
     });
   });
 

@@ -14,8 +14,14 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 let {
   url,
   texturesUrl = null,
+  version = "",
   level = 0,
-}: { url: string; texturesUrl?: string | null; level?: number } = $props();
+}: {
+  url: string;
+  texturesUrl?: string | null;
+  version?: string;
+  level?: number;
+} = $props();
 
 let host: HTMLDivElement;
 let failed = $state(false);
@@ -57,7 +63,11 @@ onMount(() => {
               }
               let texture = textures.get(file);
               if (texture === undefined) {
-                texture = textureLoader.load(`/avatar/${file}`);
+                texture = textureLoader.load(
+                  version === ""
+                    ? `/avatar/${file}`
+                    : `/avatar/${file}?v=${version}`,
+                );
                 textures.set(file, texture);
               }
               material.map = texture;

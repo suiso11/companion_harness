@@ -143,7 +143,11 @@ import {
   MAX_TRANSCRIBE_BODY_BYTES,
   transcribeVoice,
 } from "./asr.js";
-import { avatarConfig, resolveAvatarFile } from "./avatar_files.js";
+import {
+  avatarConfig,
+  resolveAvatarBrotli,
+  resolveAvatarFile,
+} from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
@@ -5324,20 +5328,35 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   app.get("/avatar/:file", (c) => {
-    const file = resolveAvatarFile(config.avatarDir, c.req.param("file"));
+    const name = c.req.param("file");
+    const file = resolveAvatarFile(config.avatarDir, name);
     if (file === null) {
       return apiError(c, 404, "not_found", "resource not found");
     }
+    // Pre-compressed model files (`<name>.br`) are served when the client
+    // accepts brotli; the 17MB FBX shrinks to ~10.6MB on the wire.
+    const acceptsBrotli = (c.req.header("accept-encoding") ?? "").includes(
+      "br",
+    );
+    const brotli = acceptsBrotli
+      ? resolveAvatarBrotli(config.avatarDir, name)
+      : null;
     let body: Uint8Array<ArrayBuffer>;
     try {
-      body = new Uint8Array(readFileSync(file.path));
+      body = new Uint8Array(readFileSync(brotli ?? file.path));
     } catch {
       return apiError(c, 404, "not_found", "resource not found");
     }
-    return c.newResponse(body, 200, {
+    const headers: Record<string, string> = {
       "content-type": file.contentType,
-      "cache-control": "private, max-age=3600",
-    });
+      // The URL carries `?v=<mtime>`, so a week of immutable caching is safe.
+      "cache-control": "private, max-age=604800, immutable",
+    };
+    if (brotli !== null) {
+      headers["content-encoding"] = "br";
+      headers.vary = "accept-encoding";
+    }
+    return c.newResponse(body, 200, headers);
   });
 
   app.get("/api/monitor", async (c) => {
