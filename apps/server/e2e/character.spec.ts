@@ -134,8 +134,8 @@ test("a configured but broken FBX fails gracefully", async ({ page }) => {
   });
 
   await page.goto("/character");
-  await expect(
-    page.getByText("3Dモデルを読み込めませんでした"),
-  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText("3Dモデルを読み込めませんでした")).toBeVisible({
+    timeout: 20_000,
+  });
   await expect(page.getByPlaceholder("試聴する文")).toBeVisible();
 });

@@ -34,7 +34,9 @@ onMount(() => {
 
       if (texturesUrl !== null) {
         try {
-          const response = await fetch(texturesUrl, { credentials: "same-origin" });
+          const response = await fetch(texturesUrl, {
+            credentials: "same-origin",
+          });
           const mapping = (await response.json()) as Record<string, string>;
           const textureLoader = new THREE.TextureLoader();
           const textures = new Map<string, THREE.Texture>();
@@ -70,7 +72,10 @@ onMount(() => {
         }
       }
 
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+      });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(host.clientWidth, Math.max(host.clientHeight, 240));
       host.appendChild(renderer.domElement);

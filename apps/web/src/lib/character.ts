@@ -95,7 +95,11 @@ export async function fetchCharacterConfig(): Promise<CharacterAvatar | null> {
   if (typeof avatar !== "object" || avatar === null) {
     return null;
   }
-  const record = avatar as { kind?: unknown; url?: unknown; texturesUrl?: unknown };
+  const record = avatar as {
+    kind?: unknown;
+    url?: unknown;
+    texturesUrl?: unknown;
+  };
   if (record.kind !== "vrm" && record.kind !== "fbx") {
     return null;
   }

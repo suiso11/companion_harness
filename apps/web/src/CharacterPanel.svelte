@@ -10,10 +10,10 @@
 
 import { onMount } from "svelte";
 import {
+  type CharacterAvatar,
   fetchCharacterConfig,
   fetchLatestAnswer,
   fetchSpeech,
-  type CharacterAvatar,
   type LatestAnswer,
   mouthOpen,
 } from "./lib/character.js";
