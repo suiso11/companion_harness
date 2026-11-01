@@ -65,6 +65,8 @@ export async function askVision(
         ],
       }),
       signal: AbortSignal.timeout(config.timeoutMs),
+      // Never re-POST the frame to a redirect target (loopback only).
+      redirect: "error",
     });
     if (response.status !== 200) {
       return { ok: false };

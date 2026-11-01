@@ -48,72 +48,81 @@ export async function startVoiceSession(
     // Some engines refuse a fixed rate; resample below instead.
     ctx = new AudioContext();
   }
-  const source = ctx.createMediaStreamSource(stream);
-  // shortcut: ScriptProcessorNode is deprecated, but the strict CSP
-  // (no blob:/module worklet URLs) leaves it as the only PCM capture; move
-  // to an AudioWorklet served from 'self' when the CSP allows a worklet.
-  const processor = ctx.createScriptProcessor(512, 1, 1);
-  const mute = ctx.createGain();
-  mute.gain.value = 0; // a processor only ticks while connected onward
-  const detector = new UtteranceDetector({
-    ...DEFAULT_DETECTOR_OPTIONS,
-    sampleRate: ctx.sampleRate,
-  });
-  let stopped = false;
-  let configNoticeShown = false;
+  // Setup failures must not leave the microphone recording silently.
+  try {
+    const source = ctx.createMediaStreamSource(stream);
+    // shortcut: ScriptProcessorNode is deprecated, but the strict CSP
+    // (no blob:/module worklet URLs) leaves it as the only PCM capture; move
+    // to an AudioWorklet served from 'self' when the CSP allows a worklet.
+    const processor = ctx.createScriptProcessor(512, 1, 1);
+    const mute = ctx.createGain();
+    mute.gain.value = 0; // a processor only ticks while connected onward
+    const detector = new UtteranceDetector({
+      ...DEFAULT_DETECTOR_OPTIONS,
+      sampleRate: ctx.sampleRate,
+    });
+    let stopped = false;
+    let configNoticeShown = false;
 
-  async function transcribe(samples: Float32Array): Promise<void> {
-    const pcm = resample(samples, ctx.sampleRate, ASR_SAMPLE_RATE);
-    try {
-      const res = await fetch("/api/transcribe", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ audioBase64: toBase64(encodeWav(pcm)) }),
-      });
-      if (res.status === 404) {
-        if (!configNoticeShown) {
-          configNoticeShown = true;
-          handlers.onNotice(NO_VOICE_CONFIG);
+    async function transcribe(samples: Float32Array): Promise<void> {
+      const pcm = resample(samples, ctx.sampleRate, ASR_SAMPLE_RATE);
+      try {
+        const res = await fetch("/api/transcribe", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ audioBase64: toBase64(encodeWav(pcm)) }),
+        });
+        if (res.status === 404) {
+          if (!configNoticeShown) {
+            configNoticeShown = true;
+            handlers.onNotice(NO_VOICE_CONFIG);
+          }
+          return;
         }
-        return;
+        if (!res.ok) return;
+        const body = (await res.json()) as { text?: unknown };
+        if (stopped || typeof body.text !== "string") return;
+        const text = body.text.trim();
+        if (text.length > 0) handlers.onUtterance(text);
+      } catch {
+        // Nothing heard / network blip: keep listening.
       }
-      if (!res.ok) return;
-      const body = (await res.json()) as { text?: unknown };
-      if (stopped || typeof body.text !== "string") return;
-      const text = body.text.trim();
-      if (text.length > 0) handlers.onUtterance(text);
-    } catch {
-      // Nothing heard / network blip: keep listening.
     }
-  }
 
-  processor.onaudioprocess = (event) => {
-    if (stopped) return;
-    // The engine reuses the input buffer; copy before keeping it.
-    const frame = new Float32Array(event.inputBuffer.getChannelData(0));
-    for (const ev of detector.push(frame)) {
-      if (ev.kind === "speechStarted") handlers.onSpeechStart();
-      else void transcribe(ev.samples);
-    }
-  };
-  source.connect(processor);
-  processor.connect(mute);
-  mute.connect(ctx.destination);
-
-  return {
-    stop(): void {
+    processor.onaudioprocess = (event) => {
       if (stopped) return;
-      stopped = true;
-      processor.onaudioprocess = null;
-      source.disconnect();
-      processor.disconnect();
-      mute.disconnect();
-      for (const track of stream.getTracks()) track.stop();
-      detector.reset();
-      void ctx.close().catch(() => {});
-    },
-  };
+      // The engine reuses the input buffer; copy before keeping it.
+      const frame = new Float32Array(event.inputBuffer.getChannelData(0));
+      for (const ev of detector.push(frame)) {
+        if (ev.kind === "speechStarted") handlers.onSpeechStart();
+        else void transcribe(ev.samples);
+      }
+    };
+    source.connect(processor);
+    processor.connect(mute);
+    mute.connect(ctx.destination);
+
+    return {
+      stop(): void {
+        if (stopped) return;
+        stopped = true;
+        processor.onaudioprocess = null;
+        source.disconnect();
+        processor.disconnect();
+        mute.disconnect();
+        for (const track of stream.getTracks()) track.stop();
+        detector.reset();
+        void ctx.close().catch(() => {});
+      },
+    };
+  } catch (error) {
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    void ctx.close().catch(() => {});
+    throw error;
+  }
 }
 
 interface QueueItem {

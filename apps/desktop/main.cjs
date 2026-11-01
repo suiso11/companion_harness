@@ -86,27 +86,32 @@ function createWindow() {
   });
   // Unreachable server: say so instead of showing a blank window. A
   // sub-frame or aborted (-3) navigation is not a failed app load.
-  win.webContents.on("did-fail-load", (_event, errorCode, _desc, _url, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) {
-      return;
-    }
-    win.loadURL(
-      "data:text/html;charset=utf-8," +
-        encodeURIComponent(
-          `<body style="background:#111;color:#eee;font:14px sans-serif;padding:16px">` +
-            `Companion サーバに接続できません<br>${base}<br>` +
-            `サーバを起動してから、トレイの「表示」を選んでください。</body>`,
-        ),
-    );
-  });
+  win.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, _desc, _url, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3) {
+        return;
+      }
+      win.loadURL(
+        "data:text/html;charset=utf-8," +
+          encodeURIComponent(
+            `<body style="background:#111;color:#eee;font:14px sans-serif;padding:16px">` +
+              `Companion サーバに接続できません<br>${base}<br>` +
+              `サーバを起動してから、トレイの「表示」を選んでください。</body>`,
+          ),
+      );
+    },
+  );
   // The shell only ever shows the harness: no new windows, no foreign origin.
   const origin = new URL(base).origin;
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  win.webContents.on("will-navigate", (event, url) => {
-    if (new URL(url).origin !== origin) {
-      event.preventDefault();
-    }
-  });
+  for (const eventName of ["will-navigate", "will-redirect"]) {
+    win.webContents.on(eventName, (event, url) => {
+      if (new URL(url).origin !== origin) {
+        event.preventDefault();
+      }
+    });
+  }
   void win.loadURL(`${base}/pet`);
 
   if (smoke) {

@@ -22,12 +22,13 @@ const T0 = 1_790_000_000_000;
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5, 6, 7, 8]);
 const JPEG_B64 = JPEG.toString("base64");
 
-type Mode = "ok" | "fail" | "empty" | "hang";
+type Mode = "ok" | "fail" | "empty" | "hang" | "redirect";
 
 interface Fixture {
   readonly app: CreatedServerApp["app"];
   readonly hits: string[];
   setMode(mode: Mode): void;
+  setRedirect(url: string): void;
   close(): void;
 }
 
@@ -44,6 +45,7 @@ async function makeFixture(
 ): Promise<Fixture> {
   const hits: string[] = [];
   let mode: Mode = "ok";
+  let redirectTo = "http://127.0.0.1:1/";
   const sockets = new Set<Socket>();
   const server: Server = createServer((request, response) => {
     void readBody(request).then((body) => {
@@ -54,6 +56,12 @@ async function makeFixture(
       if (mode === "fail") {
         response.statusCode = 500;
         response.end("down");
+        return;
+      }
+      if (mode === "redirect") {
+        response.statusCode = 307;
+        response.setHeader("location", redirectTo);
+        response.end();
         return;
       }
       response.setHeader("content-type", "application/json");
@@ -105,6 +113,9 @@ async function makeFixture(
     hits,
     setMode: (next) => {
       mode = next;
+    },
+    setRedirect: (url) => {
+      redirectTo = url;
     },
     close() {
       for (const socket of sockets) {
@@ -206,6 +217,29 @@ describe("POST /api/vision", () => {
         },
       });
     }
+  });
+
+  it("does not follow a redirect with the image", async () => {
+    const fixture = await makeFixture();
+    cleanups.push(() => fixture.close());
+    const leaked = createServer((_request, response) => {
+      response.statusCode = 200;
+      response.end("leaked");
+    });
+    leaked.listen(0, "127.0.0.1");
+    await once(leaked, "listening");
+    cleanups.push(() => leaked.close());
+    fixture.setRedirect(
+      `http://127.0.0.1:${(leaked.address() as AddressInfo).port}/collect`,
+    );
+    fixture.setMode("redirect");
+    let hits = 0;
+    leaked.on("request", () => {
+      hits += 1;
+    });
+    const response = await postVision(fixture, { imageBase64: JPEG_B64 });
+    expect(response.status).toBe(502);
+    expect(hits).toBe(0);
   });
 
   it("rejects bad bodies without calling upstream", async () => {
