@@ -113,6 +113,44 @@ export const PostSpeechRequestSchema = z
   );
 export type PostSpeechRequest = z.infer<typeof PostSpeechRequestSchema>;
 
+/**
+ * POST /api/transcribe request: one captured utterance, base64 WAV.
+ *
+ * The body must be JSON like every other mutation, hence base64. The audio
+ * itself is fixed: RIFF/WAVE, mono, 16-bit PCM, 16 kHz (what the local ASR
+ * engine accepts) and at most 2 MB decoded (~62 s); the server rejects
+ * anything else instead of forwarding it. The client is expected to send one
+ * end-of-utterance chunk, never a continuous stream.
+ */
+export const MAX_TRANSCRIBE_AUDIO_BYTES = 2_000_000;
+export const MAX_TRANSCRIBE_AUDIO_BASE64_LENGTH = 2_800_000;
+
+export const PostTranscribeRequestSchema = z.strictObject({
+  audioBase64: z
+    .string()
+    .min(16)
+    .max(MAX_TRANSCRIBE_AUDIO_BASE64_LENGTH)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, {
+      message: "audioBase64 must be canonical base64",
+    }),
+});
+export type PostTranscribeRequest = z.infer<typeof PostTranscribeRequestSchema>;
+
+/**
+ * POST /api/transcribe response. `text` is the normalized transcript; an
+ * empty string means the engine heard nothing usable (silence, noise, or a
+ * known non-speech artifact) and the caller should keep listening rather
+ * than send a turn.
+ */
+export const MAX_TRANSCRIPT_CODE_POINTS = 4_000;
+
+export const PostTranscribeResponseSchema = z.strictObject({
+  text: z.string().max(MAX_TRANSCRIPT_CODE_POINTS),
+});
+export type PostTranscribeResponse = z.infer<
+  typeof PostTranscribeResponseSchema
+>;
+
 export const AcceptedRunSchema = z.strictObject({
   id: UuidSchema,
   attempt: z.number().int().min(1),

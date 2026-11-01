@@ -823,6 +823,42 @@ COMPANION_TTS_JSON='{"url":"http://127.0.0.1:10101","speaker":8,"timeoutMs":2000
   it. The endpoint is a renderer of an already-bounded answer, not a general
   TTS proxy: it does not accept arbitrary text outside the request bound.
 
+## Speech input (`POST /api/transcribe`, strict opt-in, local only)
+
+Unset `COMPANION_ASR_JSON` (default) keeps the route a fixed 404. When set,
+the value must be a strict JSON object with only `{ url, prompt?, timeoutMs? }`
+pointing at a loopback whisper.cpp server (`whisper-server`):
+
+```sh
+COMPANION_ASR_JSON='{"url":"http://127.0.0.1:8080","prompt":"春琴抄、京ことば、引用","timeoutMs":20000}'
+```
+
+- `url` follows the model-local loopback rules; `prompt` (1..500 chars) is
+  the decoder bias for names and domain terms; `timeoutMs` is an integer
+  `1000..120000`, default `20000`. Unknown keys, non-loopback URLs, and
+  out-of-range values fail startup closed.
+- Request body is strict JSON `{ audioBase64 }`: one end-of-utterance
+  capture, immediately base64-encoded because every mutation is JSON-only.
+  The decoded audio must be a RIFF/WAVE file of at most 2 MB (~62 s of
+  16 kHz mono 16-bit PCM); anything else — bad base64, a non-WAV blob, an
+  oversized body — is `validation_error` and never reaches the engine.
+- Response is `{ text }`: the normalized transcript. Normalization applies
+  NFKC, drops bracketed engine annotations (`[音楽]`, `[BLANK_AUDIO]`), and
+  maps the fixed non-speech artifacts (「ご視聴ありがとうございました」 etc.)
+  to `""`. **An empty `text` is a normal 200** and means "heard nothing
+  usable": the caller must keep listening, not send a turn.
+- Misrecognition tolerance is three-layered and deliberately conservative:
+  the operator `prompt` biases decoding toward the real vocabulary; the
+  fixed artifact list keeps silence from becoming a question; and the
+  caller keeps the transcript **editable before it becomes a turn**. The
+  engine reports no confidence in the JSON response, so this build does not
+  gate on one — do not treat a non-empty transcript as verified.
+- The engine is a separate local process and the server never spawns it.
+  Nothing is persisted, no run event or SSE frame is produced, and there is
+  no retry: a missing/unreachable engine, a non-2xx response, or a response
+  without `text` is a fixed
+  `502 {"error":{"code":"internal_error","message":"speech recognition failed"}}`.
+
 ## Fixed-task comparison CLI (experimental)
 
 `pnpm compare -- /abs/input.json` is an operator experiment, not a
