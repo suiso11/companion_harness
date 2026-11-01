@@ -150,9 +150,16 @@ describe("createVoiceRenderer", () => {
 
   it("falls back on an ungrammatical verb + copula rendering", async () => {
     const { renderer } = rendererFor(
-      renderedText(["予定を確認しましたどす。r1", "10:00に見るどす。"]),
+      renderedText([
+        "予定を確認しましたどす。r1",
+        "10:00に見るどす。",
+        "資料を探してきますどす。",
+      ]),
     );
-    const voice = await renderer(answer(), { runId: "run-1" });
+    const voice = await renderer(
+      answer(["明日は晴れです。r1", "10:00に見る。", "資料を探します。"]),
+      { runId: "run-1" },
+    );
     expect(voice).toMatchObject({
       status: "fallback",
       reason: "invalid_output",
