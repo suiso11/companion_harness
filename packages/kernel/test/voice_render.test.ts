@@ -46,16 +46,14 @@ function textGateway(text: string): {
   }));
 }
 
-function answer(
-  texts: string[] = ["明日は晴れです。r1", "10:00に会いましょう。"],
-) {
+function answer(texts: string[] = ["明日は晴れです。r1", "10:00に会います。"]) {
   return {
     version: 1 as const,
     parts: texts.map((text) => ({ text, citations: [] as string[] })),
   };
 }
 
-const voiced = ["明日は晴れでござります。r1", "10:00にお会いしとくれやす。"];
+const voiced = ["明日は晴れでござります。r1", "10:00にお会いしまっさ。"];
 
 function rendererFor(
   text: string,
@@ -85,7 +83,7 @@ describe("createVoiceRenderer", () => {
     const voice = await renderer(answer(), { runId: "run-1" });
     expect(voice.status).toBe("rendered");
     expect(voice.profileId).toBe("shunkin");
-    expect(voice.profileVersion).toMatch(/^11-[0-9a-f]{12}$/);
+    expect(voice.profileVersion).toMatch(/^12-[0-9a-f]{12}$/);
     expect(voice.parts).toEqual(voiced.map((text) => ({ text })));
 
     expect(calls).toHaveLength(1);
@@ -107,10 +105,7 @@ describe("createVoiceRenderer", () => {
     // The user payload uses the same object shape as the required output.
     expect(user?.content).toContain(
       JSON.stringify({
-        parts: [
-          { text: "明日は晴れです。r1" },
-          { text: "10:00に会いましょう。" },
-        ],
+        parts: [{ text: "明日は晴れです。r1" }, { text: "10:00に会います。" }],
       }),
     );
   });
@@ -150,9 +145,16 @@ describe("createVoiceRenderer", () => {
 
   it("falls back on an ungrammatical verb + copula rendering", async () => {
     const { renderer } = rendererFor(
-      renderedText(["予定を確認しましたどす。r1", "10:00に見るどす。"]),
+      renderedText([
+        "予定を確認しましたどす。r1",
+        "10:00に見るどす。",
+        "資料を探してきますどす。",
+      ]),
     );
-    const voice = await renderer(answer(), { runId: "run-1" });
+    const voice = await renderer(
+      answer(["明日は晴れです。r1", "10:00に見る。", "資料を探します。"]),
+      { runId: "run-1" },
+    );
     expect(voice).toMatchObject({
       status: "fallback",
       reason: "invalid_output",
@@ -161,9 +163,12 @@ describe("createVoiceRenderer", () => {
 
   it("keeps noun + copula renderings such as 「あなたどす」", async () => {
     const { renderer } = rendererFor(
-      renderedText(["それはあなたどす。r1", "明日は晴れどす。"]),
+      renderedText(["明日は晴れどす。r1", "それはあなたどす。"]),
     );
-    const voice = await renderer(answer(), { runId: "run-1" });
+    const voice = await renderer(
+      answer(["明日は晴れです。r1", "それはあなたどす。"]),
+      { runId: "run-1" },
+    );
     expect(voice.status).toBe("rendered");
   });
 

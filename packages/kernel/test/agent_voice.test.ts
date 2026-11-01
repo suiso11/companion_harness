@@ -28,8 +28,8 @@ import {
 
 const T0 = 1790000000000;
 
-const canonicalParts = ["明日は晴れです。", "十時に会いましょう。"];
-const voicedParts = ["明日は晴れでござります。", "十時にお会いしとくれやす。"];
+const canonicalParts = ["明日は晴れです。", "十時に会います。"];
+const voicedParts = ["明日は晴れでござります。", "十時にお会いしまっさ。"];
 
 function answerCall(
   parts: Array<{ text: string; citations: string[] }>,
