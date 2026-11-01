@@ -681,8 +681,8 @@ export interface ServerConfig {
   readonly tts: TtsConfig | null;
   /** Strict opt-in local ASR; null (unset) keeps /api/transcribe a 404. */
   readonly asr: AsrConfig | null;
-  /** Absolute directory holding the user's VRM avatar; null means none. */
-  readonly avatarDir: string | null;
+  /** Absolute directory holding the user's avatar (default <appData>/avatar). */
+  readonly avatarDir: string;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
   readonly remote: RemoteConfig;
   /**
@@ -3057,8 +3057,11 @@ export function loadServerConfig(
   ) {
     throw configError("avatar dir must be an absolute path");
   }
+  // Default to <appData>/avatar so dropping model.fbx there just works.
   const avatarDir =
-    avatarRaw === undefined || avatarRaw.length === 0 ? null : avatarRaw;
+    avatarRaw === undefined || avatarRaw.length === 0
+      ? join(appDataDir(), "avatar")
+      : avatarRaw;
   const markdownRoots = parseMarkdownRoots(env.COMPANION_MARKDOWN_ROOTS_JSON);
   const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
