@@ -524,6 +524,8 @@ export interface ServerConfig {
   readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
   readonly voice: VoiceConfig | null;
+  /** Absolute directory holding the user's VRM avatar; null means none. */
+  readonly avatarDir: string | null;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
   readonly remote: RemoteConfig;
   /**
@@ -2889,6 +2891,15 @@ export function loadServerConfig(
   }
   const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(dbRaw);
   assertDbPathHasNoSymlink(dbPath);
+  const avatarRaw = env.COMPANION_AVATAR_DIR;
+  if (
+    avatarRaw !== undefined &&
+    (avatarRaw.length === 0 || avatarRaw.length > 4096 || !isAbsolute(avatarRaw))
+  ) {
+    throw configError("avatar dir must be an absolute path");
+  }
+  const avatarDir =
+    avatarRaw === undefined || avatarRaw.length === 0 ? null : avatarRaw;
   const markdownRoots = parseMarkdownRoots(env.COMPANION_MARKDOWN_ROOTS_JSON);
   const model = parseModelConfig(env.COMPANION_MODEL_JSON);
   const calendar = parseCalendarConfig(env.COMPANION_CALENDAR_JSON);
@@ -2982,6 +2993,7 @@ export function loadServerConfig(
     selfLoop,
     agora,
     voice,
+    avatarDir,
     remote,
     trial,
     autodispatch,

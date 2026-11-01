@@ -6,6 +6,7 @@
 // only) is delegated to the kernel repository; cancel goes through the
 // engine so the DB transition commits before any abort.
 
+import { readFileSync } from "node:fs";
 import {
   ActiveRunResponseSchema,
   AgoraHttpDecisionRequestSchema,
@@ -137,6 +138,7 @@ import { z } from "zod";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
+import { avatarUrl, resolveAvatarFile } from "./avatar_files.js";
 import {
   createMonitorSampler,
   createWebSearchHealth,
@@ -5237,6 +5239,36 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // Hardware is sampled lazily by `monitor` (2s cadence, 60-sample ring,
   // idle auto-stop). The payload is scalar-only: no upstream URLs, raw
   // errors, response bodies, prompts, or model output can cross this route.
+  /* ---------------- character avatar (local VRM file) ---------------- */
+  // The user's model lives outside the repository; the server serves exactly
+  // that one directory. Both routes require the normal session gate.
+  app.get("/api/character/config", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    return c.json(
+      { version: 1, vrmUrl: avatarUrl(config.avatarDir) },
+      200,
+    );
+  });
+
+  app.get("/avatar/:file", (c) => {
+    const file = resolveAvatarFile(config.avatarDir, c.req.param("file"));
+    if (file === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    let body: Uint8Array<ArrayBuffer>;
+    try {
+      body = new Uint8Array(readFileSync(file));
+    } catch {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    return c.newResponse(body, 200, {
+      "content-type": "model/gltf-binary",
+      "cache-control": "private, max-age=3600",
+    });
+  });
+
   app.get("/api/monitor", async (c) => {
     const started = now();
     if (!strictQuery(c, []).ok) {
