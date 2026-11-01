@@ -862,6 +862,53 @@ COMPANION_ASR_JSON='{"url":"http://127.0.0.1:8080","prompt":"春琴抄、京こ�
   without `text` is a fixed
   `502 {"error":{"code":"internal_error","message":"speech recognition failed"}}`.
 
+## Hands-free voice (browser client + the dictated-write gate)
+
+The chat page has one opt-in `音声` toggle (`#composer-mic`). With it on the
+browser keeps the microphone open, detects the end of an utterance locally
+(RMS threshold, 300 ms pre-roll, 250 ms minimum speech, 900 ms trailing
+silence, 20 s cap), sends one 16 kHz mono WAV to `POST /api/transcribe`, and
+submits the returned text as an ordinary turn with
+`uiContext.inputOrigin = "voice"`. Answers are spoken through
+`POST /api/speech`: the streaming draft is chunked into sentences and queued,
+and the validated answer is spoken only when no draft was. Speaking while the
+app is talking is barge-in: playback stops and the active run is cancelled
+before the new utterance is submitted. The audio loop is a lazy chunk; voice
+off removes nothing else and the text path is unchanged.
+
+**Why the flag matters.** Because an ASR error becomes a durable write, a
+dictated turn is not allowed to write a number/name/content value before the
+user has confirmed it. The kernel enforces this in the ToolBroker (`confirm`
+step, between `validate` and `dedup`) from a static slot-role table, never
+from the transcript:
+
+| tool | risky slots |
+|---|---|
+| `calendar.reschedule` | `start`, `end` (number), `reason` (entity) |
+| `calendar.create` | `title` (entity), `start`, `end` (number) |
+| `memory.correct` | `correctionBody`, `handle` (entity) |
+| `memory.retire` / `memory.reactivate` | `handle` (entity) |
+| `purpose.propose` / `task.propose` | `scope`, `sourceQuote`, `interpretation` (entity) |
+| `trial.propose` | `objective`, `acceptance`, `literalPatchPaths` (entity), `expiryMinutes` (number) |
+
+- A dropped negation has no field of its own in any tool schema; it lands in
+  one of the entity/content slots above, so gating the slot covers it.
+- Read-only tools are never listed and never gated. Typed turns skip the gate
+  entirely (the flag can only ADD a confirmation, never remove one).
+- The first attempt is refused with the fixed code `confirmation_required`
+  (audited as `denied`); the model is told to state the exact values and ask.
+  The byte-identical call (post-Zod args hash) is allowed once, only in the
+  immediately following user turn of the same session, only after the
+  blocking run completed, and only within 15 minutes. Same-run retries,
+  arguments that changed, and a confirmation that is not the next turn are
+  refused again. Consumption is recorded in `tool_confirmations`
+  (migration 0043); no argument values are stored there.
+- Limits: the voice flag is client-asserted, so a client that omits it gets
+  the text behavior; the confirmation is bound to "the next turn", not to the
+  user's exact words (a model that re-issues the identical arguments without
+  asking is still within the rule); the table is a static, reviewed list, so a
+  new mutating tool is ungated until it is added.
+
 ## Fixed-task comparison CLI (experimental)
 
 `pnpm compare -- /abs/input.json` is an operator experiment, not a

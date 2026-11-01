@@ -210,6 +210,11 @@ export const AGENT_SYSTEM_PROMPT =
   "runs before they approve it. Do not paste raw UUIDs or internal field " +
   "names. " +
   "Never echo the per-turn 現在日時 line in the answer. " +
+  'If a tool returns {"ok":false,"errorCode":"confirmation_required"}, the ' +
+  "values it would write came from a spoken request and need the user's " +
+  "confirmation: state those exact values in one short sentence and ask, and " +
+  "do not retry that call in this run. After the user confirms in the next " +
+  "turn, issue the identical call with the same arguments. " +
   "Proposals are not citations: never cite proposal, purpose, or task " +
   "ids in answer.submit; citations are only rN/mN evidence ids received " +
   "from tools. " +
@@ -3243,6 +3248,11 @@ export function createAgentStrategy(
       const sessionId = ctx.run.sessionId;
       const requestText =
         ctx.turn.input.kind === "user_text" ? ctx.turn.input.text : "";
+      // Dictated turns carry `uiContext.inputOrigin = "voice"` (client-set,
+      // frozen at Turn creation). Only the slot-confirmation gate reads it:
+      // it can ADD a confirmation, never remove one from a typed turn.
+      const voiceInput =
+        ctx.turn.frozenContext.uiContext.inputOrigin === "voice";
       // The Turn's FROZEN temporal is authoritative for this run: its zone
       // renders the current-date line and the memory record dates.
       const temporal = ctx.turn.frozenContext.temporal;
@@ -3499,6 +3509,7 @@ export function createAgentStrategy(
             sessionId,
             calls: classification.calls,
             knownOrdinalMap,
+            voiceInput,
             signal: ctx.signal,
             wallSignal: wallController.signal,
             expireWall,
@@ -5116,6 +5127,7 @@ async function executeOrdinaryTools(args: {
   sessionId: string;
   calls: readonly NormalizedToolCall[];
   knownOrdinalMap: Map<number, string>;
+  voiceInput: boolean;
   signal: AbortSignal;
   wallSignal: AbortSignal;
   expireWall: () => void;
@@ -5131,6 +5143,7 @@ async function executeOrdinaryTools(args: {
     sessionId,
     calls,
     knownOrdinalMap,
+    voiceInput,
     signal,
     wallSignal,
     expireWall,
@@ -5231,6 +5244,7 @@ async function executeOrdinaryTools(args: {
                 origin: AGENT_TOOL_ORIGIN,
                 caller: AGENT_TOOL_CALLER,
                 signal: composeToolSignal(),
+                voiceInput,
               },
             );
             // Wall/engine halt wins over a delivered broker result: no

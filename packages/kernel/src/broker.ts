@@ -6,8 +6,8 @@
 //   Descriptors are serializable contracts (ToolDescriptor); Zod
 //   input/output schemas, handlers, and normalizers are kernel-owned.
 // - Fixed pipeline order (observable via `onStep` and the returned
-//   `pipeline` trace): budget_reserve -> classify -> validate -> dedup ->
-//   execute -> normalize -> audit. Every logical request reaching the
+//   `pipeline` trace): budget_reserve -> classify -> validate -> confirm ->
+//   dedup -> execute -> normalize -> audit. Every logical request reaching the
 //   broker reserves budget FIRST (atomic `runs.tool_requests_used` CAS),
 //   before unknown/denied/invalid/dedup decisions. Budget exhaustion
 //   itself never increments past the cap.
@@ -43,6 +43,7 @@
 import {
   type ActualOutcome,
   isTerminalStatus,
+  PROPOSAL_TTL_MS,
   parseRunEventPayload,
   parseToolErrorCode,
   type ReportedOutcome,
@@ -67,6 +68,7 @@ import {
   type ExecutionRecorder,
 } from "./execution_records.js";
 import type { KernelRepository } from "./repository.js";
+import { riskySlotValues } from "./slot_roles.js";
 
 /* ------------------------------------------------------------------ */
 /* Public types                                                        */
@@ -77,6 +79,7 @@ export type PipelineStep =
   | "budget_reserve"
   | "classify"
   | "validate"
+  | "confirm"
   | "dedup"
   | "execute"
   | "normalize"
@@ -87,6 +90,7 @@ export const BROKER_PIPELINE_ORDER: readonly PipelineStep[] = [
   "budget_reserve",
   "classify",
   "validate",
+  "confirm",
   "dedup",
   "execute",
   "normalize",
@@ -177,6 +181,12 @@ export interface ToolRegistration {
 export interface ToolInvokeContext {
   readonly origin: string;
   readonly caller: string;
+  /**
+   * True only when the current Run's turn came from dictated (voice) input.
+   * The voice slot-confirmation gate runs only for such calls; anything that
+   * omits it is treated as typed input and keeps the previous behavior.
+   */
+  readonly voiceInput?: boolean;
   readonly allowedTools?: readonly string[];
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
@@ -458,6 +468,24 @@ function deniedOutcome(): FinalOutcome {
     reportedOutcome: null,
     disposition: "none",
     errorCode: "tool_denied",
+    resultDigest: null,
+    reusedFromCallId: null,
+    normalized: null,
+    modelFacing: null,
+  };
+}
+
+/**
+ * Refusal of a dictating-turn write until the user confirms the values in the
+ * next turn. Audited like any denial; the model sees the fixed code and is
+ * told (system prompt) to state the values and ask instead of retrying.
+ */
+function confirmationOutcome(): FinalOutcome {
+  return {
+    actualOutcome: "denied",
+    reportedOutcome: null,
+    disposition: "none",
+    errorCode: "confirmation_required",
     resultDigest: null,
     reusedFromCallId: null,
     normalized: null,
@@ -1135,6 +1163,28 @@ export class ToolBroker {
     this.updateArgsHash(call.callId, argsHash);
     // Requested event carries the post-Zod canonical hash (never raw args).
     this.appendRequested(runId, auditTool, call, argsHash);
+
+    // ---- Step 3b: voice slot confirmation. ----
+    // A mutating call whose number/entity slot was dictated is not written
+    // before the user confirmed it: the first attempt is refused and the
+    // byte-identical call is allowed only in the immediately following user
+    // turn (one use, bounded TTL). Typed turns and read-only tools never
+    // reach this check.
+    note("confirm");
+    if (
+      context.voiceInput === true &&
+      riskySlotValues(auditTool, input).length > 0
+    ) {
+      if (!this.consumeOrRecordConfirmation(runId, auditTool, argsHash)) {
+        return this.finishFast(
+          runId,
+          auditTool,
+          call,
+          confirmationOutcome(),
+          trace,
+        );
+      }
+    }
 
     // ---- Step 4: dedup (same run, post-defaults fingerprint). ----
     // Effective freshness is computed ONLY after validated/defaulted input:
@@ -2371,6 +2421,111 @@ export class ToolBroker {
   }
 
   /** Fast-path finalization (no physical work): audit row + event + result. */
+  /**
+   * Voice slot-confirmation state machine, keyed on the post-Zod args hash.
+   *
+   * Returns true when THIS call is the confirmed retry and may proceed:
+   * - a pending row exists for the same session/tool/args hash, younger than
+   *   PROPOSAL_TTL_MS,
+   * - the blocking run completed (the model asked in its answer),
+   * - the current run is a LATER turn of the same session with no other user
+   *   turn in between (the confirmation is the immediate reply),
+   * - the pending row had not been consumed yet (one use).
+   *
+   * Anything else is refused and, when there was no usable pending row, a new
+   * row is recorded for this attempt. Same-run retries never pass: a
+   * confirmation must be a separate turn.
+   */
+  private consumeOrRecordConfirmation(
+    runId: string,
+    tool: string,
+    argsHash: string,
+  ): boolean {
+    const now = this.clock.now();
+    const current = this.db
+      .prepare(
+        `SELECT r.session_id AS sessionId, t.seq AS seq,
+                json_extract(t.input_json, '$.kind') AS kind
+           FROM runs r JOIN turns t ON t.id = r.turn_id
+          WHERE r.id = ?`,
+      )
+      .get(runId) as
+      | { sessionId: string; seq: number; kind: string | null }
+      | undefined;
+    if (current === undefined || current.kind !== "user_text") {
+      return false;
+    }
+    const pending = this.db
+      .prepare(
+        `SELECT id, blocked_run_id AS blockedRunId, created_at AS createdAt
+           FROM tool_confirmations
+          WHERE session_id = ? AND tool_name = ? AND args_hash = ?
+            AND consumed_at IS NULL`,
+      )
+      .get(current.sessionId, tool, argsHash) as
+      | { id: string; blockedRunId: string; createdAt: number }
+      | undefined;
+    if (
+      pending !== undefined &&
+      now - pending.createdAt <= PROPOSAL_TTL_MS &&
+      pending.blockedRunId !== runId
+    ) {
+      const blocked = this.db
+        .prepare(
+          `SELECT r.status AS status, t.seq AS seq
+             FROM runs r JOIN turns t ON t.id = r.turn_id
+            WHERE r.id = ?`,
+        )
+        .get(pending.blockedRunId) as
+        | { status: string; seq: number }
+        | undefined;
+      if (
+        blocked !== undefined &&
+        blocked.status === "completed" &&
+        current.seq > blocked.seq
+      ) {
+        const between = this.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM turns
+              WHERE session_id = ? AND seq > ? AND seq < ?
+                AND json_extract(input_json, '$.kind') = 'user_text'`,
+          )
+          .get(current.sessionId, blocked.seq, current.seq) as { n: number };
+        if (between.n === 0) {
+          const consumed = this.db
+            .prepare(
+              `UPDATE tool_confirmations
+                  SET consumed_at = ?, consumed_run_id = ?
+                WHERE id = ? AND consumed_at IS NULL`,
+            )
+            .run(now, runId, pending.id);
+          return consumed.changes === 1;
+        }
+      }
+      return false;
+    }
+    if (pending !== undefined && pending.blockedRunId === runId) {
+      return false;
+    }
+    // No usable row (absent, stale, or consumed elsewhere): drop the stale
+    // pending row for this key and record this attempt as the one to confirm.
+    this.db
+      .prepare(
+        `DELETE FROM tool_confirmations
+          WHERE session_id = ? AND tool_name = ? AND args_hash = ?
+            AND consumed_at IS NULL`,
+      )
+      .run(current.sessionId, tool, argsHash);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO tool_confirmations
+           (id, session_id, tool_name, args_hash, blocked_run_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(generateId(), current.sessionId, tool, argsHash, runId, now);
+    return false;
+  }
+
   private finishFast(
     runId: string,
     tool: string,

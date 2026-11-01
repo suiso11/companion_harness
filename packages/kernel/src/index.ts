@@ -819,6 +819,11 @@ export {
   ShadowWorkerBusyError,
   skipRecordedInboxInTx,
 } from "./shadow.js";
+export {
+  riskySlotValues,
+  SLOT_ROLES_BY_TOOL,
+  type SlotRole,
+} from "./slot_roles.js";
 export type {
   RunStrategy,
   RunStrategyContext,

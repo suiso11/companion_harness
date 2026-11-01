@@ -318,6 +318,7 @@ describe("pipeline ordering", () => {
         "budget_reserve",
         "classify",
         "validate",
+        "confirm",
         "dedup",
         "audit",
       ]);

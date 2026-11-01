@@ -58,6 +58,10 @@ import {
   type ThinkingState,
   thinkingDisplayText,
 } from "./lib/thinking.js";
+// Voice is opt-in: both modules load only when the user turns it on, so the
+// chat entry bundle (build-ui budget) never pays for the audio loop.
+import type { SentenceFeeder } from "./lib/voice_loop.js";
+import type { VoicePlayback, VoiceSession } from "./lib/voice_session.js";
 
 // PR-5: the chat shell also hosts the first native feature page. `activePath`
 // keeps the shared nav honest about the current route, and `children` is the
@@ -644,6 +648,7 @@ function applyEphemeralDelta(
     }
     // Provisional unvalidated text: same-step appends, new-step restarts.
     draft = appendDraftText(draft, event.payload);
+    voiceFeedDraft(runId);
   }
 }
 
@@ -844,7 +849,7 @@ async function fetchUiContext(): Promise<unknown> {
   return {};
 }
 
-async function send(): Promise<void> {
+async function send(inputOrigin?: "voice"): Promise<void> {
   if (sessionId === null) {
     showNotice("セッションを開始できませんでした");
     return;
@@ -875,7 +880,11 @@ async function send(): Promise<void> {
     // the composer, session switch, and new-session controls must stay
     // locked while the request is in flight. fetchUiContext() never throws.
     sending = true;
-    request.uiContext = await fetchUiContext();
+    const context = await fetchUiContext();
+    request.uiContext =
+      inputOrigin === "voice"
+        ? { ...(context as Record<string, unknown>), inputOrigin }
+        : context;
   }
   const request = pendingRequest;
   if (request === null) return;
@@ -1028,6 +1037,116 @@ async function stop(): Promise<void> {
   // the「停止しました」notice through the stream path.
 }
 
+// --- hands-free voice (mic -> turn -> spoken answer) ---
+let voiceMode = $state(false);
+let voiceStarting = $state(false);
+let voiceSpeaking = $state(false);
+let voiceSession: VoiceSession | null = null;
+let voicePlayback: VoicePlayback | null = null;
+// Loaded with the voice modules on enable; null while voice is off.
+let voiceFeeder: SentenceFeeder | null = null;
+let voiceSplit: ((text: string) => string[]) | null = null;
+// Anything of the current run already queued for speech (draft path).
+let voiceSpoken = false;
+// A barged-in run keeps streaming until its cancel lands: never speak it.
+let voiceMutedRun: string | null = null;
+
+function stopVoice(): void {
+  voiceSession?.stop();
+  voiceSession = null;
+  voicePlayback?.dispose();
+  voicePlayback = null;
+  voiceFeeder?.reset();
+  voiceFeeder = null;
+  voiceSplit = null;
+  voiceSpoken = false;
+  voiceSpeaking = false;
+  voiceMode = false;
+}
+
+async function toggleVoice(): Promise<void> {
+  if (voiceMode) {
+    stopVoice();
+    return;
+  }
+  voiceStarting = true;
+  try {
+    const [loop, audio] = await Promise.all([
+      import("./lib/voice_loop.js"),
+      import("./lib/voice_session.js"),
+    ]);
+    if (!voiceStarting) return;
+    voiceFeeder = new loop.SentenceFeeder();
+    voiceSplit = loop.splitSpeakable;
+    // Created in the click gesture so the playback context may start.
+    voicePlayback = audio.createVoicePlayback((speaking) => {
+      voiceSpeaking = speaking;
+    });
+    const session = await audio.startVoiceSession({
+      onSpeechStart: voiceBargeIn,
+      onUtterance: (text) => void handleVoiceUtterance(text),
+      onNotice: showNotice,
+    });
+    if (!voiceStarting) {
+      session.stop();
+      return;
+    }
+    voiceSession = session;
+    voiceMode = true;
+  } catch {
+    stopVoice();
+    showNotice("マイクを使用できません");
+  } finally {
+    voiceStarting = false;
+  }
+}
+
+function voiceBargeIn(): void {
+  if (!voiceSpeaking) return;
+  voicePlayback?.reset();
+  voiceFeeder?.reset();
+  voiceSpoken = false;
+  voiceMutedRun = activeRunId;
+  void stop();
+}
+
+async function handleVoiceUtterance(text: string): Promise<void> {
+  if (!voiceMode) return;
+  voicePlayback?.reset();
+  if (activeRunId !== null) {
+    voiceMutedRun = activeRunId;
+    await stop();
+    for (let i = 0; i < 100 && (activeRunId !== null || sending); i += 1) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+    }
+  }
+  if (!voiceMode || activeRunId !== null || sending) return;
+  input = text;
+  await send("voice");
+}
+
+function voiceFeedDraft(runId: string): void {
+  if (voicePlayback === null || voiceFeeder === null) return;
+  if (voiceMutedRun === runId) return;
+  const fed = voiceFeeder.push(draftDisplayText(draft));
+  // A restarted draft (new step) invalidates what was already queued.
+  if (fed.restarted) voicePlayback.reset();
+  for (const sentence of fed.sentences) voicePlayback.enqueue(sentence);
+  voiceSpoken = fed.sentences.length > 0 || (voiceSpoken && !fed.restarted);
+}
+
+function voiceSpeakAnswer(runId: string): void {
+  if (voicePlayback === null || voiceFeeder === null) return;
+  if (voiceMutedRun === runId) return;
+  const sentences =
+    voiceSpoken || voiceSplit === null
+      ? voiceFeeder.flush()
+      : runView.answer.flatMap((part) => voiceSplit?.(part.text) ?? []);
+  for (const sentence of sentences) voicePlayback.enqueue(sentence);
+  voiceFeeder.reset();
+  voiceSpoken = false;
+}
+
 // --- run event pipeline (SSE + JSON fallback, §16.4/§16.7) ---
 function readStoredCursor(runId: string): number | null {
   try {
@@ -1163,6 +1282,8 @@ function openCompanionStream(sid: string): void {
 function finishActiveRun(): void {
   closeStream();
   stopElapsedTimer();
+  voiceFeeder?.reset();
+  voiceSpoken = false;
   if (activeRunId !== null) {
     // PR78 review: the terminal released the run; a later run must not
     // inherit this run's draft suppression.
@@ -1625,6 +1746,7 @@ function renderRunView(runId: string): void {
       return;
     }
     renderedAnswers.add(runId);
+    voiceSpeakAnswer(runId);
     const voiced = runResultToAnswerParts(runView.result, {
       preferVoice: true,
     });
@@ -3222,6 +3344,8 @@ onMount(() => {
   };
   document.addEventListener("visibilitychange", onVisibility);
   return () => {
+    voiceStarting = false;
+    stopVoice();
     closeStream();
     closeCompanionStream();
     if (presenceTimer !== null) {
@@ -3930,6 +4054,17 @@ function evidenceForTurn(turn: Turn): {
     ></textarea>
     <button id="composer-send" type="submit" disabled={composerSendDisabled()}>
       送信
+    </button>
+    <button
+      id="composer-mic"
+      type="button"
+      aria-pressed={voiceMode}
+      data-voice-mode={voiceMode ? "on" : "off"}
+      data-speaking={voiceSpeaking ? "true" : "false"}
+      disabled={voiceStarting}
+      onclick={() => void toggleVoice()}
+    >
+      音声
     </button>
     <button
       id="composer-stop"

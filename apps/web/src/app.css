@@ -639,6 +639,23 @@ button[data-action-evidence="before"] {
   filter: brightness(0.92);
 }
 
+/* Voice toggle: same shape as send; accent while listening, ring while speaking. */
+#composer-mic {
+  border-radius: var(--radius-xl);
+  font-weight: 600;
+}
+
+#composer-mic[data-voice-mode="on"] {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+#composer-mic[data-speaking="true"] {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 /* Destructive calls to action keep the destructive token. */
 #action-reject,
 #composer-stop {
@@ -647,6 +664,7 @@ button[data-action-evidence="before"] {
 }
 
 #composer-send,
+#composer-mic,
 #composer-stop,
 #session-new,
 #relogin-submit,
@@ -728,6 +746,7 @@ button[data-action-evidence="before"] {
   }
 
   #composer-send,
+  #composer-mic,
   #composer-stop {
     flex: 1 1 auto;
   }
