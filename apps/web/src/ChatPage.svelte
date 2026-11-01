@@ -3318,9 +3318,7 @@ function evidenceForTurn(turn: Turn): {
 
 <div class="shell">
   <header class="topbar">
-    <h1>会話</h1>
-    <FeatureNav {activePath} />
-    <div class="sessions">
+    <div class="topbar-start">
       <button
         id="session-toggle"
         type="button"
@@ -3335,6 +3333,10 @@ function evidenceForTurn(turn: Turn): {
         会話一覧
         <span class="session-count">{sessions.length}</span>
       </button>
+      <h1>会話</h1>
+    </div>
+    <FeatureNav {activePath} />
+    <div class="sessions">
       <button
         id="session-new"
         type="button"
