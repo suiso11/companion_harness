@@ -356,9 +356,9 @@ describe("agent voice wiring", () => {
       // Base safety rules remain first and intact; the note is appended.
       expect(system?.startsWith(AGENT_SYSTEM_PROMPT)).toBe(true);
       expect(system).toContain("『春琴』");
-      expect(system).toContain("大阪船場言葉");
+      expect(system).toContain("京ことば");
       expect(system).toContain("内容は変わらない");
-      expect(system).toContain("自分で口調を真似る必要はない");
+      expect(system).toContain("あなた自身もその話し方で答え");
     } finally {
       closeKernelDatabase(handle);
     }
