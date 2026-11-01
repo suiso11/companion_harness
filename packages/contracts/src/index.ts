@@ -1051,6 +1051,8 @@ export {
   M5_TOOL_ERROR_CODE_REGISTRY,
   M5_TOOL_ERROR_CODES,
   M5ToolErrorCodeNewSchema,
+  M6_TOOL_ERROR_CODES,
+  M6ToolErrorCodeNewSchema,
   parseLatestToolErrorCode,
   parseM0ToolErrorCode,
   parseM1ToolErrorCode,

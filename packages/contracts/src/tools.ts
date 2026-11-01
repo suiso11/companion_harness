@@ -154,23 +154,37 @@ export type M5ToolErrorCodeNew = (typeof M5_TOOL_ERROR_CODES)[number];
 export const M5ToolErrorCodeNewSchema = z.enum(M5_TOOL_ERROR_CODES);
 
 /**
+ * Exact M6 addition (voice slot confirmation). A mutating call whose
+ * number/entity/content slot came from a dictated turn is refused ONCE with
+ * this code; the byte-identical call is allowed only in the immediately
+ * following user turn (see the kernel slot-confirmation gate). Fixed code,
+ * no free text: the model is told to state the values and ask, then re-issue
+ * the identical call after the user confirms.
+ */
+export const M6_TOOL_ERROR_CODES = ["confirmation_required"] as const;
+export type M6ToolErrorCodeNew = (typeof M6_TOOL_ERROR_CODES)[number];
+export const M6ToolErrorCodeNewSchema = z.enum(M6_TOOL_ERROR_CODES);
+
+/**
  * Closed latest tool error vocabulary: the exact M0 nine plus the exact M1
- * five plus the exact M4 six plus the exact M5 one (21 total, explicit
- * closed union, never regex/free text). Generic/latest validation accepts
- * all twenty-one; exact M0 validation accepts only the nine above, exact
- * M1 validation the five, and exact M4/M5 stay per-era closed sets.
+ * five plus the exact M4 six plus the exact M5 one plus the exact M6 one
+ * (22 total, explicit closed union, never regex/free text). Generic/latest
+ * validation accepts all twenty-two; exact M0 validation accepts only the
+ * nine above, exact M1 validation the five, and exact M4/M5/M6 stay per-era
+ * closed sets.
  */
 export const LATEST_TOOL_ERROR_CODES = [
   ...M0_TOOL_ERROR_CODES,
   ...M1_TOOL_ERROR_CODES,
   ...M4_TOOL_ERROR_CODES,
   ...M5_TOOL_ERROR_CODES,
+  ...M6_TOOL_ERROR_CODES,
 ] as const;
 export type LatestToolErrorCode = (typeof LATEST_TOOL_ERROR_CODES)[number];
 
 /**
- * Latest tool error-code schema: closed M0+M1+M4+M5 union (21 codes). The
- * M1 alias is retained for backwards-compatible importers; M5 is latest.
+ * Latest tool error-code schema: closed M0+M1+M4+M5+M6 union (22 codes). The
+ * M1 alias is retained for backwards-compatible importers; M6 is latest.
  */
 export const M1ToolErrorCodeSchema = z.enum(LATEST_TOOL_ERROR_CODES);
 export type M1ToolErrorCode = z.infer<typeof M1ToolErrorCodeSchema>;
@@ -179,13 +193,13 @@ export type M1ToolErrorCode = z.infer<typeof M1ToolErrorCodeSchema>;
 export const LatestToolErrorCodeSchema = M1ToolErrorCodeSchema;
 export type ToolErrorCode = z.infer<typeof LatestToolErrorCodeSchema>;
 
-/** Generic tool error-code schema: latest (M0+M1+M4+M5, 21 codes). */
+/** Generic tool error-code schema: latest (M0+M1+M4+M5+M6, 22 codes). */
 export const ToolErrorCodeSchema = LatestToolErrorCodeSchema;
 
 /** Known M0 tool error codes (alias of the closed M0 vocabulary). */
 export const KNOWN_M0_TOOL_ERROR_CODES = M0_TOOL_ERROR_CODES;
 
-/** Known latest (M0+M1+M4+M5) tool error codes (closed 21-code vocabulary). */
+/** Known latest (M0+M1+M4+M5+M6) tool error codes (closed 22-code vocabulary). */
 export const KNOWN_LATEST_TOOL_ERROR_CODES = LATEST_TOOL_ERROR_CODES;
 
 /** Exact M0 schema-versioned tool error-code registry (version 1 only). */
