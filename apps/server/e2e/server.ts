@@ -107,6 +107,9 @@ const config = loadServerConfig({
   // Voice is opt-in per spec run (the Playwright webServer sets it); the
   // shared server only exposes the TEXT_VOICE fake branch when configured.
   COMPANION_VOICE_JSON: process.env.COMPANION_VOICE_JSON,
+  // Optional: point the character page at a real local avatar for a manual
+  // browser check (unset in CI keeps the SVG fallback).
+  COMPANION_AVATAR_DIR: process.env.COMPANION_AVATAR_DIR,
 });
 const logger = createStdServerLogger("error");
 

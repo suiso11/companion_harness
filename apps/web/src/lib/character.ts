@@ -76,14 +76,38 @@ export function newestSessionId(body: unknown): string | null {
   return typeof id === "string" ? id : null;
 }
 
-/** Same-origin VRM URL from the server, or null when no model is set up. */
-export async function fetchCharacterConfig(): Promise<string | null> {
+export type CharacterAvatarKind = "vrm" | "fbx";
+
+export interface CharacterAvatar {
+  readonly kind: CharacterAvatarKind;
+  readonly url: string;
+  readonly texturesUrl: string | null;
+}
+
+/** What the character page should load, or null when no model is set up. */
+export async function fetchCharacterConfig(): Promise<CharacterAvatar | null> {
   const res = await fetchJson("/api/character/config");
   if (res.status !== 200) {
     return null;
   }
-  const body = res.body as { vrmUrl?: unknown };
-  return typeof body.vrmUrl === "string" ? body.vrmUrl : null;
+  const body = res.body as { avatar?: unknown };
+  const avatar = body.avatar;
+  if (typeof avatar !== "object" || avatar === null) {
+    return null;
+  }
+  const record = avatar as { kind?: unknown; url?: unknown; texturesUrl?: unknown };
+  if (record.kind !== "vrm" && record.kind !== "fbx") {
+    return null;
+  }
+  if (typeof record.url !== "string") {
+    return null;
+  }
+  return {
+    kind: record.kind,
+    url: record.url,
+    texturesUrl:
+      typeof record.texturesUrl === "string" ? record.texturesUrl : null,
+  };
 }
 
 /** Read the newest completed answer, or null when there is none yet. */
