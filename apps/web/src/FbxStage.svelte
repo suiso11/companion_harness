@@ -113,7 +113,11 @@ onMount(() => {
               }
               material.map = texture;
               material.color.set(0xffffff);
-              material.transparent = file.includes("trans");
+              // The atlases carry alpha (skin/face islands, lace, veils):
+              // discard fully transparent texels instead of painting their
+              // background, and blend the cut-out edges.
+              material.transparent = true;
+              material.alphaTest = 0.02;
               material.needsUpdate = true;
             }
           });
