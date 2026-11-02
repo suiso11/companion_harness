@@ -1035,16 +1035,10 @@ export function parseLearningConfig(
       throw configError("learning config has an unknown key");
     }
   }
-  const dbPath = record.dbPath;
-  if (
-    typeof dbPath !== "string" ||
-    dbPath.length === 0 ||
-    dbPath.length > 4096 ||
-    dbPath.includes("\0") ||
-    !isAbsolute(dbPath)
-  ) {
-    throw configError("learning database path must be absolute");
-  }
+  const dbPath = requireAbsolutePath(
+    record.dbPath,
+    "learning database path must be absolute",
+  );
   return Object.freeze({ dbPath });
 }
 
@@ -1160,16 +1154,10 @@ export function parseAgoraConfig(raw: string | undefined): AgoraConfig | null {
       throw configError("agora config has an unknown key");
     }
   }
-  const dbPath = record.dbPath;
-  if (
-    typeof dbPath !== "string" ||
-    dbPath.length === 0 ||
-    dbPath.length > 4096 ||
-    dbPath.includes("\0") ||
-    !isAbsolute(dbPath)
-  ) {
-    throw configError("agora database path must be absolute");
-  }
+  const dbPath = requireAbsolutePath(
+    record.dbPath,
+    "agora database path must be absolute",
+  );
   const minWriteIntervalMs = boundedInteger(
     record.minWriteIntervalMs,
     AGORA_CONFIG_MIN_WRITE_INTERVAL_MS,
@@ -1240,31 +1228,16 @@ export function parseExecutionRecordsConfig(
   raw: string | undefined,
 ): ExecutionRecordsConfig | null {
   if (raw === undefined) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw configError("execution records config must be a JSON object");
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw configError("execution records config must be a JSON object");
-  }
-  const record = parsed as Record<string, unknown>;
+  const record = requireConfigObject(raw, "execution records config");
   for (const key of Object.keys(record)) {
     if (!EXECUTION_RECORD_DIR_KEYS.has(key)) {
       throw configError("execution records config has an unknown key");
     }
   }
-  const directory = record.directory;
-  if (
-    typeof directory !== "string" ||
-    directory.length === 0 ||
-    directory.length > 4096 ||
-    directory.includes("\0") ||
-    !isAbsolute(directory)
-  ) {
-    throw configError("execution records directory must be absolute");
-  }
+  const directory = requireAbsolutePath(
+    record.directory,
+    "execution records directory must be absolute",
+  );
   const rawRetention = record.retentionDays;
   let retentionDays = EXECUTION_RECORDS_RETENTION_DEFAULT_DAYS;
   if (rawRetention !== undefined) {
@@ -1799,7 +1772,10 @@ export const DEFAULT_MEMORY_IDLE_MS = 30000;
 export const MIN_MEMORY_IDLE_MS = 5000;
 export const MAX_MEMORY_IDLE_MS = 300000;
 
-function requireAbsolutePath(value: unknown): string {
+function requireAbsolutePath(
+  value: unknown,
+  message = "memory executable/entry/config must be absolute paths",
+): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -1807,7 +1783,7 @@ function requireAbsolutePath(value: unknown): string {
     value.includes("\0") ||
     !isAbsolute(value)
   ) {
-    throw configError("memory executable/entry/config must be absolute paths");
+    throw configError(message);
   }
   return value;
 }
@@ -2042,19 +2018,6 @@ export interface TrialAdoptionConfig {
 const TRIAL_CHECK_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const TRIAL_ALIAS_PATTERN = /^[a-z0-9_-]{1,64}$/;
 
-function requireRunnerAbsolutePath(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 4096 ||
-    value.includes("\0") ||
-    !isAbsolute(value)
-  ) {
-    throw configError("trial runner path must be absolute");
-  }
-  return value;
-}
-
 function requireRunnerInt(
   value: unknown,
   min: number,
@@ -2093,7 +2056,10 @@ function parseAdoptionConfig(raw: unknown): TrialAdoptionConfig {
     }
   }
   const record = raw as Record<string, unknown>;
-  const repoPath = requireRunnerAbsolutePath(record.repoPath);
+  const repoPath = requireAbsolutePath(
+    record.repoPath,
+    "trial runner path must be absolute",
+  );
   const remote = record.remote;
   const baseRef = record.baseRef;
   const branchPrefix = record.branchPrefix;
@@ -2159,13 +2125,26 @@ function parseTrialRunnerConfig(raw: unknown): TrialRunnerHostConfig {
     observe?: unknown;
     pollMs?: unknown;
   };
-  const nodeRealpath = requireRunnerAbsolutePath(record.nodeRealpath);
-  const bridgeScriptPath = requireRunnerAbsolutePath(record.bridgeScriptPath);
-  const bridgeConfigTemplatePath = requireRunnerAbsolutePath(
-    record.bridgeConfigTemplatePath,
+  const nodeRealpath = requireAbsolutePath(
+    record.nodeRealpath,
+    "trial runner path must be absolute",
   );
-  const systemctlRealpath = requireRunnerAbsolutePath(record.systemctlRealpath);
-  const xdgRuntimeDir = requireRunnerAbsolutePath(record.xdgRuntimeDir);
+  const bridgeScriptPath = requireAbsolutePath(
+    record.bridgeScriptPath,
+    "trial runner path must be absolute",
+  );
+  const bridgeConfigTemplatePath = requireAbsolutePath(
+    record.bridgeConfigTemplatePath,
+    "trial runner path must be absolute",
+  );
+  const systemctlRealpath = requireAbsolutePath(
+    record.systemctlRealpath,
+    "trial runner path must be absolute",
+  );
+  const xdgRuntimeDir = requireAbsolutePath(
+    record.xdgRuntimeDir,
+    "trial runner path must be absolute",
+  );
   const relayRaw = record.relay;
   if (
     typeof relayRaw !== "object" ||
@@ -2780,14 +2759,10 @@ export function parseAutodispatchConfig(
   ) {
     throw configError("autodispatch workspace alias is invalid");
   }
-  if (
-    typeof rec.sourceRoot !== "string" ||
-    rec.sourceRoot.length < 1 ||
-    rec.sourceRoot.length > 4096 ||
-    !isAbsolute(rec.sourceRoot)
-  ) {
-    throw configError("autodispatch source root must be absolute");
-  }
+  const sourceRoot = requireAbsolutePath(
+    rec.sourceRoot,
+    "autodispatch source root must be absolute",
+  );
   if (!Array.isArray(rec.operations) || rec.operations.length < 1) {
     throw configError("autodispatch operations are invalid");
   }
@@ -2829,14 +2804,21 @@ export function parseAutodispatchConfig(
   const dependencyRoot =
     rec.dependencyRoot === undefined || rec.dependencyRoot === null
       ? null
-      : requireRunnerAbsolutePath(rec.dependencyRoot);
+      : requireAbsolutePath(
+          rec.dependencyRoot,
+          "trial runner path must be absolute",
+        );
   const materialization = parseAutodispatchMaterialization(
     rec.materialization,
     checks,
   );
-  const bridgeScriptPath = requireRunnerAbsolutePath(rec.bridgeScriptPath);
-  const bridgeConfigTemplatePath = requireRunnerAbsolutePath(
+  const bridgeScriptPath = requireAbsolutePath(
+    rec.bridgeScriptPath,
+    "trial runner path must be absolute",
+  );
+  const bridgeConfigTemplatePath = requireAbsolutePath(
     rec.bridgeConfigTemplatePath,
+    "trial runner path must be absolute",
   );
   if (trial !== null) {
     if (trial.workspaceAlias !== rec.workspaceAlias) {
@@ -2870,7 +2852,7 @@ export function parseAutodispatchConfig(
   return Object.freeze({
     enabled: rec.enabled,
     workspaceAlias: rec.workspaceAlias,
-    sourceRoot: rec.sourceRoot,
+    sourceRoot,
     operations: Object.freeze(operations),
     readScopes: Object.freeze(readScopes),
     writeScopes: Object.freeze(writeScopes),
