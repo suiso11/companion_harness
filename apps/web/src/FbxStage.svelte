@@ -113,11 +113,10 @@ onMount(() => {
               }
               material.map = texture;
               material.color.set(0xffffff);
-              // The atlases carry alpha (skin/face islands, lace, veils):
-              // discard fully transparent texels instead of painting their
-              // background, and blend the cut-out edges.
-              material.transparent = true;
-              material.alphaTest = 0.02;
+              // The atlases carry alpha (skin eye holes, face islands,
+              // lace, veils): cut the transparent texels out instead of
+              // painting their background.
+              material.alphaTest = 0.5;
               material.needsUpdate = true;
             }
           });
