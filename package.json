@@ -20,7 +20,8 @@
     "learning": "pnpm --filter @companion/server learning",
     "agora": "pnpm --filter @companion/server agora",
     "records": "pnpm --filter @companion/server records",
-    "compare": "pnpm --filter @companion/server compare"
+    "compare": "pnpm --filter @companion/server compare",
+    "pet": "pnpm --filter @companion/desktop start"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",

@@ -862,6 +862,88 @@ COMPANION_ASR_JSON='{"url":"http://127.0.0.1:8080","prompt":"春琴抄、京こ�
   without `text` is a fixed
   `502 {"error":{"code":"internal_error","message":"speech recognition failed"}}`.
 
+## Vision recognition (`POST /api/vision`, strict opt-in, local only)
+
+Unset `COMPANION_VISION_JSON` (default) keeps the route a fixed 404. When set,
+the value must be a strict JSON object with only `{ url, model, timeoutMs?, prompt? }`
+pointing at a loopback OpenAI-compatible server (`/v1/chat/completions`)
+that accepts `image_url` content parts:
+
+```sh
+COMPANION_VISION_JSON='{"url":"http://127.0.0.1:8081","model":"qwen2.5-vl","timeoutMs":60000,"prompt":"この画像を簡潔に説明してください。"}'
+```
+
+- `url` follows the model-local loopback rules (a base already ending in
+  `/v1` is not doubled); `model` is a non-empty string; `prompt` (1..500
+  chars) is the default question; `timeoutMs` is an integer `1000..120000`,
+  default `60000`. Unknown keys, malformed JSON, non-loopback URLs, and
+  out-of-range values fail startup closed.
+- Request body is strict JSON `{ imageBase64, question? }`: one JPEG
+  (base64, at most 3,800,000 chars; decoded at most 2,800,000 bytes, must
+  start with the JPEG magic `FF D8 FF`) and an optional question (1..2000
+  chars; else the configured `prompt`, else a fixed Japanese default).
+  Anything else is `validation_error` and never reaches the engine.
+- Response is `{ "version": 1, "text": "..." }` (trimmed, 1..4000 chars).
+- The character page puts the returned description in
+  `uiContext.observation` of the user turn (the turn text stays the user's
+  own words, 「カメラを見て」). The kernel renders it only for that turn as
+  `Observation from the user's camera (machine-generated; not the user's
+  words)` (trimmed, control characters removed, ≤2000 chars); memory intake
+  never sees it as user speech.
+- Same JSON-only mutation gate and Origin/Host guards as `/api/speech`; no
+  idempotency key. The image is forwarded once and never stored or logged;
+  no run event or SSE frame is produced and there is no retry. A missing or
+  unreachable engine, timeout, non-200 response, or empty/oversize/non-string
+  content is a fixed
+  `502 {"error":{"code":"internal_error","message":"vision recognition failed"}}`.
+
+## Hands-free voice (browser client + the dictated-write gate)
+
+The chat page has one opt-in `音声` toggle (`#composer-mic`). With it on the
+browser keeps the microphone open, detects the end of an utterance locally
+(RMS threshold, 300 ms pre-roll, 250 ms minimum speech, 900 ms trailing
+silence, 20 s cap), sends one 16 kHz mono WAV to `POST /api/transcribe`, and
+submits the returned text as an ordinary turn with
+`uiContext.inputOrigin = "voice"`. Answers are spoken through
+`POST /api/speech`: the streaming draft is chunked into sentences and queued,
+and the validated answer is spoken only when no draft was. Speaking while the
+app is talking is barge-in: playback stops and the active run is cancelled
+before the new utterance is submitted. The audio loop is a lazy chunk; voice
+off removes nothing else and the text path is unchanged.
+
+**Why the flag matters.** Because an ASR error becomes a durable write, a
+dictated turn is not allowed to write a number/name/content value before the
+user has confirmed it. The kernel enforces this in the ToolBroker (`confirm`
+step, between `validate` and `dedup`) from a static slot-role table, never
+from the transcript:
+
+| tool | risky slots |
+|---|---|
+| `calendar.reschedule` | `start`, `end` (number), `reason` (entity) |
+| `calendar.create` | `title` (entity), `start`, `end` (number) |
+| `memory.correct` | `correctionBody`, `handle` (entity) |
+| `memory.retire` / `memory.reactivate` | `handle` (entity) |
+| `purpose.propose` / `task.propose` | `scope`, `sourceQuote`, `interpretation` (entity) |
+| `trial.propose` | `objective`, `acceptance`, `literalPatchPaths` (entity), `expiryMinutes` (number) |
+
+- A dropped negation has no field of its own in any tool schema; it lands in
+  one of the entity/content slots above, so gating the slot covers it.
+- Read-only tools are never listed and never gated. Typed turns skip the gate
+  entirely (the flag can only ADD a confirmation, never remove one).
+- The first attempt is refused with the fixed code `confirmation_required`
+  (audited as `denied`); the model is told to state the exact values and ask.
+  The byte-identical call (post-Zod args hash) is allowed once, only in the
+  immediately following user turn of the same session, only after the
+  blocking run completed, and only within 15 minutes. Same-run retries,
+  arguments that changed, and a confirmation that is not the next turn are
+  refused again. Consumption is recorded in `tool_confirmations`
+  (migration 0043); no argument values are stored there.
+- Limits: the voice flag is client-asserted, so a client that omits it gets
+  the text behavior; the confirmation is bound to "the next turn", not to the
+  user's exact words (a model that re-issues the identical arguments without
+  asking is still within the rule); the table is a static, reviewed list, so a
+  new mutating tool is ungated until it is added.
+
 ## Fixed-task comparison CLI (experimental)
 
 `pnpm compare -- /abs/input.json` is an operator experiment, not a
@@ -6266,3 +6348,7 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   instead of an arbitrary `last_active_at` session.
 - Presence is process-local: after a restart the next heartbeat or the
   latest-session fallback covers the gap. No cross-user/remote sharing.
+
+## デスクトップペット (Electron シェル)
+
+クライアント側マシン（Electron を直接動かせる PC）で `pnpm pet` を実行し、`COMPANION_PET_URL` でサーバのオリジンを渡す（既定 `http://127.0.0.1:3000`、Tailscale 経由なら `https://<host>.ts.net` など）。透明・枠なし・常に手前のウィンドウに `/pet` を表示する（アバターのみ・新しい回答の自動読み上げ・ドラッグで移動）。リモート認証が有効なときはトレイの「ログイン（チャットを開く）」でログインし（cookie は Electron 側プロファイルに残る）、「表示」でペットに戻る。トレイから表示/隠す/マウス透過/常に手前/終了を操作する。位置とサイズは userData の `pet-window.json` に保存される。透過にはコンポジタが必要（X11 は合成マネージャ、Wayland は既定で合成）。`COMPANION_PET_SMOKE=1` でスクリーンショット1枚を撮って終了する（`pnpm --filter @companion/desktop smoke`、出力先 `COMPANION_PET_SMOKE_OUT`）。

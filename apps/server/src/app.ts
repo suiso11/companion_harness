@@ -66,6 +66,7 @@ import {
   PostRetryRequestSchema,
   PostSpeechRequestSchema,
   PostTranscribeRequestSchema,
+  PostVisionRequestSchema,
   ProposalApprove202ResponseSchema,
   ProposalApproveRequestSchema,
   ProposalExecutionViewSchema,
@@ -193,6 +194,11 @@ import {
   STRICT_CSP,
 } from "./ui/page.js";
 import { effectiveCursor } from "./ui/reducer.js";
+import {
+  askVision,
+  decodeJpegBase64,
+  MAX_VISION_BODY_BYTES,
+} from "./vision.js";
 
 /**
  * PR-5: non-chat feature pages. Every path returns the SAME Svelte shell as
@@ -212,6 +218,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/handoff",
   "/monitor",
   "/character",
+  "/pet",
 ]);
 
 /**
@@ -1758,6 +1765,34 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     c.header("cache-control", "no-store");
     return c.json({ text: result.text });
+  });
+
+  // Image understanding (POST /api/vision): one JPEG + optional question in,
+  // one short description out. Config-gated (COMPANION_VISION_JSON): unset
+  // keeps a fixed 404. Nothing is persisted or logged; no idempotency key.
+  app.post("/api/vision", async (c) => {
+    const vision = config.vision;
+    if (vision === null) {
+      return apiError(c, 404, "not_found", "resource not found");
+    }
+    const raw = await readJsonBody(c, MAX_VISION_BODY_BYTES);
+    if (!raw.ok) {
+      return validationError(c);
+    }
+    const parsedBody = PostVisionRequestSchema.safeParse(raw.value);
+    if (!parsedBody.success) {
+      return validationError(c);
+    }
+    const jpeg = decodeJpegBase64(parsedBody.data.imageBase64);
+    if (jpeg === null) {
+      return validationError(c);
+    }
+    const result = await askVision(vision, jpeg, parsedBody.data.question);
+    if (!result.ok) {
+      return apiError(c, 502, "internal_error", "vision recognition failed");
+    }
+    c.header("cache-control", "no-store");
+    return c.json({ version: 1, text: result.text });
   });
 
   app.onError((error, c) => mapDomainError(c, error));

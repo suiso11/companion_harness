@@ -10,6 +10,17 @@
 import { onMount } from "svelte";
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+import {
+  type AvatarRig,
+  Blinker,
+  capturePose,
+  chainHead,
+  damp,
+  idleAngles,
+  lookAngles,
+  poseAngles,
+  relaxArms,
+} from "./lib/avatar_motion.js";
 
 let {
   url,
@@ -26,6 +37,28 @@ let {
 let host: HTMLDivElement;
 let failed = $state(false);
 let loading = $state(true);
+
+/** Semantic bones from the VRChat-style FBX rig (chain heads only). */
+function buildRig(root: THREE.Object3D): AvatarRig | null {
+  const hips = chainHead(root, "Hips");
+  const chest = chainHead(root, "Chest");
+  const head = chainHead(root, "Head");
+  const upperArmL = chainHead(root, "Upperarm_L");
+  const upperArmR = chainHead(root, "Upperarm_R");
+  const lowerArmL = chainHead(root, "Lowerarm_L");
+  const lowerArmR = chainHead(root, "Lowerarm_R");
+  if (
+    hips === null ||
+    head === null ||
+    upperArmL === null ||
+    upperArmR === null ||
+    lowerArmL === null ||
+    lowerArmR === null
+  ) {
+    return null;
+  }
+  return { hips, chest, head, upperArmL, upperArmR, lowerArmL, lowerArmR };
+}
 
 onMount(() => {
   let disposed = false;
@@ -90,6 +123,8 @@ onMount(() => {
         antialias: true,
         alpha: true,
       });
+      // Transparent clear: the pet window shows the desktop around the model.
+      renderer.setClearColor(0x000000, 0);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
       renderer.setSize(host.clientWidth, Math.max(host.clientHeight, 240));
       host.appendChild(renderer.domElement);
@@ -111,20 +146,19 @@ onMount(() => {
         0.1,
         20,
       );
-      camera.position.set(0, centerY + height * 0.08, height * 1.55);
-      camera.lookAt(0, centerY, 0);
+      camera.position.set(0, centerY + height * 0.03, height * 2.05);
+      camera.lookAt(0, centerY + height * 0.02, 0);
 
-      // Relax the T-pose: lower both upper arms so the model stands naturally.
-      group.traverse((child) => {
-        if (!(child instanceof THREE.Bone)) {
-          return;
-        }
-        if (child.name === "Upperarm_L") {
-          child.rotation.z += 1.05;
-        } else if (child.name === "Upperarm_R") {
-          child.rotation.z -= 1.05;
-        }
-      });
+      // Relax the T-pose arms, then capture the bones the idle/gaze loop
+      // drives. Posing the chain head moves every FBXLoader bone clone.
+      const rig = buildRig(group);
+      if (rig !== null) {
+        relaxArms(rig);
+      }
+      const hipsPose = rig === null ? null : capturePose(rig.hips);
+      const chestPose =
+        rig === null || rig.chest === null ? null : capturePose(rig.chest);
+      const headPose = rig === null ? null : capturePose(rig.head);
 
       // Viseme + blink channels (VRChat naming). Missing channels are skipped.
       const visemes: Array<{ mesh: THREE.Mesh; index: number }> = [];
@@ -137,44 +171,81 @@ onMount(() => {
           return;
         }
         const dictionary = object.morphTargetDictionary;
-        for (const name of ["vrc.v_aa", "vrc.v_oh"]) {
-          const index = dictionary[name];
-          if (index !== undefined) {
-            visemes.push({ mesh: object, index });
-          }
+        const aa = dictionary["vrc.v_aa"];
+        if (aa !== undefined) {
+          visemes.push({ mesh: object, index: aa });
         }
-        const blink = dictionary["b_blink"];
+        // One lid channel only: b_blink already drives both eyes on most
+        // rigs, and adding the L/R pair would double the weight.
+        const blink = dictionary.b_blink;
         if (blink !== undefined) {
           blinks.push({ mesh: object, index: blink });
+        } else {
+          for (const name of ["b_blink_L", "b_blink_R"] as const) {
+            const lid = dictionary[name];
+            if (lid !== undefined) {
+              blinks.push({ mesh: object, index: lid });
+            }
+          }
         }
       });
 
-      let blinkAt = 0;
+      // Gaze follows the pointer over the canvas; leaving recenters the head.
+      const look = { yaw: 0, pitch: 0, targetYaw: 0, targetPitch: 0 };
+      const onPointer = (event: PointerEvent): void => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const angle = lookAngles(
+          ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          -(((event.clientY - rect.top) / rect.height) * 2 - 1),
+        );
+        look.targetYaw = angle.yaw;
+        look.targetPitch = angle.pitch;
+      };
+      renderer.domElement.addEventListener("pointermove", onPointer);
+      renderer.domElement.addEventListener("pointerleave", () => {
+        look.targetYaw = 0;
+        look.targetPitch = 0;
+      });
+
+      const blinker = new Blinker(() => performance.now());
+      const clock = new THREE.Clock();
+      let opened = 0;
       let raf = 0;
       const frame = (): void => {
         if (disposed) {
           return;
         }
-        const open = Math.min(Math.max(level, 0), 1);
+        const dt = Math.min(clock.getDelta(), 0.1);
+        const t = clock.elapsedTime;
+        const idle = idleAngles(t);
+        look.yaw = damp(look.yaw, look.targetYaw, 6, dt);
+        look.pitch = damp(look.pitch, look.targetPitch, 6, dt);
+        opened = damp(opened, Math.min(Math.max(level, 0), 1), 20, dt);
+        if (hipsPose !== null) {
+          poseAngles(hipsPose, 0, 0, idle.hipsZ);
+        }
+        if (chestPose !== null) {
+          poseAngles(chestPose, idle.chestX, 0, -idle.hipsZ * 0.5);
+        }
+        if (headPose !== null) {
+          poseAngles(
+            headPose,
+            idle.headX + look.pitch,
+            idle.headY + look.yaw,
+            0,
+          );
+        }
         for (const { mesh, index } of visemes) {
           const influences = mesh.morphTargetInfluences;
           if (influences !== undefined) {
-            influences[index] = open;
+            influences[index] = opened;
           }
         }
-        const now = performance.now();
-        if (blinkAt === 0) {
-          blinkAt = now + 2400;
-        } else if (now > blinkAt) {
-          const closed = now > blinkAt + 120 ? 0 : 1;
-          for (const { mesh, index } of blinks) {
-            const influences = mesh.morphTargetInfluences;
-            if (influences !== undefined) {
-              influences[index] = closed;
-            }
-          }
-          if (closed === 0) {
-            blinkAt = now + 2400 + Math.random() * 2600;
+        const closed = blinker.weight();
+        for (const { mesh, index } of blinks) {
+          const influences = mesh.morphTargetInfluences;
+          if (influences !== undefined) {
+            influences[index] = closed;
           }
         }
         renderer.render(scene, camera);
@@ -198,7 +269,8 @@ onMount(() => {
         renderer.dispose();
         host.removeChild(renderer.domElement);
       };
-    } catch {
+    } catch (error) {
+      console.error("fbx stage failed", error);
       loading = false;
       failed = true;
     }

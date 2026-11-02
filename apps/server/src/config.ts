@@ -643,6 +643,95 @@ export function parseAsrConfig(raw: string | undefined): AsrConfig | null {
   return Object.freeze({ url, prompt, timeoutMs });
 }
 
+/**
+ * Strict opt-in local vision config (COMPANION_VISION_JSON): an
+ * OpenAI-compatible chat-completions endpoint that accepts image_url parts.
+ * Unset means `null`: `POST /api/vision` stays a fixed 404. Only
+ * `{ url, model, timeoutMs?, prompt? }`; url is loopback http only.
+ */
+export interface VisionConfig {
+  readonly url: string;
+  readonly model: string;
+  readonly prompt: string | null;
+  readonly timeoutMs: number;
+}
+
+export const DEFAULT_VISION_TIMEOUT_MS = 60_000;
+export const MAX_VISION_PROMPT_LENGTH = 500;
+export const MAX_VISION_MODEL_LENGTH = 200;
+
+export function parseVisionConfig(
+  raw: string | undefined,
+): VisionConfig | null {
+  if (raw === undefined) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw configError("vision config must be a JSON object");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw configError("vision config must be a JSON object");
+  }
+  for (const key of Object.keys(parsed)) {
+    if (
+      key !== "url" &&
+      key !== "model" &&
+      key !== "prompt" &&
+      key !== "timeoutMs"
+    ) {
+      throw configError("vision config has an unknown key");
+    }
+  }
+  const record = parsed as {
+    url?: unknown;
+    model?: unknown;
+    prompt?: unknown;
+    timeoutMs?: unknown;
+  };
+  let url: string;
+  try {
+    url = normalizeLoopbackBaseUrl(record.url);
+  } catch {
+    throw configError("vision url is invalid");
+  }
+  if (
+    typeof record.model !== "string" ||
+    record.model.length === 0 ||
+    record.model.length > MAX_VISION_MODEL_LENGTH ||
+    record.model.includes("\0")
+  ) {
+    throw configError("vision model is invalid");
+  }
+  let prompt: string | null = null;
+  if (record.prompt !== undefined) {
+    if (
+      typeof record.prompt !== "string" ||
+      record.prompt.length === 0 ||
+      record.prompt.length > MAX_VISION_PROMPT_LENGTH ||
+      record.prompt.includes("\0")
+    ) {
+      throw configError("vision prompt is invalid");
+    }
+    prompt = record.prompt;
+  }
+  const timeoutMs =
+    record.timeoutMs === undefined
+      ? DEFAULT_VISION_TIMEOUT_MS
+      : record.timeoutMs;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1_000 ||
+    timeoutMs > 120_000
+  ) {
+    throw configError("vision timeoutMs is out of bounds");
+  }
+  return Object.freeze({ url, model: record.model, prompt, timeoutMs });
+}
+
 export interface ServerConfig {
   readonly dbPath: string;
   readonly host: ServerHost;
@@ -681,6 +770,8 @@ export interface ServerConfig {
   readonly tts: TtsConfig | null;
   /** Strict opt-in local ASR; null (unset) keeps /api/transcribe a 404. */
   readonly asr: AsrConfig | null;
+  /** Strict opt-in local vision; null (unset) keeps /api/vision a 404. */
+  readonly vision: VisionConfig | null;
   /** Absolute directory holding the user's avatar (default <appData>/avatar). */
   readonly avatarDir: string;
   /** Strict opt-in remote (tailnet) Origin/Host allowlist (default off). */
@@ -3085,6 +3176,7 @@ export function loadServerConfig(
   const voice = parseVoiceConfig(env.COMPANION_VOICE_JSON);
   const tts = parseTtsConfig(env.COMPANION_TTS_JSON);
   const asr = parseAsrConfig(env.COMPANION_ASR_JSON);
+  const vision = parseVisionConfig(env.COMPANION_VISION_JSON);
   const remote = parseRemoteConfig(env.COMPANION_REMOTE_JSON);
   if (remote.enabled && remote.allowedOrigins.length === 0) {
     throw configError(
@@ -3159,6 +3251,7 @@ export function loadServerConfig(
     voice,
     tts,
     asr,
+    vision,
     avatarDir,
     remote,
     trial,
