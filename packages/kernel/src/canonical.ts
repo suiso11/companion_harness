@@ -34,7 +34,9 @@ function canonicalize(value: unknown): unknown {
     // prototype and dropping the key). defineProperty preserves an own
     // enumerable `__proto__` key without side effects.
     const sorted: JsonObject = Object.create(null);
-    for (const key of Object.keys(value).sort()) {
+    for (const key of Object.keys(value).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    )) {
       const entry = (value as JsonObject)[key];
       if (
         entry === undefined ||

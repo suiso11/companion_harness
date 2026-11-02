@@ -44,7 +44,7 @@ function tokens(text: string): string[] {
     ...text.matchAll(/\[[rm]\d+\]/g),
     ...text.matchAll(/`[^`]+`/g),
   ].map((match) => match[0]);
-  return found.sort();
+  return found.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**

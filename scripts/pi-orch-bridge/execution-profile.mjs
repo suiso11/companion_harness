@@ -138,7 +138,9 @@ function copyClosure(sourceRoot, destinationRoot, budget) {
     if (st.isDirectory()) {
       mkdirSync(destinationAbsolute, { recursive: true, mode: 0o700 });
       entries.push({ path: rel, type: "directory" });
-      const names = [...readdirSync(sourceAbsolute)].sort();
+      const names = [...readdirSync(sourceAbsolute)].sort((a, b) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
       for (const name of names) {
         if (rel === "" && name === ".git")
           fail("dependency closure must not contain .git");

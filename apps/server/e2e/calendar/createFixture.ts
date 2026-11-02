@@ -144,7 +144,9 @@ export async function handleCreateFixtureRequest(
       return true;
     }
     const record = body as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
+    const keys = Object.keys(record).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
     const allowed = ["end", "id", "start", "summary"];
     if (
       keys.length !== allowed.length ||

@@ -137,7 +137,7 @@ const listFiles = (root: string, rel = ""): string[] => {
     if (entry.isDirectory()) out.push(...listFiles(root, r));
     else if (entry.isFile()) out.push(r);
   }
-  return out.sort();
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 };
 
 const runtime: Record<string, string> = {};
@@ -461,7 +461,9 @@ try {
     // Base bytes for candidate review are read from this exact sealed tree,
     // not from git: the computed sourceRevision is a synthetic manifest hash.
     sourceRepoPath: res.materialization.state.snapshotRoot,
-    mandatoryChecks: Object.keys(eff.checks as object).sort(),
+    mandatoryChecks: Object.keys(eff.checks as object).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    ),
     allowedPaths: [...config.profile.allowedPaths],
     modelRoute: config.profile.model.route,
     timeoutMs: Math.min(
@@ -547,7 +549,9 @@ try {
         autonomyEnv: input.environmentFile,
         fingerprint: fp,
         revision: rev,
-        checks: Object.keys(eff.checks as object).sort(),
+        checks: Object.keys(eff.checks as object).sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        ),
         snapshotFiles: snapshotFiles.length,
         pruned: prune,
       },

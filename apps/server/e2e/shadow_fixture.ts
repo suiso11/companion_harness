@@ -424,7 +424,9 @@ const control = createServer(
       json(200, {
         deliberationCalls: stats.deliberationCalls,
         ordinaryCalls: stats.ordinaryCalls,
-        advertisedTools: [...stats.advertisedTools].sort(),
+        advertisedTools: [...stats.advertisedTools].sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        ),
         ordinaryToolCalls: [...stats.ordinaryToolCalls],
       });
       return;
