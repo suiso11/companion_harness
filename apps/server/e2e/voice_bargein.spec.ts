@@ -119,6 +119,8 @@ test("speech becomes a turn, then interrupts the reply", async ({ page }) => {
   expect(Date.now() - speakingSince).toBeLessThan(8_000);
   // The interruption came from a second captured utterance, not from a
   // playback failure: the next loop's speech was transcribed again.
-  await expect.poll(() => transcriptions, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(() => transcriptions, { timeout: 10_000 })
+    .toBeGreaterThanOrEqual(2);
   await page.locator("[data-voice-mode]").click();
 });

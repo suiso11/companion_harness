@@ -46,10 +46,10 @@ function pngAlpha(png: Buffer): {
     const prev = y > 0 ? out.subarray((y - 1) * stride, y * stride) : null;
     const here = out.subarray(y * stride, (y + 1) * stride);
     for (let x = 0; x < stride; x += 1) {
-      const left = x >= bpp ? here[x - bpp] : 0;
-      const up = prev === null ? 0 : prev[x];
-      const upLeft = prev === null || x < bpp ? 0 : prev[x - bpp];
-      let value = row[x] as number;
+      const left = x >= bpp ? (here[x - bpp] ?? 0) : 0;
+      const up = prev === null ? 0 : (prev[x] ?? 0);
+      const upLeft = prev === null || x < bpp ? 0 : (prev[x - bpp] ?? 0);
+      let value = row[x] ?? 0;
       if (filter === 1) value += left;
       else if (filter === 2) value += up;
       else if (filter === 3) value += (left + up) >> 1;
