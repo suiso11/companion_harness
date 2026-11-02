@@ -105,6 +105,10 @@ onMount(() => {
                     ? `/avatar/${file}`
                     : `/avatar/${file}?v=${version}`,
                 );
+                // Albedo atlases are sRGB; without this three reads them as
+                // linear and the whole model renders washed out.
+                texture.colorSpace = THREE.SRGBColorSpace;
+                texture.flipY = false;
                 textures.set(file, texture);
               }
               material.map = texture;
