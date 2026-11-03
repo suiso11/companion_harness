@@ -2938,7 +2938,10 @@ export function createMemoryService(
           if (!passActive()) {
             return;
           }
-          const topics = result.status === "ok" ? result.topics.sort() : [];
+          const topics =
+            result.status === "ok"
+              ? result.topics.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+              : [];
           if (topics.length === 0) {
             // No valid categories this pass: leave the item pending.
             counts.skipped += 1;
@@ -3907,7 +3910,9 @@ export function createMemoryService(
             op: "record.feedback",
             params: {
               recallId,
-              recordIds: [...recordIds].sort(),
+              recordIds: [...recordIds].sort((a, b) =>
+                a < b ? -1 : a > b ? 1 : 0,
+              ),
               scope,
               runId: run.id,
             },
@@ -5030,7 +5035,7 @@ export function createMemoryService(
       // smaller endpoint, local graph may emit either direction).
       const key =
         edge.kind === "similar"
-          ? `similar\u0000${[edge.from, edge.to].sort().join("\u0000")}`
+          ? `similar\u0000${[edge.from, edge.to].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join("\u0000")}`
           : `${edge.from}\u0000${edge.to}\u0000${edge.kind}`;
       if (seen.has(key)) {
         continue;

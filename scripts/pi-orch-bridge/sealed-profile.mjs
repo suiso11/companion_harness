@@ -1044,7 +1044,7 @@ export function computeDependencyClosureDigest(rootInput, maxBytes) {
     }
     if (st.isDirectory()) {
       const names = [...nodeReaddirSync(absolute)];
-      names.sort();
+      names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       for (const name of names) {
         if (rel === "" && name === ".git")
           fail("dependency closure must not contain .git");

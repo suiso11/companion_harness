@@ -479,7 +479,7 @@ function wireCanonicalize(value: unknown): string {
     return `[${value.map((e) => wireCanonicalize(e)).join(",")}]`;
   if (typeof value === "object") {
     const rec = value as Record<string, unknown>;
-    const keys = Object.keys(rec).sort();
+    const keys = Object.keys(rec).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     return `{${keys.map((k) => `${JSON.stringify(k)}:${wireCanonicalize(rec[k])}`).join(",")}}`;
   }
   throw new RepositoryValidationError(
@@ -638,7 +638,9 @@ function profileBindingKey(p: TrialProfileSnapshot): string {
   return canonicalJsonString({
     available: p.available,
     enabled: p.enabled,
-    mandatoryChecks: [...p.mandatoryChecks].sort(),
+    mandatoryChecks: [...p.mandatoryChecks].sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    ),
     configFingerprint: p.configFingerprint,
     sourceRevision: p.sourceRevision,
     currentModel: p.currentModel,
@@ -3345,11 +3347,13 @@ export function recordWorkerResult(
       if (r.exitCode !== 0) fail("native exit non-zero");
       if (r.outputMatched !== true || r.noTimeout !== true)
         fail("output/timeout mismatch");
-      const frozenChecks = [...req.requiredChecks].sort();
+      const frozenChecks = [...req.requiredChecks].sort((a, b) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
       const got = r.checks
         .filter((c) => c.ok)
         .map((c) => c.id)
-        .sort();
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       if (
         r.checks.length !== frozenChecks.length ||
         !frozenChecks.every((id, i) => got[i] === id) ||

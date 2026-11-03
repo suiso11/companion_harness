@@ -711,7 +711,7 @@ function collapseSnapshotRoots(roots: readonly string[]): string[] {
             (other === "." || candidate.startsWith(`${other}/`)),
         ),
     )
-    .sort();
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**
@@ -962,9 +962,11 @@ export async function verifyAutodispatchMaterialization(
   }
   if (
     Object.keys(effective.checks as Record<string, unknown>)
-      .sort()
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
       .join("\n") !==
-    [...materialization.profile.mandatoryChecks].sort().join("\n")
+    [...materialization.profile.mandatoryChecks]
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      .join("\n")
   ) {
     return { ok: false, reason: "materialized check set drift" };
   }
@@ -1548,7 +1550,7 @@ export function createAutodispatchMaterializer(
       const checks: Record<string, string> = {};
       for (const id of Object.keys(
         effective.checks as Record<string, unknown>,
-      ).sort()) {
+      ).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
         const entry = (
           effective.checks as Record<string, { contentDigest?: unknown }>
         )[id];

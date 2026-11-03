@@ -641,7 +641,9 @@ function draftFromCompletedShadowJob(
   if (draftDeadline !== undefined && isStrictAutonomyDeadline(draftDeadline)) {
     cited.push(draftDeadline);
   }
-  const evidence = [...decision.evidenceIds].sort().join(",");
+  const evidence = [...decision.evidenceIds]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .join(",");
   // Fingerprint = semantic state ONLY: scope + kind + decision + CODE
   // policy + frozen scope epoch + frozen evidence labels. The paraphrased
   // reason, the full model text, and the source job id are EXCLUDED, so a

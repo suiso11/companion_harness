@@ -151,9 +151,11 @@ function readApprovedOperatorConfig(
   const effectiveChecks = Object.keys(
     effective.checks as Record<string, unknown>,
   )
-    .sort()
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
     .join("\n");
-  const mandatoryChecks = [...profile.mandatoryChecks].sort().join("\n");
+  const mandatoryChecks = [...profile.mandatoryChecks]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .join("\n");
   if (effectiveChecks !== mandatoryChecks) {
     throw new Error("approved mandatory check set drift");
   }

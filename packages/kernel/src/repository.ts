@@ -6791,7 +6791,7 @@ export function createKernelRepository(
       tools:
         row.tools === null || row.tools.length === 0
           ? []
-          : row.tools.split(",").sort(),
+          : row.tools.split(",").sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
     }));
   }
 

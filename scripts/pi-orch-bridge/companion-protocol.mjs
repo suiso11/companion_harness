@@ -208,7 +208,9 @@ export function canonicalize(value) {
     return `[${value.map((entry) => canonicalize(entry)).join(",")}]`;
   }
   if (isRecord(value)) {
-    const keys = Object.keys(value).sort();
+    const keys = Object.keys(value).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
     return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
   }
   fail("canonical value carries an unsupported type");

@@ -340,7 +340,9 @@ function canonicalizeForSize(value: unknown, seen?: WeakSet<object>): unknown {
     // `getOwnPropertyDescriptor` so accessor getters are rejected without
     // ever being invoked.
     const sorted: Record<string, unknown> = Object.create(null);
-    for (const key of Object.keys(node).sort()) {
+    for (const key of Object.keys(node).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    )) {
       const descriptor = Object.getOwnPropertyDescriptor(node, key) as
         | { value?: unknown; get?: unknown; set?: unknown }
         | undefined;

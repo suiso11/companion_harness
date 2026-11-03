@@ -491,8 +491,13 @@ export function assertHostAutodispatchChecks(raw, selected) {
   if (!Array.isArray(hostChecks)) {
     fail("host COMPANION_AUTODISPATCH_JSON checks must be an array");
   }
-  const want = [...selected].sort();
-  const got = [...hostChecks].sort();
+  // Elements are unvalidated JSON: String() keeps the default sort's coercion.
+  const want = [...selected].sort((a, b) =>
+    String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0,
+  );
+  const got = [...hostChecks].sort((a, b) =>
+    String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0,
+  );
   if (
     want.length !== got.length ||
     !want.every((check, i) => check === got[i])

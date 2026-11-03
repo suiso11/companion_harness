@@ -277,13 +277,17 @@ async function main() {
     );
     const s = (t as { inputSchema?: Record<string, unknown> }).inputSchema;
     liveRequired[t.name] = Array.isArray(s?.required)
-      ? [...(s.required as string[])].sort()
+      ? [...(s.required as string[])].sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        )
       : null;
   }
   for (const t of registryTools) {
     const s = t.inputSchema as Record<string, unknown>;
     regRequired[t.name] = Array.isArray(s?.required)
-      ? [...(s.required as string[])].sort()
+      ? [...(s.required as string[])].sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        )
       : null;
   }
   const hashMatch = regNames.every((n) => liveHashes[n] === regHashes[n]);

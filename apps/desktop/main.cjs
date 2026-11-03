@@ -22,8 +22,6 @@ const base = (process.env.COMPANION_PET_URL || "http://127.0.0.1:3000").replace(
   "",
 );
 const smoke = process.env.COMPANION_PET_SMOKE === "1";
-const smokeOut =
-  process.env.COMPANION_PET_SMOKE_OUT || "/tmp/companion-pet-smoke.png";
 // 16x16 rose disc: a tray icon must exist, and no binary assets live here.
 const ICON =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAK0lEQVR42mNgGJTgTsW0/9gw2RqJNogiA4jVjNOQUQOoYMDApwOqJOUBAQANMWjsr1JiKQAAAABJRU5ErkJggg==";
@@ -124,6 +122,10 @@ function createWindow() {
         }
         const image = await win.webContents.capturePage();
         const png = image.toPNG();
+        // Default lives in the per-user profile, not a predictable shared /tmp name.
+        const smokeOut =
+          process.env.COMPANION_PET_SMOKE_OUT ||
+          path.join(app.getPath("userData"), "pet-smoke.png");
         fs.writeFileSync(smokeOut, png);
         const size = image.getSize();
         console.log(
@@ -131,6 +133,7 @@ function createWindow() {
             alwaysOnTop: win.isAlwaysOnTop(),
             bounds: win.getBounds(),
             bytes: png.length,
+            out: smokeOut,
             pngWidth: size.width,
             pngHeight: size.height,
           }),

@@ -128,7 +128,7 @@ export function findOversightTouches(
     );
     if (isTest || isOversight) hits.add(path);
   }
-  return [...hits].sort();
+  return [...hits].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 export function ghEnvironment(): NodeJS.ProcessEnv {
@@ -568,8 +568,10 @@ export async function executeTrialAdoption(
       const stagedPaths = staged.stdout
         .split("\0")
         .filter((path) => path.length > 0)
-        .sort();
-      const expectedPaths = [...verifiedPaths].sort();
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const expectedPaths = [...verifiedPaths].sort((a, b) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
       if (
         staged.code !== 0 ||
         stagedPaths.length !== expectedPaths.length ||

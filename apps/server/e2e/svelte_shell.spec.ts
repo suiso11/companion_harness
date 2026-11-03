@@ -57,7 +57,7 @@ test("new Svelte shell at / is dark-only", async ({ page }) => {
   for (const channel of channels.slice(0, 3)) {
     expect(channel).toBeLessThan(64);
   }
-  expect(await page.locator("#composer-send")).toBeVisible();
+  await expect(page.locator("#composer-send")).toBeVisible();
 });
 
 test("375px: no overflow and send target >=44px on the new UI", async ({
