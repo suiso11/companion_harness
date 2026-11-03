@@ -1069,6 +1069,18 @@ describe("autodispatch caps defaults fit the trial runner", () => {
     expect(autodispatch?.caps.maxOutputTokens).toBeLessThanOrEqual(256);
   });
 
+  it("rejects a relative or NUL-bearing autodispatch source root", () => {
+    const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
+    for (const sourceRoot of ["relative/source", "/synthetic/\0source"]) {
+      expect(() =>
+        parseAutodispatchConfig(
+          JSON.stringify({ ...autodispatchConfig(), sourceRoot }),
+          trial,
+        ),
+      ).toThrow("autodispatch source root must be absolute");
+    }
+  });
+
   it("parses and validates the executor guest env allowlist", () => {
     const trial = parseTrialConfig(JSON.stringify(trialConfig(60_000)));
     expect(trial).not.toBeNull();

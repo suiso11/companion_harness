@@ -2007,7 +2007,7 @@ export const AGENT_AGORA_SEND_PARAMETERS = Object.freeze({
 
 /**
  * Explicit closed JSON parameter schema for the comparison CLI's
- * `experiment.docs.read`, matching its strict `{ key }` input and doc-key
+ * `experiment.read`, matching its strict `{ key }` input and doc-key
  * grammar. The tool is advertised only when the broker registry actually
  * contains it; production registries remain the availability gate.
  */
@@ -2040,10 +2040,8 @@ const AGENT_BROKER_TOOL_PARAMETERS: Readonly<
   "agora.propose_reply": AGENT_AGORA_PROPOSE_REPLY_PARAMETERS,
   "agora.status": AGENT_AGORA_STATUS_PARAMETERS,
   "agora.send": AGENT_AGORA_SEND_PARAMETERS,
-  "experiment.docs.read": AGENT_EXPERIMENT_DOCS_READ_PARAMETERS,
   // Broker ToolDescriptor names are strict `namespace.verb`, so the compare
-  // CLI registers the same contract under this valid name. Both entries are
-  // closed; only the registry decides which (if either) is advertised.
+  // CLI registers its doc-key contract under the one-dot `experiment.read`.
   "experiment.read": AGENT_EXPERIMENT_DOCS_READ_PARAMETERS,
   "reference.open": AGENT_REFERENCE_OPEN_PARAMETERS,
   "reference.refresh": AGENT_REFERENCE_REFRESH_PARAMETERS,
