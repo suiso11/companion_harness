@@ -762,11 +762,6 @@ export interface ServerConfig {
   readonly speech: SpeechConfig | null;
   /** Opt-in self-improvement proposals; null (unset) means disabled. */
   readonly selfLoop: SelfLoopConfig | null;
-  /** Hosted persona-chat API keys (host env only); null = provider unavailable. */
-  readonly personaProviders: Readonly<{
-    openai: string | null;
-    deepseek: string | null;
-  }>;
   /** Opt-in AGORA participation; null (unset) means disabled. */
   readonly agora: AgoraConfig | null;
   /** Strict opt-in voice layer; null (unset) means disabled. */
@@ -1209,21 +1204,6 @@ export function parseAgoraApiKey(raw: string | undefined): string | null {
     if (code < 0x21 || code > 0x7e) {
       throw configError("agora credential is invalid");
     }
-  }
-  return raw;
-}
-
-/** Persona-chat provider key: same rule as the AGORA key; fixed error text. */
-export function parsePersonaProviderKey(
-  raw: string | undefined,
-): string | null {
-  if (raw === undefined) return null;
-  if (
-    raw.length === 0 ||
-    raw.length > MAX_MODEL_API_KEY_LENGTH ||
-    !/^[\x21-\x7e]+$/.test(raw)
-  ) {
-    throw configError("persona provider credential is invalid");
   }
   return raw;
 }
@@ -3250,10 +3230,6 @@ export function loadServerConfig(
     speech,
     selfLoop,
     agora,
-    personaProviders: Object.freeze({
-      openai: parsePersonaProviderKey(env.COMPANION_OPENAI_API_KEY),
-      deepseek: parsePersonaProviderKey(env.COMPANION_DEEPSEEK_API_KEY),
-    }),
     voice,
     tts,
     asr,

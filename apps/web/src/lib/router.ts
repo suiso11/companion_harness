@@ -11,6 +11,7 @@ export interface FeatureRoute {
   readonly label: string;
   /** Legacy section id mounted by the feature page. */
   readonly sectionId: string;
+  readonly title: string;
 }
 
 /** Nav order mirrors the legacy shell order (memory → autonomy → …). */
@@ -19,61 +20,61 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     path: "/memory",
     label: "記憶",
     sectionId: "memory",
+    title: "記憶の管理",
   },
   {
     path: "/tasks",
     label: "タスク・目的",
     sectionId: "autonomy",
+    title: "タスク・目的",
   },
   {
     path: "/notifications",
     label: "通知",
     sectionId: "notifications",
+    title: "お知らせ",
   },
   {
     path: "/trials",
     label: "試行の提案",
     sectionId: "trials",
+    title: "試行の提案",
   },
   {
     path: "/learning",
     label: "学び",
     sectionId: "learning",
+    title: "学びの記録",
   },
   {
     path: "/shadow",
     label: "試行",
     sectionId: "shadow",
+    title: "試行の記録",
   },
   {
     path: "/proposals",
     label: "候補",
     sectionId: "proposals",
+    title: "会話の候補",
   },
   {
     path: "/handoff",
     label: "引継ぎ",
     sectionId: "handoff",
+    title: "引継ぎ",
   },
   {
     path: "/monitor",
     label: "モニター",
     sectionId: "monitor",
+    title: "モニター",
   },
   {
     path: "/character",
     label: "キャラクター",
     sectionId: "character",
-  },
-  {
-    path: "/chats",
-    label: "ペルソナ会話",
-    sectionId: "persona-chats",
-  },
-  {
-    path: "/personas",
-    label: "ペルソナ",
-    sectionId: "personas",
+    title: "キャラクター",
   },
 ];
 
@@ -98,8 +99,6 @@ function navItem(path: string, fallbackLabel: string): NavItem {
  */
 export const PRIMARY_NAV: readonly NavItem[] = [
   { path: "/", label: "チャット" },
-  navItem("/chats", "ペルソナ会話"),
-  navItem("/personas", "ペルソナ"),
   navItem("/memory", "記憶"),
   navItem("/tasks", "タスク・目的"),
   navItem("/proposals", "候補"),

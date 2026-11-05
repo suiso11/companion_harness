@@ -757,7 +757,6 @@ export {
   RecordDueDeadlinesResponseSchema,
   RecordDueDeadlinesStatusSchema,
 } from "./notifications.js";
-export * from "./persona_chat.js";
 export type {
   CanonicalKey,
   CanonicalResourceDetail,
