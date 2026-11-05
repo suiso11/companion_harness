@@ -1488,7 +1488,7 @@ button[data-action-evidence="before"] {
 }
 #autonomy .autonomy-segmented {
   display: inline-flex;
-  /* Own row, left-aligned: on /shadow and /monitor the 開発・運用 <details> menu is
+  /* Own row, left-aligned: on /shadow the 開発・運用 <details> menu is
      open by default and hangs over the panel's top-right corner. Keeping the
      buttons out of that strip is what makes them clickable (e2e caught it as an
      intercepted click, not as a missing element). */
@@ -1643,6 +1643,19 @@ button[data-action-evidence="before"] {
     border-color 0.15s,
     background-color 0.15s;
 }
+/* Rows attached to the selected purpose are ordered first (markup), so the
+   divider marks where the unrelated rows start without filtering anything. */
+#autonomy .autonomy-rows > li[data-parent="other"] {
+  opacity: 0.68;
+}
+#autonomy
+  .autonomy-rows
+  > li[data-parent="selected"]
+  + li[data-parent="other"] {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border-subtle);
+}
 #autonomy .autonomy-row {
   border-radius: var(--radius-md);
 }
@@ -1725,7 +1738,6 @@ button[data-action-evidence="before"] {
   border-color: var(--border);
   color: var(--foreground);
 }
-/* biome-ignore lint/style/noDescendingSpecificity: card-confirm sizing is overridden by the shared button rule on purpose. */
 #autonomy .autonomy-card-confirm button {
   padding: 0.1875rem 0.625rem;
   font-size: 0.75rem;
@@ -1837,7 +1849,6 @@ button[data-action-evidence="before"] {
   align-items: center;
   gap: 0.375rem;
 }
-/* biome-ignore lint/style/noDescendingSpecificity: action-row sizing loses to the shared button rule on purpose. */
 #autonomy .autonomy-btnrow button {
   padding: 0.3125rem 0.75rem;
   font-size: 0.875rem;
@@ -1857,16 +1868,12 @@ button[data-action-evidence="before"] {
 #autonomy .autonomy-correct-row :is(input, button) {
   height: 2.25rem;
 }
-/* biome-ignore lint/style/noDescendingSpecificity: correct-row sizing loses to the shared button rule on purpose. */
 #autonomy .autonomy-correct-row button {
   padding: 0 0.875rem;
   font-size: 0.875rem;
 }
 #autonomy .autonomy-primary,
-/* biome-ignore lint/style/noDescendingSpecificity: primary/submit colour is re-specified here to beat the shared button rule. */
-  #autonomy
-  .autonomy-submit
-  button {
+#autonomy .autonomy-submit button {
   border-color: color-mix(in oklch, var(--au-accent) 55%, transparent);
   color: var(--au-accent);
 }
@@ -1894,7 +1901,6 @@ button[data-action-evidence="before"] {
 #autonomy-conflicts {
   flex: 1 1 12rem;
 }
-/* biome-ignore lint/style/noDescendingSpecificity: conflict-row sizing loses to the shared button rule on purpose. */
 #autonomy .autonomy-conflict-row button {
   padding: 0.25rem 0.625rem;
   font-size: 0.8125rem;
@@ -1996,7 +2002,6 @@ button[data-action-evidence="before"] {
   justify-content: flex-end;
   margin-top: 0.25rem;
 }
-/* biome-ignore lint/style/noDescendingSpecificity: submit sizing is intentionally re-specified after the field rules. */
 #autonomy .autonomy-submit button {
   padding: 0.375rem 1rem;
   font-size: 0.875rem;
@@ -2049,7 +2054,6 @@ button[data-action-evidence="before"] {
     border-left: 0;
   }
   /* Touch floor: >=44px targets on phones. */
-  /* biome-ignore lint/style/noDescendingSpecificity: touch floor must win over every button rule on phones. */
   #autonomy button {
     min-height: 44px;
   }

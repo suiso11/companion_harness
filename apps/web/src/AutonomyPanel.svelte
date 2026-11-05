@@ -63,6 +63,7 @@ interface TaskRow {
   readonly kind: string;
   readonly status: string;
   readonly deadline: string;
+  readonly parentPurposeId: string | null;
   readonly version: number;
 }
 
@@ -136,6 +137,13 @@ let pendingLine = $state("");
 let conflictsText = $state("");
 let purposes = $state<PurposeRow[]>([]);
 let tasks = $state<TaskRow[]>([]);
+// The list is the whole session, not the selected purpose: rows attached to the
+// anchor are ordered first so the relation is visible without claiming a filter.
+function orderedTasks(): TaskRow[] {
+  const attached = (task: TaskRow) =>
+    task.parentPurposeId !== null && task.parentPurposeId === selectedPurpose;
+  return [...tasks].sort((a, b) => Number(attached(b)) - Number(attached(a)));
+}
 let purposeDetailVisible = $state(false);
 let purposeDetailBody = $state("");
 let taskDetailVisible = $state(false);
@@ -463,6 +471,8 @@ function renderTasks(result: { status: number; body: unknown }): void {
       kind: row.kind,
       status: row.status,
       deadline: typeof row.deadline === "string" ? row.deadline : "",
+      parentPurposeId:
+        typeof row.parentPurposeId === "string" ? row.parentPurposeId : null,
       version: row.version,
     });
   }
@@ -1402,11 +1412,15 @@ $effect(() => {
         すべての作業<span class="autonomy-count">{tasks.length}</span>
       </h3>
       <ul id="autonomy-task-list" class="autonomy-rows">
-        {#each tasks as task (task.id)}
+        {#each orderedTasks() as task (task.id)}
           <li
             id={task.id}
             class="autonomy-row"
             data-status={task.status}
+            data-parent={task.parentPurposeId !== null &&
+            task.parentPurposeId === selectedPurpose
+              ? "selected"
+              : "other"}
             aria-current={selectedTask === task.id ? "true" : undefined}
           >
             <button
