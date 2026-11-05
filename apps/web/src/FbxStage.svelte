@@ -34,6 +34,29 @@ let {
   level?: number;
 } = $props();
 
+/**
+ * The avatar package's lilToon material modes, keyed by material name:
+ * `blend` = _SrcBlend 1 / _DstBlend 10 with no cutout, `doubleSide` = _Cull 0,
+ * `hidden` = a textureless additive layer. Everything else is cutout 0.5.
+ */
+const MATERIAL_MODES: Readonly<
+  Record<
+    string,
+    Readonly<{ blend?: boolean; doubleSide?: boolean; hidden?: boolean }>
+  >
+> = {
+  body: { blend: true },
+  body_option: { blend: true, doubleSide: true },
+  body_b: {},
+  hair: { doubleSide: true },
+  hair_op: { hidden: true },
+  cloth: { doubleSide: true },
+  cloth2: { blend: true, doubleSide: true },
+  chain: { blend: true, doubleSide: true },
+  under: { blend: true, doubleSide: true },
+  tail: {},
+};
+
 let host: HTMLDivElement;
 let failed = $state(false);
 let loading = $state(true);
@@ -115,34 +138,12 @@ onMount(() => {
               }
               material.map = texture;
               material.color.set(0xffffff);
-              material.alphaTest = 0.5;
-              // lilToon hair_op is a no-op additive layer with no texture.
-              if (material.name === "hair_op") {
-                material.visible = false;
-              }
-              // Mirror the avatar package's lilToon modes: the blended
-              // layers (_SrcBlend 1 / _DstBlend 10, no cutout) and the
-              // double-sided face, hair and cloth layers (_Cull 0).
-              if (
-                material.name === "body" ||
-                material.name === "body_option" ||
-                material.name === "cloth2" ||
-                material.name === "chain" ||
-                material.name === "under"
-              ) {
-                material.transparent = true;
-                material.alphaTest = 0;
-              }
-              if (
-                material.name === "body_option" ||
-                material.name === "hair" ||
-                material.name === "cloth" ||
-                material.name === "cloth2" ||
-                material.name === "chain" ||
-                material.name === "under"
-              ) {
-                material.side = THREE.DoubleSide;
-              }
+              const mode = MATERIAL_MODES[material.name] ?? {};
+              material.alphaTest = mode.blend === true ? 0 : 0.5;
+              material.transparent = mode.blend === true;
+              material.side =
+                mode.doubleSide === true ? THREE.DoubleSide : THREE.FrontSide;
+              material.visible = mode.hidden !== true;
               material.needsUpdate = true;
             }
           });
