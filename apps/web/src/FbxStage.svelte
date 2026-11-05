@@ -106,17 +106,43 @@ onMount(() => {
                     : `/avatar/${file}?v=${version}`,
                 );
                 // Albedo atlases are sRGB; without this three reads them as
-                // linear and the whole model renders washed out.
+                // linear and the whole model renders washed out. The FBX UVs
+                // already match three's default V direction: flipping them
+                // moves the eyes and mouth to the wrong atlas tiles.
                 texture.colorSpace = THREE.SRGBColorSpace;
-                texture.flipY = false;
+                texture.flipY = true;
                 textures.set(file, texture);
               }
               material.map = texture;
               material.color.set(0xffffff);
-              // The atlases carry alpha (skin eye holes, face islands,
-              // lace, veils): cut the transparent texels out instead of
-              // painting their background.
               material.alphaTest = 0.5;
+              // lilToon hair_op is a no-op additive layer with no texture.
+              if (material.name === "hair_op") {
+                material.visible = false;
+              }
+              // Mirror the avatar package's lilToon modes: the blended
+              // layers (_SrcBlend 1 / _DstBlend 10, no cutout) and the
+              // double-sided face, hair and cloth layers (_Cull 0).
+              if (
+                material.name === "body" ||
+                material.name === "body_option" ||
+                material.name === "cloth2" ||
+                material.name === "chain" ||
+                material.name === "under"
+              ) {
+                material.transparent = true;
+                material.alphaTest = 0;
+              }
+              if (
+                material.name === "body_option" ||
+                material.name === "hair" ||
+                material.name === "cloth" ||
+                material.name === "cloth2" ||
+                material.name === "chain" ||
+                material.name === "under"
+              ) {
+                material.side = THREE.DoubleSide;
+              }
               material.needsUpdate = true;
             }
           });
