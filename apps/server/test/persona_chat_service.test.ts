@@ -6,7 +6,10 @@ import {
   openKernelDatabase,
   type PersonaChatStore,
 } from "@companion/kernel";
-import type { RemoteChatRequest } from "@companion/model-remote";
+import type {
+  RemoteChatMessage,
+  RemoteChatRequest,
+} from "@companion/model-remote";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createPersonaChatService,
@@ -67,6 +70,7 @@ describe("persona chat service", () => {
     expect(service.providers().map((p) => [p.id, p.available])).toEqual([
       ["openai", true],
       ["deepseek", false],
+      ["local", false],
     ]);
   });
 
@@ -181,5 +185,160 @@ describe("persona chat service", () => {
       }),
     ).rejects.toMatchObject({ code: "chat_not_found" });
     expect(createGateway).not.toHaveBeenCalled();
+  });
+
+  describe("local provider and autotalk", () => {
+    const HOUR = 3_600_000;
+
+    async function setupTalk() {
+      const handle = openKernelDatabase(":memory:");
+      await migrateKernelDatabase({ db: handle.raw });
+      fixtures.push(() => closeKernelDatabase(handle));
+      const store = createPersonaChatStore({ db: handle.raw });
+      const ada = store.createPersona(
+        {
+          name: "Ada",
+          avatar: "A",
+          provider: "openai",
+          model: "gpt-4.1-mini",
+          systemPrompt: "You are Ada.",
+        },
+        T0,
+      );
+      const ben = store.createPersona(
+        {
+          name: "Ben",
+          avatar: "B",
+          provider: "local",
+          model: "informational",
+          systemPrompt: "You are Ben.",
+        },
+        T0,
+      );
+      const chat = store.createChat(ada.id, undefined, T0, {
+        partnerId: ben.id,
+        autotalk: true,
+      });
+      if (chat === null) throw new Error("chat setup failed");
+      const remote = vi.fn(async (_request: RemoteChatRequest) => "from ada");
+      const local = vi.fn(
+        async (_messages: readonly RemoteChatMessage[], _max: number) =>
+          "from ben",
+      );
+      let clock = T0 + 1000;
+      const service = createPersonaChatService({
+        store,
+        keys: { openai: "sk-test", deepseek: null },
+        now: () => (clock += 10),
+        createGateway: () => ({
+          chat: async (request: RemoteChatRequest) => ({
+            text: await remote(request),
+            usage: null,
+          }),
+        }),
+        localChat: local,
+      });
+      const texts = () =>
+        store
+          .listMessages(chat.id, { limit: 50 })
+          .messages.map((m) => m.content);
+      return { store, service, ada, ben, chat, remote, local, texts };
+    }
+
+    it("marks local available only with a local chat function", async () => {
+      const { service } = await setupTalk();
+      expect(service.providers().find((p) => p.id === "local")?.available).toBe(
+        true,
+      );
+    });
+
+    it("sends a local persona through the local chat function without a key", async () => {
+      const { store, service, ben, remote, local } = await setupTalk();
+      const chat = store.createChat(ben.id, undefined, T0);
+      if (chat === null) throw new Error("chat setup failed");
+      const out = await service.send({ chatId: chat.id, text: "hi" });
+      expect(out.messages.assistant.content).toBe("from ben");
+      expect(remote).not.toHaveBeenCalled();
+      expect(local).toHaveBeenCalledWith(
+        [
+          { role: "system", content: "You are Ben." },
+          { role: "user", content: "hi" },
+        ],
+        1024,
+      );
+    });
+
+    it("alternates speakers starting with the primary and prompts in their perspective", async () => {
+      const { service, ada, ben, chat, remote, local, store, texts } =
+        await setupTalk();
+
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(remote.mock.calls[0]?.[0].messages).toEqual([
+        { role: "system", content: "You are Ada.\n会話の相手はBenです。" },
+        { role: "user", content: "会話を始めてください。" },
+      ]);
+
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(1);
+      expect(local.mock.calls[0]?.[0]).toEqual([
+        { role: "system", content: "You are Ben.\n会話の相手はAdaです。" },
+        { role: "user", content: "from ada" },
+        {
+          role: "user",
+          content:
+            "直前の流れに続く短い一言だけを返してください。前置きや説明は不要です。",
+        },
+      ]);
+
+      expect(await service.autotalk(T0 + 3 * HOUR)).toBe(1);
+      expect(remote.mock.calls[1]?.[0].messages.slice(1, 3)).toEqual([
+        { role: "assistant", content: "from ada" },
+        { role: "user", content: "from ben" },
+      ]);
+
+      expect(texts()).toEqual(["from ada", "from ben", "from ada"]);
+      expect(
+        store
+          .listMessages(chat.id, { limit: 10 })
+          .messages.map((m) => m.personaId),
+      ).toEqual([ada.id, ben.id, ada.id]);
+    });
+
+    it("only runs chats whose newest message is older than the interval", async () => {
+      const { service, remote, store, chat } = await setupTalk();
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(await service.autotalk(T0 + HOUR + 500)).toBe(0);
+      expect(remote).toHaveBeenCalledTimes(1);
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(1);
+      store.setAutotalk(chat.id, false, T0 + 2 * HOUR);
+      expect(await service.autotalk(T0 + 9 * HOUR)).toBe(0);
+    });
+
+    it("skips a failing chat without appending or throwing", async () => {
+      const { service, remote, texts } = await setupTalk();
+      remote.mockRejectedValueOnce(new Error("upstream secret text"));
+      expect(await service.autotalk(T0 + HOUR)).toBe(0);
+      expect(texts()).toEqual([]);
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(texts()).toEqual(["from ada"]);
+    });
+
+    it("runs the same chat once for concurrent autotalk passes", async () => {
+      const { service, remote, texts } = await setupTalk();
+      let release: (value: string) => void = () => {};
+      remote.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const first = service.autotalk(T0 + HOUR);
+      const second = service.autotalk(T0 + HOUR);
+      await Promise.resolve();
+      release("once");
+      const counts = await Promise.all([first, second]);
+      expect(counts.reduce((a, b) => a + b, 0)).toBe(1);
+      expect(remote).toHaveBeenCalledTimes(1);
+      expect(texts()).toEqual(["once"]);
+    });
   });
 });

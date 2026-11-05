@@ -7232,7 +7232,19 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       const body = await parseJsonBody(c, CreateChatRequestSchema);
       if (body === null) return validationError(c);
       try {
-        const chat = chatStore.createChat(body.personaId, body.title, now());
+        if (
+          body.partnerId !== undefined &&
+          (body.partnerId === body.personaId ||
+            chatStore.getPersona(body.partnerId) === null)
+        ) {
+          return validationError(c);
+        }
+        const chat = chatStore.createChat(body.personaId, body.title, now(), {
+          ...(body.partnerId !== undefined
+            ? { partnerId: body.partnerId }
+            : {}),
+          ...(body.autotalk !== undefined ? { autotalk: body.autotalk } : {}),
+        });
         return chat === null
           ? apiError(c, 404, "not_found", "resource not found")
           : c.json(chat, 201);
@@ -7247,7 +7259,13 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       const body = await parseJsonBody(c, UpdateChatRequestSchema);
       if (body === null) return validationError(c);
       try {
-        const chat = chatStore.renameChat(id.id, body.title, now());
+        let chat = chatStore.getChat(id.id);
+        if (body.title !== undefined) {
+          chat = chatStore.renameChat(id.id, body.title, now());
+        }
+        if (chat !== null && body.autotalk !== undefined) {
+          chat = chatStore.setAutotalk(id.id, body.autotalk, now());
+        }
         return chat === null
           ? apiError(c, 404, "not_found", "resource not found")
           : c.json(chat, 200);

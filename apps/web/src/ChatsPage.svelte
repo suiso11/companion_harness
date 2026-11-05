@@ -6,6 +6,7 @@ import Markdown from "./lib/Markdown.svelte";
 import {
   type ChatMessage,
   type ChatSummary,
+  chatTitle,
   deleteJson,
   type Persona,
   type PersonaProviderInfo,
@@ -28,6 +29,8 @@ let draft = $state("");
 let error = $state("");
 let drawer = $state(false);
 let pickerId = $state("");
+let partnerId = $state("");
+let autotalkNew = $state(false);
 // Reused while the same text is retried so the server can replay, not re-call.
 let retryKey: string | null = $state(null);
 let retryText = $state("");
@@ -110,15 +113,80 @@ void init();
 async function create(): Promise<void> {
   const personaId = pickerId || usable[0]?.id;
   if (!personaId) return;
-  const res = await postJson("/api/chats", { personaId }, null);
+  const partner = partnerId !== "" && partnerId !== personaId ? partnerId : "";
+  const body: Record<string, unknown> = { personaId };
+  if (partner) {
+    body.partnerId = partner;
+    if (autotalkNew) body.autotalk = true;
+  }
+  const res = await postJson("/api/chats", body, null);
   if (res.status !== 201) {
     error = "会話を作成できませんでした";
     return;
   }
   const chat = res.body as ChatSummary;
   upsert(chat);
+  partnerId = "";
+  autotalkNew = false;
   await select(chat.id);
 }
+
+async function toggleAutotalk(): Promise<void> {
+  if (!selected) return;
+  const res = await patchJson(`/api/chats/${selected.id}`, {
+    autotalk: !selected.autotalk,
+  });
+  if (res.status !== 200) {
+    error = "自走の設定を変更できませんでした";
+    return;
+  }
+  upsert(res.body as ChatSummary);
+}
+
+function speaker(m: ChatMessage): { name: string; avatar: string } {
+  const p = m.personaId
+    ? personas.find((x) => x.id === m.personaId)
+    : undefined;
+  return {
+    name: p?.name ?? selected?.personaName ?? "",
+    avatar: p?.avatar ?? selected?.avatar ?? "",
+  };
+}
+
+// Autotalk messages arrive server-side; poll while visible, keep scroll if reading history.
+async function refresh(id: string): Promise<void> {
+  if (sending) return;
+  const res = await fetchJson(`/api/chats/${id}/messages?limit=50`);
+  if (res.status !== 200 || selectedId !== id || sending) return;
+  const body = res.body as { chat?: ChatSummary; messages: ChatMessage[] };
+  const atBottom =
+    !scroller ||
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  messages = body.messages;
+  if (body.chat) upsert(body.chat);
+  if (atBottom) await scrollBottom();
+}
+
+$effect(() => {
+  const id = selectedId;
+  if (id === null || !selected?.autotalk) return;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    clearInterval(timer);
+    timer = undefined;
+  };
+  const start = () => {
+    stop();
+    if (document.visibilityState === "visible")
+      timer = setInterval(() => void refresh(id), 60_000);
+  };
+  document.addEventListener("visibilitychange", start);
+  start();
+  return () => {
+    document.removeEventListener("visibilitychange", start);
+    stop();
+  };
+});
 
 async function rename(chat: ChatSummary): Promise<void> {
   const title = prompt("会話の名前", chat.title)?.trim();
@@ -205,6 +273,13 @@ function onKey(event: KeyboardEvent): void {
           </select>
           <button type="button" disabled={usable.length === 0} onclick={create}>新しい会話</button>
         </div>
+        <div class="new opts">
+          <select bind:value={partnerId} disabled={usable.length < 2} aria-label="相手（省略可）">
+            <option value="">相手（省略可）</option>
+            {#each usable.filter((p) => p.id !== pickerId) as p (p.id)}<option value={p.id}>{p.avatar} {p.name}</option>{/each}
+          </select>
+          <label><input type="checkbox" bind:checked={autotalkNew} disabled={partnerId === "" || partnerId === pickerId} /> 自走で話す（1時間おき）</label>
+        </div>
         {#if loaded && personas.length === 0}
           <p class="hint">ペルソナがありません。<a href="/personas">ペルソナを作成</a></p>
         {:else if loaded && usable.length === 0}
@@ -218,9 +293,10 @@ function onKey(event: KeyboardEvent): void {
             <li class:active={chat.id === selectedId}>
               <button type="button" class="row" onclick={() => select(chat.id)}>
                 <span class="avatar" aria-hidden="true">{chat.avatar}</span>
+                {#if chat.partnerAvatar}<span class="avatar partner" aria-hidden="true">{chat.partnerAvatar}</span>{/if}
                 <span class="body">
-                  <span class="top"><strong>{chat.personaName}</strong><small>{relativeTime(now, chat.updatedAt)}</small></span>
-                  <span class="title">{chat.title}</span>
+                  <span class="top"><strong>{chatTitle(chat)}</strong><small>{relativeTime(now, chat.updatedAt)}</small></span>
+                  <span class="title">{chat.title}{#if chat.autotalk} <span class="badge">自走</span>{/if}</span>
                   <small class="preview">{previewOf(chat.preview)}</small>
                 </span>
               </button>
@@ -236,14 +312,21 @@ function onKey(event: KeyboardEvent): void {
       <section class="pane">
         <header>
           <button type="button" class="toggle" aria-label="会話一覧を開く" aria-expanded={drawer} onclick={() => { drawer = !drawer; now = Date.now(); }}>☰</button>
-          <strong>{selected ? `${selected.personaName} · ${selected.title}` : "ペルソナとの会話"}</strong>
+          <span class="who"><strong>{selected ? `${chatTitle(selected)} · ${selected.title}` : "ペルソナとの会話"}</strong>{#if selected?.autotalk}<small>1時間おきに自動で話します</small>{/if}</span>
+          {#if selected?.partnerId}
+            <button type="button" aria-pressed={selected.autotalk} onclick={toggleAutotalk}>自走 {selected.autotalk ? "ON" : "OFF"}</button>
+          {/if}
         </header>
         {#if error}<p class="banner" role="alert">{error}</p>{/if}
         {#if selected}
           <div class="scroll" bind:this={scroller}>
-            {#each messages as m (m.id)}
+            {#each messages as m, i (m.id)}
+              {@const who = speaker(m)}
+              {#if m.role === "assistant" && (i === 0 || messages[i - 1]?.role !== "assistant" || messages[i - 1]?.personaId !== m.personaId)}
+                <p class="name">{who.name}</p>
+              {/if}
               <div class="msg {m.role}">
-                {#if m.role === "assistant"}<span class="avatar" aria-hidden="true">{selected.avatar}</span>{/if}
+                {#if m.role === "assistant"}<span class="avatar" aria-hidden="true">{who.avatar}</span>{/if}
                 <div class="bubble"
                   >{#if m.role === "assistant"}<Markdown text={m.content} />{:else}{m.content}{/if}</div
                 >
@@ -311,4 +394,9 @@ function onKey(event: KeyboardEvent): void {
     .actions { visibility: visible; }
     .bubble { max-width: 85%; }
   }
+  .partner { margin-left: -0.6rem; }
+  .badge { font-size: 0.7rem; padding: 0 0.4rem; border-radius: var(--radius-sm); background: var(--secondary); }
+  .name { color: var(--muted-foreground); font-size: 0.75rem; margin: 0 0 0.15rem 2.5rem; }
+  .who { display: grid; }
+  .opts { flex-direction: column; }
 </style>

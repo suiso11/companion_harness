@@ -133,7 +133,7 @@ describe("persona chat routes", () => {
     const avail = Object.fromEntries(
       list.providers.map((p: Json) => [p.id, p.available]),
     );
-    expect(avail).toEqual({ openai: true, deepseek: false });
+    expect(avail).toEqual({ openai: true, deepseek: false, local: false });
 
     const patched = await f.request(`/api/personas/${created.id}`, "PATCH", {
       ...PERSONA,
@@ -211,6 +211,66 @@ describe("persona chat routes", () => {
     expect((await f.request(`/api/chats/${missing}`, "DELETE")).status).toBe(
       404,
     );
+  });
+
+  it("creates and toggles two-persona autotalk chats", async () => {
+    const f = await makeFixture();
+    const primary = await createPersona(f);
+    const partner = await createPersona(f, { name: "Natsuki" });
+    const res = await f.request("/api/chats", "POST", {
+      personaId: primary.id,
+      partnerId: partner.id,
+      autotalk: true,
+    });
+    expect(res.status).toBe(201);
+    const chat = (await res.json()) as Json;
+    expect(chat).toMatchObject({
+      personaId: primary.id,
+      partnerId: partner.id,
+      partnerName: "Natsuki",
+      autotalk: true,
+    });
+
+    const plain = await createChat(f, primary.id);
+    expect(plain).toMatchObject({ partnerId: null, autotalk: false });
+
+    for (const body of [
+      { personaId: primary.id, partnerId: primary.id },
+      { personaId: primary.id, partnerId: randomUUID() },
+    ]) {
+      expect((await f.request("/api/chats", "POST", body)).status).toBe(400);
+    }
+
+    const path = `/api/chats/${chat.id}`;
+    const off = await f.request(path, "PATCH", { autotalk: false });
+    expect(off.status).toBe(200);
+    expect(((await off.json()) as Json).autotalk).toBe(false);
+    const on = await f.request(path, "PATCH", { autotalk: true });
+    expect(((await on.json()) as Json).autotalk).toBe(true);
+    const empty = await f.request(path, "PATCH", {});
+    expect(empty.status).toBe(200);
+    expect(((await empty.json()) as Json).title).toBe(chat.title);
+    expect(
+      (await f.request(`/api/chats/${randomUUID()}`, "PATCH", {})).status,
+    ).toBe(404);
+  });
+
+  it("exposes personaId on messages", async () => {
+    const f = await makeFixture();
+    const persona = await createPersona(f);
+    const chat = await createChat(f, persona.id);
+    const sent = (await (
+      await f.request(`/api/chats/${chat.id}/messages`, "POST", { text: "hi" })
+    ).json()) as Json;
+    expect(sent.messages.user.personaId).toBeNull();
+    expect(sent.messages.assistant.personaId).toBe(persona.id);
+    const history = (await (
+      await f.request(`/api/chats/${chat.id}/messages`)
+    ).json()) as Json;
+    expect(history.messages.map((m: Json) => m.personaId)).toEqual([
+      null,
+      persona.id,
+    ]);
   });
 
   it("sends, replays by clientKey, and pages history", async () => {

@@ -11,6 +11,7 @@ import type {
   ChatMessageRow,
   ChatSummaryRow,
   PersonaChatStore,
+  PersonaRow,
 } from "@companion/kernel";
 import {
   createRemoteGateway,
@@ -24,6 +25,12 @@ export type PersonaProviderInfo = z.infer<typeof PersonaProviderInfoSchema>;
 
 /** Newest stored messages replayed to the provider as context. */
 export const PERSONA_CHAT_HISTORY_LIMIT = 20;
+/** An autotalk chat is due once its newest message is this old. */
+export const AUTOTALK_INTERVAL_MS = 3_600_000;
+const AUTOTALK_BATCH = 10;
+const AUTOTALK_PROMPT =
+  "直前の流れに続く短い一言だけを返してください。前置きや説明は不要です。";
+const AUTOTALK_START_PROMPT = "会話を始めてください。";
 
 type ErrorCode =
   | "chat_not_found"
@@ -62,6 +69,11 @@ export interface PersonaChatService {
     text: string;
     clientKey?: string;
   }): Promise<PersonaChatExchange>;
+  /**
+   * One autotalk pass over due chats; resolves with the number of messages
+   * written. Never rejects: a failing chat is skipped until the next pass.
+   */
+  autotalk(nowMs: number): Promise<number>;
 }
 
 export function createPersonaChatService(options: {
@@ -74,12 +86,78 @@ export function createPersonaChatService(options: {
     model: string;
     apiKey: string;
   }) => { chat(request: RemoteChatRequest): Promise<RemoteChatResult> };
+  /** Server-configured local model; absent marks the `local` provider unavailable. */
+  localChat?: (
+    messages: readonly RemoteChatMessage[],
+    maxOutputTokens: number,
+  ) => Promise<string>;
 }): PersonaChatService {
-  const { store, keys, now } = options;
+  const { store, keys, now, localChat } = options;
   const createGateway = options.createGateway ?? createRemoteGateway;
   // Concurrent sends with the same clientKey share one model call; the store's
   // UNIQUE(chat_id, client_key) stays the cross-process backstop.
   const inFlight = new Map<string, Promise<PersonaChatExchange>>();
+  const autotalkRunning = new Set<string>();
+
+  /** One model call for this persona's provider; null when it is unavailable. */
+  const providerCall = (
+    persona: PersonaRow,
+  ): ((messages: RemoteChatMessage[]) => Promise<string>) | null => {
+    const { provider, model } = persona;
+    if (provider === "local") {
+      return localChat === undefined
+        ? null
+        : (messages) => localChat(messages, 1024);
+    }
+    const apiKey = keys[provider];
+    if (apiKey === null) return null;
+    return async (messages) =>
+      (
+        await createGateway({
+          provider,
+          model,
+          apiKey,
+        }).chat({ messages, maxOutputTokens: 1024 })
+      ).text;
+  };
+
+  async function autotalkOne(chat: ChatSummaryRow): Promise<boolean> {
+    const { partnerId } = chat;
+    if (partnerId === null) return false;
+    const history = store.listMessages(chat.id, {
+      limit: PERSONA_CHAT_HISTORY_LIMIT,
+    }).messages;
+    const newest = history.filter((m) => m.personaId !== null).at(-1);
+    const speakerId =
+      newest === undefined || newest.personaId === partnerId
+        ? chat.personaId
+        : partnerId;
+    const otherId = speakerId === chat.personaId ? partnerId : chat.personaId;
+    const speaker = store.getPersona(speakerId);
+    const other = store.getPersona(otherId);
+    if (speaker === null || other === null) return false;
+    const call = providerCall(speaker);
+    if (call === null) return false;
+    const reply = await call([
+      {
+        role: "system",
+        content: `${speaker.systemPrompt}\n会話の相手は${other.name}です。`,
+      },
+      ...history.map((m) => ({
+        role:
+          m.personaId === speakerId
+            ? ("assistant" as const)
+            : ("user" as const),
+        content: m.content,
+      })),
+      {
+        role: "user",
+        content: history.length === 0 ? AUTOTALK_START_PROMPT : AUTOTALK_PROMPT,
+      },
+    ]);
+    store.appendParticipantMessage(chat.id, speakerId, reply, now());
+    return true;
+  }
 
   return {
     providers: () =>
@@ -87,8 +165,33 @@ export function createPersonaChatService(options: {
         id: p.id,
         label: p.label,
         suggestedModels: [...p.suggestedModels],
-        available: keys[p.id] !== null,
+        available:
+          p.id === "local" ? localChat !== undefined : keys[p.id] !== null,
       })),
+
+    async autotalk(nowMs) {
+      let written = 0;
+      try {
+        const due = store.listAutotalkDue(
+          nowMs - AUTOTALK_INTERVAL_MS,
+          AUTOTALK_BATCH,
+        );
+        for (const chat of due) {
+          if (autotalkRunning.has(chat.id)) continue;
+          autotalkRunning.add(chat.id);
+          try {
+            if (await autotalkOne(chat)) written += 1;
+          } catch {
+            // Skipped: nothing was appended; the chat stays due for the next pass.
+          } finally {
+            autotalkRunning.delete(chat.id);
+          }
+        }
+      } catch {
+        // Store failure: nothing to report to the timer caller.
+      }
+      return written;
+    },
 
     send({ chatId, text, clientKey }) {
       const chat = store.getChat(chatId);
@@ -111,8 +214,8 @@ export function createPersonaChatService(options: {
       const run = (async () => {
         const persona = store.getPersona(chat.personaId);
         if (!persona) throw new PersonaChatServiceError("persona_not_found");
-        const apiKey = keys[persona.provider];
-        if (apiKey === null) {
+        const call = providerCall(persona);
+        if (call === null) {
           throw new PersonaChatServiceError("provider_unavailable");
         }
 
@@ -127,17 +230,7 @@ export function createPersonaChatService(options: {
 
         let reply: string;
         try {
-          const gateway = createGateway({
-            provider: persona.provider,
-            model: persona.model,
-            apiKey,
-          });
-          reply = (
-            await gateway.chat({
-              messages,
-              maxOutputTokens: 1024,
-            })
-          ).text;
+          reply = await call(messages);
         } catch {
           throw new PersonaChatServiceError("provider_failed");
         }

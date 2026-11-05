@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PERSONA_PROVIDERS = ["openai", "deepseek"] as const;
+export const PERSONA_PROVIDERS = ["openai", "deepseek", "local"] as const;
 export const PersonaProviderSchema = z.enum(PERSONA_PROVIDERS);
 export type PersonaProvider = z.infer<typeof PersonaProviderSchema>;
 
@@ -20,6 +20,7 @@ export const PERSONA_PROVIDER_CATALOG: readonly {
     label: "DeepSeek",
     suggestedModels: ["deepseek-chat"],
   },
+  { id: "local", label: "ローカル", suggestedModels: [] },
 ];
 
 export const PersonaProviderInfoSchema = z.strictObject({
@@ -76,9 +77,12 @@ export const ChatTitleSchema = nonBlank(120);
 export const CreateChatRequestSchema = z.strictObject({
   personaId: z.string().uuid(),
   title: ChatTitleSchema.optional(),
+  partnerId: z.string().uuid().optional(),
+  autotalk: z.boolean().optional(),
 });
 export const UpdateChatRequestSchema = z.strictObject({
-  title: ChatTitleSchema,
+  title: ChatTitleSchema.optional(),
+  autotalk: z.boolean().optional(),
 });
 
 export const ChatSummarySchema = z.strictObject({
@@ -93,6 +97,10 @@ export const ChatSummarySchema = z.strictObject({
   /** Newest message, cut to 80 code points; "" when empty. */
   preview: z.string().max(80),
   messageCount: z.number().int().nonnegative(),
+  partnerId: z.string().uuid().nullable(),
+  partnerName: z.string().min(1).max(80).nullable(),
+  partnerAvatar: z.string().min(1).max(16).nullable(),
+  autotalk: z.boolean(),
 });
 
 export const ChatsResponseSchema = z.strictObject({
@@ -105,6 +113,8 @@ export const ChatMessageSchema = z.strictObject({
   role: ChatMessageRoleSchema,
   content: z.string().min(1),
   createdAt: z.number().int().nonnegative(),
+  /** null means the user wrote it. */
+  personaId: z.string().uuid().nullable(),
 });
 
 export const ChatMessagesResponseSchema = z.strictObject({
