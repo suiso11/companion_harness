@@ -11,8 +11,6 @@ let { activePath = "/" }: { activePath?: string } = $props();
 // icons follow link/active states without per-icon styles.
 const ICONS: Record<string, string> = {
   "/": "chat",
-  "/chats": "chat",
-  "/personas": "sparkles",
   "/memory": "memory",
   "/tasks": "target",
   "/proposals": "sparkles",

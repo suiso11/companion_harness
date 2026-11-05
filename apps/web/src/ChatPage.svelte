@@ -69,13 +69,7 @@ import type { VoicePlayback, VoiceSession } from "./lib/voice_session.js";
 let {
   activePath = "/",
   children,
-  chatSurface = true,
-}: {
-  activePath?: string;
-  children?: Snippet;
-  /** False for pages that replace the chat surface (persona chat). */
-  chatSurface?: boolean;
-} = $props();
+}: { activePath?: string; children?: Snippet } = $props();
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -3329,12 +3323,6 @@ onMount(() => {
     sessions = [];
   }
   void (async () => {
-    // Persona pages hide the agent transcript: no session, presence heartbeat
-    // or companion SSE for a conversation nobody can see.
-    if (!chatSurface) {
-      booted = true;
-      return;
-    }
     await ensureSession();
     if (sessionId !== null) {
       rememberSession(sessionId);
@@ -3452,7 +3440,7 @@ function evidenceForTurn(turn: Turn): {
 }
 </script>
 
-<div class="shell" class:chat-hidden={!chatSurface}>
+<div class="shell">
   <header class="topbar">
     <div class="topbar-start">
       <button

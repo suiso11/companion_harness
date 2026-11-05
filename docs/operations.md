@@ -195,26 +195,6 @@ registration and NO tool in the model-facing tool list (fail-closed).
    advertises the tool, and invalid JSON / non-loopback URLs fail startup
    closed (never silently disabled).
 
-## Persona chat (hosted providers)
-
-Persona chat (`/chats`, `/personas`, `/api/personas*`, `/api/chats*`) is
-always available; there is no feature flag. A provider is usable once its
-host environment variable holds a key, otherwise sends answer a fixed 409
-(`provider_unavailable`):
-
-- `COMPANION_OPENAI_API_KEY` (host `api.openai.com`)
-- `COMPANION_DEEPSEEK_API_KEY` (host `api.deepseek.com`)
-
-Hosts are fixed in code (https only, no configurable base URL). A present
-key must be 1..4096 printable ASCII characters (0x21..0x7e) or startup fails
-closed with a fixed message. Keys are read from the environment only: they
-never reach the database, config JSON, logs or API responses, and upstream
-error text is never surfaced (a provider failure is a fixed 502
-`provider_failed` and nothing is stored). Persona prompts and chat messages
-are stored in the local database like other conversation data (see
-Plaintext sensitivity below) and are sent to the chosen provider on each
-turn (the system prompt plus at most the newest 20 messages).
-
 ## Markdown references (M1, read-only)
 
 Unset `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`) means no Markdown
