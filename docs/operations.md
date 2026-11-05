@@ -215,6 +215,18 @@ are stored in the local database like other conversation data (see
 Plaintext sensitivity below) and are sent to the chosen provider on each
 turn (the system prompt plus at most the newest 20 messages).
 
+A third provider, `local`, uses the loopback gateway already configured by
+`COMPANION_MODEL_JSON` (no API key, no cost); the persona's model field is
+display-only for it, and the provider shows as unavailable when no local
+model is configured.
+
+A two-persona chat can be marked **autotalk**: every 10 minutes the server
+looks for autotalk chats whose newest message is more than an hour old and
+lets the participant whose turn it is (they alternate, starting with the
+primary persona) post one short message. Failures are skipped silently, and
+cloud providers therefore spend at most one call per hour per chat. The
+toggle is per chat (`PATCH /api/chats/:id {autotalk}`) and defaults off.
+
 ## Markdown references (M1, read-only)
 
 Unset `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`) means no Markdown

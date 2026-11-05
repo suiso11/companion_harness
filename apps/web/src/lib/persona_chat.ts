@@ -3,7 +3,7 @@ import { fetchJson } from "./api.js";
 // Local mirrors of the persona-chat API payloads (server: /api/personas, /api/chats)
 // plus pure display helpers shared by ChatsPage and PersonasPage.
 
-export type PersonaProvider = "openai" | "deepseek";
+export type PersonaProvider = "openai" | "deepseek" | "local";
 
 export interface Persona {
   id: string;
@@ -34,11 +34,16 @@ export interface ChatSummary {
   updatedAt: number;
   preview: string;
   messageCount: number;
+  partnerId: string | null;
+  partnerName: string | null;
+  partnerAvatar: string | null;
+  autotalk: boolean;
 }
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
+  personaId: string | null;
   content: string;
   createdAt: number;
 }
@@ -61,6 +66,16 @@ export function previewOf(text: string, max = 40): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const chars = [...flat];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : flat;
+}
+
+/** Header/sidebar label: "A × B" with a partner, "A" alone. */
+export function chatTitle(chat: {
+  personaName: string;
+  partnerName: string | null;
+}): string {
+  return chat.partnerName
+    ? `${chat.personaName} × ${chat.partnerName}`
+    : chat.personaName;
 }
 
 // Persona routes take no Idempotency-Key. Kept out of lib/api.ts (which sits

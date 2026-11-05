@@ -107,6 +107,7 @@ import {
   voiceProfileFingerprint,
 } from "@companion/kernel";
 import {
+  type ChatRole,
   createOllamaGateway,
   createOpenAICompatibleGateway,
   type FetchImpl,
@@ -1020,6 +1021,13 @@ export async function startServer(
     if (trialTimer !== undefined) {
       clearInterval(trialTimer);
       trialTimer = undefined;
+    }
+  };
+  let autotalkTimer: NodeJS.Timeout | undefined;
+  const clearAutotalkTimer = (): void => {
+    if (autotalkTimer !== undefined) {
+      clearInterval(autotalkTimer);
+      autotalkTimer = undefined;
     }
   };
   /** Notification projector (always on; set inside try). */
@@ -3362,12 +3370,34 @@ export async function startServer(
           })
         : null;
     const personaChatStore = createPersonaChatStore({ db: handle.raw });
+    // Autotalk's local side: the same configured gateway/model as the agent.
+    const personaGateway = modelGateway;
     const personaChat = {
       store: personaChatStore,
       service: createPersonaChatService({
         store: personaChatStore,
         keys: config.personaProviders,
         now,
+        ...(personaGateway !== null
+          ? {
+              localChat: async (
+                messages: readonly { role: ChatRole; content: string }[],
+                maxOutputTokens: number,
+              ) =>
+                (
+                  await personaGateway.chat(
+                    {
+                      model: modelName,
+                      messages: [...messages],
+                      tools: [],
+                      maxOutputTokens,
+                      reasoning: "off",
+                    },
+                    { signal: AbortSignal.timeout(60_000) },
+                  )
+                ).text,
+            }
+          : {}),
       }),
     };
     monitor = createMonitorSampler({ now });
@@ -3498,6 +3528,7 @@ export async function startServer(
       // Every step is best-effort: the listen error carries the startup
       // failure even when a cleanup step also fails.
       clearTrialTimer();
+      clearAutotalkTimer();
       try {
         if (shadow !== null) {
           await shadow.stop();
@@ -3635,6 +3666,7 @@ export async function startServer(
         // The trial poll timer never runs while draining (checked every
         // tick below and cleared here first).
         clearTrialTimer();
+        clearAutotalkTimer();
         const safeReason = sanitizeShutdownReason(reason);
         logger.info("server.draining", { status: safeReason });
         // Stop shadow first: the in-flight gateway call aborts and is
@@ -3874,6 +3906,24 @@ export async function startServer(
       trialTimer.unref?.();
     }
 
+    // Autotalk: every 10 minutes the persona chat service continues due
+    // conversations (about hourly each). Single-flight; skipped while
+    // draining; the service never rejects, the catch is belt and braces.
+    let autotalkRunning = false;
+    autotalkTimer = setInterval(() => {
+      if (autotalkRunning) return;
+      if (controls.draining) return;
+      if (activeEngine?.isDraining()) return;
+      autotalkRunning = true;
+      void personaChat.service
+        .autotalk(now())
+        .catch(() => undefined)
+        .finally(() => {
+          autotalkRunning = false;
+        });
+    }, 600_000);
+    autotalkTimer.unref?.();
+
     // AV07 supervisor handshake: an EXPLICIT operator request relayed by the
     // supervisor (`stop` or `planned-restart`) runs the EXISTING graceful
     // shutdown (mark draining -> shadow/memory/notifications stop -> engine
@@ -3950,6 +4000,7 @@ export async function startServer(
   } catch (error) {
     removeSignalHandlers();
     clearTrialTimer();
+    clearAutotalkTimer();
     // Any post-start failure path stops the shadow worker FIRST (abort +
     // await in-flight gateway work: no orphan model calls), then the trial
     // runner (bounded by the drain budget), then the memory

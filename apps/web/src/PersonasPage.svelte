@@ -4,6 +4,7 @@ import { fetchJson, postJson } from "./lib/api.js";
 import {
   deleteJson,
   type Persona,
+  type PersonaProvider,
   type PersonaProviderInfo,
   patchJson,
 } from "./lib/persona_chat.js";
@@ -18,7 +19,7 @@ let saving = $state(false);
 let editingId = $state<string | null>(null);
 let name = $state("");
 let avatar = $state("");
-let provider = $state<"openai" | "deepseek">("openai");
+let provider = $state<PersonaProvider>("openai");
 let model = $state("");
 let systemPrompt = $state("");
 
@@ -115,13 +116,14 @@ async function remove(p: Persona): Promise<void> {
               {/each}
             </select>
           </label>
-          {#if info && !info.available}<p class="hint">APIキー未設定</p>{/if}
+          {#if info && !info.available}<p class="hint">{provider === "local" ? "ローカルモデルが未設定です" : "APIキー未設定"}</p>{/if}
           <label
             >モデル
             <input bind:value={model} list="persona-models" maxlength="256" required />
             <datalist id="persona-models">
               {#each info?.suggestedModels ?? [] as m (m)}<option value={m}></option>{/each}
             </datalist>
+          {#if provider === "local"}<p class="hint">サーバのローカルモデルを使います（モデル名は表示用）</p>{/if}
           </label>
           <label
             >システムプロンプト

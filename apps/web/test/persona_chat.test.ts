@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { previewOf, relativeTime } from "../src/lib/persona_chat.js";
+import { chatTitle, previewOf, relativeTime } from "../src/lib/persona_chat.js";
 
 describe("persona chat helpers", () => {
   test("relativeTime buckets", () => {
@@ -14,5 +14,10 @@ describe("persona chat helpers", () => {
   test("previewOf flattens and truncates by code point", () => {
     expect(previewOf("a\n\n b  c")).toBe("a b c");
     expect(previewOf("😀".repeat(5), 3)).toBe("😀😀😀…");
+  });
+
+  test("chatTitle joins partner", () => {
+    expect(chatTitle({ personaName: "A", partnerName: "B" })).toBe("A × B");
+    expect(chatTitle({ personaName: "A", partnerName: null })).toBe("A");
   });
 });

@@ -114,4 +114,78 @@ describe("persona chat store", () => {
     ).toThrow(/CHECK/);
     closeKernelDatabase(handle);
   });
+
+  it("autotalk: partner round-trip, per-row personaId, due listing", async () => {
+    const { handle, store } = await setup();
+    const luna = store.createPersona(input, 1);
+    const bob = store.createPersona(
+      { ...input, name: "Bob", provider: "local", model: "qwen" },
+      1,
+    );
+    const stranger = store.createPersona({ ...input, name: "Eve" }, 1);
+    expect(
+      store.createChat(luna.id, "x", 2, {
+        partnerId: "00000000-0000-4000-8000-000000000000",
+      }),
+    ).toBeNull();
+    const plain = store.createChat(luna.id, "plain", 2);
+    expect(plain).toMatchObject({
+      partnerId: null,
+      partnerName: null,
+      autotalk: false,
+    });
+    const chat = store.createChat(luna.id, "talk", 10, {
+      partnerId: bob.id,
+      autotalk: true,
+    });
+    const id = chat?.id as string;
+    expect(chat).toMatchObject({
+      partnerId: bob.id,
+      partnerName: "Bob",
+      partnerAvatar: "A",
+      autotalk: true,
+    });
+    // Autotalk on a partner-less chat is never due.
+    store.setAutotalk(plain?.id as string, true, 3);
+    expect(store.listAutotalkDue(1000, 10).map((c) => c.id)).toEqual([id]);
+
+    store.appendExchange(id, { text: "hi", reply: "yo" }, 20);
+    store.appendParticipantMessage(id, luna.id, "L", 30);
+    store.appendParticipantMessage(id, bob.id, "B", 40);
+    const { messages } = store.listMessages(id, { limit: 10 });
+    expect(messages.map((m) => m.personaId)).toEqual([
+      null,
+      luna.id,
+      luna.id,
+      bob.id,
+    ]);
+    expect(store.listAutotalkDue(40, 10)).toEqual([]);
+    expect(store.listAutotalkDue(41, 10).map((c) => c.id)).toEqual([id]);
+    expect(() =>
+      store.appendParticipantMessage(id, stranger.id, "x", 50),
+    ).toThrow(PersonaChatStoreError);
+
+    expect(store.setAutotalk(id, false, 60)?.autotalk).toBe(false);
+    expect(store.listAutotalkDue(1000, 10)).toEqual([]);
+    expect(store.setAutotalk(id, true, 61)?.autotalk).toBe(true);
+
+    // Ordering: oldest updated first, bounded by limit.
+    const older = store.createChat(luna.id, "older", 5, {
+      partnerId: bob.id,
+      autotalk: true,
+    });
+    expect(store.listAutotalkDue(1000, 10).map((c) => c.id)).toEqual([
+      older?.id,
+      id,
+    ]);
+    expect(store.listAutotalkDue(1000, 1)).toHaveLength(1);
+
+    store.deletePersona(bob.id);
+    expect(store.getChat(id)).toMatchObject({
+      partnerId: null,
+      partnerName: null,
+    });
+    expect(store.listAutotalkDue(1000, 10)).toEqual([]);
+    closeKernelDatabase(handle);
+  });
 });
