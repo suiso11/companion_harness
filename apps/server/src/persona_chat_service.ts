@@ -91,8 +91,14 @@ export function createPersonaChatService(options: {
     messages: readonly RemoteChatMessage[],
     maxOutputTokens: number,
   ) => Promise<string>;
+  /**
+   * Background admission for a LOCAL autotalk turn (the local model is shared
+   * with foreground chat). Returns a release or null when busy; hosted turns
+   * never acquire it.
+   */
+  acquireLocal?: () => (() => void) | null;
 }): PersonaChatService {
-  const { store, keys, now, localChat } = options;
+  const { store, keys, now, localChat, acquireLocal } = options;
   const createGateway = options.createGateway ?? createRemoteGateway;
   // Concurrent sends with the same clientKey share one model call; the store's
   // UNIQUE(chat_id, client_key) stays the cross-process backstop.
@@ -138,25 +144,33 @@ export function createPersonaChatService(options: {
     if (speaker === null || other === null) return false;
     const call = providerCall(speaker);
     if (call === null) return false;
-    const reply = await call([
-      {
-        role: "system",
-        content: `${speaker.systemPrompt}\n会話の相手は${other.name}です。`,
-      },
-      ...history.map((m) => ({
-        role:
-          m.personaId === speakerId
-            ? ("assistant" as const)
-            : ("user" as const),
-        content: m.content,
-      })),
-      {
-        role: "user",
-        content: history.length === 0 ? AUTOTALK_START_PROMPT : AUTOTALK_PROMPT,
-      },
-    ]);
-    store.appendParticipantMessage(chat.id, speakerId, reply, now());
-    return true;
+    const gate = speaker.provider === "local" ? acquireLocal : undefined;
+    const release = gate === undefined ? null : gate();
+    if (gate !== undefined && release === null) return false;
+    try {
+      const reply = await call([
+        {
+          role: "system",
+          content: `${speaker.systemPrompt}\n会話の相手は${other.name}です。`,
+        },
+        ...history.map((m) => ({
+          role:
+            m.personaId === speakerId
+              ? ("assistant" as const)
+              : ("user" as const),
+          content: m.content,
+        })),
+        {
+          role: "user",
+          content:
+            history.length === 0 ? AUTOTALK_START_PROMPT : AUTOTALK_PROMPT,
+        },
+      ]);
+      store.appendParticipantMessage(chat.id, speakerId, reply, now());
+      return true;
+    } finally {
+      release?.();
+    }
   }
 
   return {

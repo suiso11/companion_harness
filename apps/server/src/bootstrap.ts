@@ -120,7 +120,10 @@ import {
   type AutodispatchService,
   createAutodispatchService,
 } from "./autodispatch_service.js";
-import { createBackgroundResourceGate } from "./background_resource.js";
+import {
+  BACKGROUND_OWNER_AUTOTALK,
+  createBackgroundResourceGate,
+} from "./background_resource.js";
 import {
   assertGoogleReadonlyHintCompatible,
   CALENDAR_PROFILE_ENV,
@@ -3378,6 +3381,14 @@ export async function startServer(
         store: personaChatStore,
         keys: config.personaProviders,
         now,
+        acquireLocal: () => {
+          const reservation = backgroundResource.tryAcquire(
+            BACKGROUND_OWNER_AUTOTALK,
+          );
+          return reservation === null
+            ? null
+            : () => backgroundResource.release(reservation);
+        },
         ...(personaGateway !== null
           ? {
               localChat: async (

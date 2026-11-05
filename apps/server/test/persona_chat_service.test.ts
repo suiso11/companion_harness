@@ -190,7 +190,7 @@ describe("persona chat service", () => {
   describe("local provider and autotalk", () => {
     const HOUR = 3_600_000;
 
-    async function setupTalk() {
+    async function setupTalk(acquireLocal?: () => (() => void) | null) {
       const handle = openKernelDatabase(":memory:");
       await migrateKernelDatabase({ db: handle.raw });
       fixtures.push(() => closeKernelDatabase(handle));
@@ -237,6 +237,7 @@ describe("persona chat service", () => {
           }),
         }),
         localChat: local,
+        ...(acquireLocal === undefined ? {} : { acquireLocal }),
       });
       const texts = () =>
         store
@@ -320,6 +321,27 @@ describe("persona chat service", () => {
       expect(texts()).toEqual([]);
       expect(await service.autotalk(T0 + HOUR)).toBe(1);
       expect(texts()).toEqual(["from ada"]);
+    });
+
+    it("skips a local autotalk turn while the background gate is held", async () => {
+      const { service, local, texts } = await setupTalk(() => null);
+      // First pass: primary (hosted) writes. Second pass is the local partner.
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(0);
+      expect(local).not.toHaveBeenCalled();
+      expect(texts()).toEqual(["from ada"]);
+    });
+
+    it("holds and releases the gate around a local autotalk turn", async () => {
+      const release = vi.fn();
+      const acquire = vi.fn(() => release);
+      const { service, local, texts } = await setupTalk(acquire);
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(1);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(local).toHaveBeenCalledTimes(1);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(texts()).toEqual(["from ada", "from ben"]);
     });
 
     it("runs the same chat once for concurrent autotalk passes", async () => {

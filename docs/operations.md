@@ -225,7 +225,10 @@ looks for autotalk chats whose newest message is more than an hour old and
 lets the participant whose turn it is (they alternate, starting with the
 primary persona) post one short message. Failures are skipped silently, and
 cloud providers therefore spend at most one call per hour per chat. The
-toggle is per chat (`PATCH /api/chats/:id {autotalk}`) and defaults off.
+toggle is per chat (`PATCH /api/chats/:id {autotalk}`) and defaults off. A
+local autotalk turn takes the shared background admission first, so it never
+overlaps the foreground chat or memory/learning extraction on the local
+model; a busy gate skips that hour and the next sweep retries.
 
 ## Markdown references (M1, read-only)
 
