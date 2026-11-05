@@ -13,6 +13,8 @@ describe("feature navigation grouping", () => {
   test("primary nav keeps the everyday surfaces in order", () => {
     expect(PRIMARY_NAV.map((item) => item.path)).toEqual([
       "/",
+      "/chats",
+      "/personas",
       "/memory",
       "/tasks",
       "/proposals",
@@ -22,6 +24,8 @@ describe("feature navigation grouping", () => {
     ]);
     expect(PRIMARY_NAV.map((item) => item.label)).toEqual([
       "チャット",
+      "ペルソナ会話",
+      "ペルソナ",
       "記憶",
       "タスク・目的",
       "候補",

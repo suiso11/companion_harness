@@ -1059,6 +1059,27 @@ button[data-action-evidence="before"] {
   margin: 0 0 0.5rem;
   font-size: 1rem;
 }
+
+/* Persona pages replace the chat surface: the shell keeps the header, nav and
+ * auth relogin, while the agent transcript, composer and session panels are
+ * hidden and the feature slot takes the remaining height. */
+.shell.chat-hidden .topbar-start,
+.shell.chat-hidden .sessions,
+.shell.chat-hidden #conversation,
+.shell.chat-hidden .composer-bar,
+.shell.chat-hidden .agora-panel,
+.shell.chat-hidden .autodispatch-panel {
+  display: none;
+}
+.shell.chat-hidden .feature-panel-slot {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+.shell.chat-hidden .feature-panel {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
 #memory-search-form {
   display: flex;
   flex-wrap: wrap;

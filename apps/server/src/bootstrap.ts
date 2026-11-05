@@ -81,6 +81,7 @@ import {
   createM1ToolRegistrations,
   createMemorySearchRegistration,
   createMemoryStageRegistrations,
+  createPersonaChatStore,
   createReferenceManager,
   createToolBroker,
   createTrialProposalRegistrations,
@@ -168,6 +169,7 @@ import {
   type NotificationService,
   wrapRepoWithNotifications,
 } from "./notification_service.js";
+import { createPersonaChatService } from "./persona_chat_service.js";
 import {
   createReflectService,
   type ReflectService,
@@ -3359,6 +3361,15 @@ export async function startServer(
             lockoutMs: config.remote.lockoutMs,
           })
         : null;
+    const personaChatStore = createPersonaChatStore({ db: handle.raw });
+    const personaChat = {
+      store: personaChatStore,
+      service: createPersonaChatService({
+        store: personaChatStore,
+        keys: config.personaProviders,
+        now,
+      }),
+    };
     monitor = createMonitorSampler({ now });
     const { app, controls } = createApp({
       config,
@@ -3379,6 +3390,7 @@ export async function startServer(
       ...(memory !== null ? { memory } : {}),
       sessionPresence,
       ...(learning !== null ? { learningStore: learning.store } : {}),
+      personaChat,
       // Human STOP aborts only this service's owned in-flight intake; the
       // narrow app port never kills a worker/global process.
       ...(autodispatch !== null

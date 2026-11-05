@@ -644,6 +644,16 @@ export {
   recordSystemNotice,
   systemNoticeFingerprint,
 } from "./notifications.js";
+export {
+  type ChatMessageRow,
+  type ChatSummaryRow,
+  createPersonaChatStore,
+  type PersonaChatStore,
+  PersonaChatStoreError,
+  type PersonaChatStoreErrorCode,
+  type PersonaInput,
+  type PersonaRow,
+} from "./persona_chat.js";
 export type {
   PublicPageFetchOptions,
   PublicPageFetchResult,
