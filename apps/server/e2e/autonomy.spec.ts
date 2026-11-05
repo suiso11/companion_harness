@@ -53,14 +53,36 @@ async function controlReset(
   expect(res.ok()).toBe(true);
 }
 
+/**
+ * The shell renders before the async boot finishes POST /api/sessions, so
+ * localStorage can still be empty when the page looks ready. Wait for the UI
+ * to write `ch.sessionId` instead of asserting the immediate value.
+ */
+async function awaitSessionId(page: Page): Promise<string> {
+  await page.waitForFunction(
+    (): boolean => {
+      try {
+        const value = localStorage.getItem("ch.sessionId");
+        return value !== null && value.length > 0;
+      } catch {
+        return false;
+      }
+    },
+    undefined,
+    { timeout: 15_000 },
+  );
+  const id = await page.evaluate((): string | null =>
+    localStorage.getItem("ch.sessionId"),
+  );
+  expect(typeof id).toBe("string");
+  expect(id === null || id.length > 0).toBe(true);
+  return id as string;
+}
+
 async function bootAutonomy(page: Page): Promise<string> {
   await page.goto("/tasks");
   await page.locator("#autonomy-control-status").waitFor({ timeout: 15_000 });
-  const sessionId = await page.evaluate(() =>
-    localStorage.getItem("ch.sessionId"),
-  );
-  expect(typeof sessionId).toBe("string");
-  return sessionId as string;
+  return awaitSessionId(page);
 }
 
 interface ApiResult {
@@ -218,9 +240,7 @@ test.beforeEach(async ({ page, request }) => {
 test("statement-only correction preserves kind/scope/interpretation/bounds", async ({
   page,
 }) => {
-  const sessionId = await page.evaluate(() =>
-    localStorage.getItem("ch.sessionId"),
-  );
+  const sessionId = await awaitSessionId(page);
   const base = `/api/sessions/${sessionId}`;
   const from = "2020-01-01T00:00:00+00:00";
   const until = "2030-01-01T00:00:00+00:00";
@@ -276,9 +296,7 @@ test("statement-only correction preserves kind/scope/interpretation/bounds", asy
 test("held task resumes only onto an explicit replacement parent", async ({
   page,
 }) => {
-  const sessionId = await page.evaluate(() =>
-    localStorage.getItem("ch.sessionId"),
-  );
+  const sessionId = await awaitSessionId(page);
   const base = `/api/sessions/${sessionId}`;
   await createPurposeUi(page, {
     scope: "work",
@@ -371,9 +389,7 @@ test("selection clears drafts and late detail responses never restore them", asy
   ).toBe("");
 
   // Hold the real GET detail for A; B must still win, late A must not clobber.
-  const sessionId = await page.evaluate(() =>
-    localStorage.getItem("ch.sessionId"),
-  );
+  const sessionId = await awaitSessionId(page);
   const purposes = await pageApi(
     page,
     "GET",
@@ -517,9 +533,7 @@ test("selection clears drafts and late detail responses never restore them", asy
 test("stale drafts cannot apply after a backend mutation plus refresh", async ({
   page,
 }) => {
-  const sessionId = await page.evaluate(() =>
-    localStorage.getItem("ch.sessionId"),
-  );
+  const sessionId = await awaitSessionId(page);
   const base = `/api/sessions/${sessionId}`;
   await createPurposeUi(page, {
     scope: "work",

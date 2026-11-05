@@ -195,6 +195,41 @@ registration and NO tool in the model-facing tool list (fail-closed).
    advertises the tool, and invalid JSON / non-loopback URLs fail startup
    closed (never silently disabled).
 
+## Persona chat (hosted providers)
+
+Persona chat (`/chats`, `/personas`, `/api/personas*`, `/api/chats*`) is
+always available; there is no feature flag. A provider is usable once its
+host environment variable holds a key, otherwise sends answer a fixed 409
+(`provider_unavailable`):
+
+- `COMPANION_OPENAI_API_KEY` (host `api.openai.com`)
+- `COMPANION_DEEPSEEK_API_KEY` (host `api.deepseek.com`)
+
+Hosts are fixed in code (https only, no configurable base URL). A present
+key must be 1..4096 printable ASCII characters (0x21..0x7e) or startup fails
+closed with a fixed message. Keys are read from the environment only: they
+never reach the database, config JSON, logs or API responses, and upstream
+error text is never surfaced (a provider failure is a fixed 502
+`provider_failed` and nothing is stored). Persona prompts and chat messages
+are stored in the local database like other conversation data (see
+Plaintext sensitivity below) and are sent to the chosen provider on each
+turn (the system prompt plus at most the newest 20 messages).
+
+A third provider, `local`, uses the loopback gateway already configured by
+`COMPANION_MODEL_JSON` (no API key, no cost); the persona's model field is
+display-only for it, and the provider shows as unavailable when no local
+model is configured.
+
+A two-persona chat can be marked **autotalk**: every 10 minutes the server
+looks for autotalk chats whose newest message is more than an hour old and
+lets the participant whose turn it is (they alternate, starting with the
+primary persona) post one short message. Failures are skipped silently, and
+cloud providers therefore spend at most one call per hour per chat. The
+toggle is per chat (`PATCH /api/chats/:id {autotalk}`) and defaults off. A
+local autotalk turn takes the shared background admission first, so it never
+overlaps the foreground chat or memory/learning extraction on the local
+model; a busy gate skips that hour and the next sweep retries.
+
 ## Markdown references (M1, read-only)
 
 Unset `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`) means no Markdown

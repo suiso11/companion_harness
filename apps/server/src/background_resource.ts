@@ -50,6 +50,7 @@ export const BACKGROUND_OWNER_MEMORY_IDLE_DISTILL =
 export const BACKGROUND_OWNER_AUTODISPATCH = "autodispatch" as const;
 export const BACKGROUND_OWNER_SPONTANEOUS = "spontaneous" as const;
 export const BACKGROUND_OWNER_REFLECT = "reflect" as const;
+export const BACKGROUND_OWNER_AUTOTALK = "autotalk" as const;
 
 export type BackgroundOwner =
   | typeof BACKGROUND_OWNER_MEMORY_EXTRACTION
@@ -58,7 +59,8 @@ export type BackgroundOwner =
   | typeof BACKGROUND_OWNER_MEMORY_IDLE_DISTILL
   | typeof BACKGROUND_OWNER_AUTODISPATCH
   | typeof BACKGROUND_OWNER_SPONTANEOUS
-  | typeof BACKGROUND_OWNER_REFLECT;
+  | typeof BACKGROUND_OWNER_REFLECT
+  | typeof BACKGROUND_OWNER_AUTOTALK;
 
 /** One held admission lease. Opaque outside the gate. */
 export interface BackgroundReservation {

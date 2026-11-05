@@ -25,6 +25,8 @@ import {
   CancelRunResponseSchema,
   ConversationProposalAcceptRequestSchema,
   ConversationProposalRejectRequestSchema,
+  CreateChatRequestSchema,
+  CreatePersonaRequestSchema,
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
   EventsQuerySchema,
@@ -61,6 +63,7 @@ import {
   NotificationListResponseSchema,
   NotificationReadQuerySchema,
   NotificationViewSchema,
+  PostChatMessageRequestSchema,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   PostRetryRequestSchema,
@@ -98,6 +101,8 @@ import {
   TrialProposalViewSchema,
   TrialStageRequestSchema,
   trialOperationIsReadOnly,
+  UpdateChatRequestSchema,
+  UpdatePersonaRequestSchema,
 } from "@companion/contracts";
 import {
   ActionNotCancellableError,
@@ -122,6 +127,8 @@ import {
   LearningVersionConflictError,
   NotificationKeyConflictError,
   NotificationProjectionResetError,
+  type PersonaChatStore,
+  PersonaChatStoreError,
   ProposalHashMismatchError,
   ProposalStateConflictError,
   PurposeNotConfirmableError,
@@ -157,6 +164,10 @@ import {
   createWebSearchHealth,
   type MonitorSampler,
 } from "./monitor.js";
+import {
+  type PersonaChatService,
+  PersonaChatServiceError,
+} from "./persona_chat_service.js";
 import {
   hashRemoteToken,
   issueRemoteToken,
@@ -219,6 +230,8 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/monitor",
   "/character",
   "/pet",
+  "/chats",
+  "/personas",
 ]);
 
 /**
@@ -544,6 +557,12 @@ export interface CreateAppDeps {
    * at a fixed 404; no route can approve/reject here.
    */
   learningStore?: LearningStore | null;
+  /**
+   * Persona chat (hosted providers). Absent keeps every `/api/personas*` and
+   * `/api/chats*` route at a fixed 404. Bootstrap always supplies it; keys
+   * only decide whether a provider is `available`.
+   */
+  personaChat?: { store: PersonaChatStore; service: PersonaChatService };
 }
 
 export interface ServerControls {
@@ -1482,12 +1501,58 @@ function mapDomainError(c: Context, error: unknown): Response {
   return apiError(c, 500, "internal_error", "internal error");
 }
 
+async function parseJsonBody<S extends z.ZodType>(
+  c: Context,
+  schema: S,
+): Promise<z.output<S> | null> {
+  const raw = await readJsonBody(c);
+  if (!raw.ok) return null;
+  const parsed = schema.safeParse(raw.value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Persona-chat errors to fixed bodies; anything else falls to the shared map. */
+function personaChatError(c: Context, error: unknown): Response {
+  if (
+    (error instanceof PersonaChatServiceError &&
+      (error.code === "chat_not_found" ||
+        error.code === "persona_not_found")) ||
+    (error instanceof PersonaChatStoreError && error.code === "chat_not_found")
+  ) {
+    return apiError(c, 404, "not_found", "resource not found");
+  }
+  if (error instanceof PersonaChatServiceError) {
+    return error.code === "provider_unavailable"
+      ? c.json(
+          {
+            error: {
+              code: "provider_unavailable",
+              message: "provider unavailable",
+            },
+          },
+          409,
+        )
+      : c.json(
+          {
+            error: {
+              code: "provider_failed",
+              message: "provider request failed",
+            },
+          },
+          502,
+        );
+  }
+  if (error instanceof PersonaChatStoreError) return validationError(c);
+  return mapDomainError(c, error);
+}
+
 export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const { config, repo, engine } = deps;
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
   const learningStore = deps.learningStore ?? null;
+  const personaChat = deps.personaChat;
   const autodispatchForeground = deps.autodispatchForeground;
   const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
@@ -7095,6 +7160,184 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       }
     },
   );
+
+  // Persona chat: persona CRUD, conversation list, history, send. JSON only;
+  // sends are replay-safe through the body `clientKey` (no Idempotency-Key).
+  if (personaChat !== undefined) {
+    const { store: chatStore, service: chatService } = personaChat;
+
+    app.get("/api/personas", (c) => {
+      if (!strictQuery(c, []).ok) return validationError(c);
+      try {
+        return c.json(
+          {
+            personas: chatStore.listPersonas(),
+            providers: chatService.providers(),
+          },
+          200,
+        );
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.post("/api/personas", async (c) => {
+      const body = await parseJsonBody(c, CreatePersonaRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        return c.json(chatStore.createPersona(body, now()), 201);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.patch("/api/personas/:id", async (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      const body = await parseJsonBody(c, UpdatePersonaRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        const persona = chatStore.updatePersona(id.id, body, now());
+        return persona === null
+          ? apiError(c, 404, "not_found", "resource not found")
+          : c.json(persona, 200);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.delete("/api/personas/:id", (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      if (!strictQuery(c, []).ok) return validationError(c);
+      try {
+        return chatStore.deletePersona(id.id)
+          ? c.json({ ok: true }, 200)
+          : apiError(c, 404, "not_found", "resource not found");
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.get("/api/chats", (c) => {
+      if (!strictQuery(c, []).ok) return validationError(c);
+      try {
+        return c.json({ chats: chatStore.listChats() }, 200);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.post("/api/chats", async (c) => {
+      const body = await parseJsonBody(c, CreateChatRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        if (
+          body.partnerId !== undefined &&
+          (body.partnerId === body.personaId ||
+            chatStore.getPersona(body.partnerId) === null)
+        ) {
+          return validationError(c);
+        }
+        const chat = chatStore.createChat(body.personaId, body.title, now(), {
+          ...(body.partnerId !== undefined
+            ? { partnerId: body.partnerId }
+            : {}),
+          ...(body.autotalk !== undefined ? { autotalk: body.autotalk } : {}),
+        });
+        return chat === null
+          ? apiError(c, 404, "not_found", "resource not found")
+          : c.json(chat, 201);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.patch("/api/chats/:id", async (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      const body = await parseJsonBody(c, UpdateChatRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        let chat = chatStore.getChat(id.id);
+        if (body.title !== undefined) {
+          chat = chatStore.renameChat(id.id, body.title, now());
+        }
+        if (chat !== null && body.autotalk !== undefined) {
+          chat = chatStore.setAutotalk(id.id, body.autotalk, now());
+        }
+        return chat === null
+          ? apiError(c, 404, "not_found", "resource not found")
+          : c.json(chat, 200);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.delete("/api/chats/:id", (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      if (!strictQuery(c, []).ok) return validationError(c);
+      try {
+        return chatStore.deleteChat(id.id)
+          ? c.json({ ok: true }, 200)
+          : apiError(c, 404, "not_found", "resource not found");
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.get("/api/chats/:id/messages", (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      const query = strictQuery(c, ["limit", "before"]);
+      if (!query.ok) return validationError(c);
+      const { limit: rawLimit, before } = query.values;
+      const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+      if (
+        !/^\d{1,3}$/.test(rawLimit ?? "50") ||
+        limit < 1 ||
+        limit > 100 ||
+        (before !== undefined && !isUuidV4(before))
+      ) {
+        return validationError(c);
+      }
+      try {
+        const chat = chatStore.getChat(id.id);
+        if (chat === null) {
+          return apiError(c, 404, "not_found", "resource not found");
+        }
+        const page = chatStore.listMessages(id.id, {
+          limit,
+          ...(before !== undefined ? { beforeId: before } : {}),
+        });
+        return c.json({ chat, ...page }, 200);
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+
+    app.post("/api/chats/:id/messages", async (c) => {
+      const id = requireUuid(c, c.req.param("id"), "id");
+      if ("response" in id) return id.response;
+      const body = await parseJsonBody(c, PostChatMessageRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        return c.json(
+          await chatService.send({
+            chatId: id.id,
+            text: body.text,
+            ...(body.clientKey !== undefined
+              ? { clientKey: body.clientKey }
+              : {}),
+          }),
+          200,
+        );
+      } catch (error) {
+        return personaChatError(c, error);
+      }
+    });
+  }
 
   return { app, controls };
 }
