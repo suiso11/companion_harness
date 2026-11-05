@@ -142,9 +142,7 @@ onMount(() => {
               material.alphaTest = mode.blend === true ? 0 : 0.5;
               material.transparent = mode.blend === true;
               material.side =
-                mode.doubleSide === true
-                  ? THREE.DoubleSide
-                  : THREE.FrontSide;
+                mode.doubleSide === true ? THREE.DoubleSide : THREE.FrontSide;
               material.visible = mode.hidden !== true;
               material.needsUpdate = true;
             }
