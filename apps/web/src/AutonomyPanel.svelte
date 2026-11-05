@@ -1190,334 +1190,493 @@ $effect(() => {
 });
 </script>
 
+{#snippet purposeMeta(purpose: PurposeRow)}
+  <span class="autonomy-chips">
+    <span class="autonomy-chip">{purpose.kind}</span>
+    <span class="autonomy-chip autonomy-chip-state">{purpose.status}</span>
+    <span class="autonomy-chip">{purpose.sourceKind}</span>
+    {#if !purpose.explicit}
+      <span class="autonomy-chip">推測</span>
+    {/if}
+  </span>
+  {#if purpose.validFrom.length > 0 || purpose.validUntil.length > 0}
+    <span
+      class="autonomy-range"
+      data-open-start={purpose.validFrom.length === 0}
+      data-open-end={purpose.validUntil.length === 0}
+    >
+      <span class="autonomy-range-bar"><span class="autonomy-sr">期間</span></span>
+      <span class="autonomy-range-end" title={purpose.validFrom}
+        >{purpose.validFrom.length > 0 ? purpose.validFrom : "—"}</span
+      >
+      <span class="autonomy-range-end" title={purpose.validUntil}
+        ><span class="autonomy-sr">〜</span>{purpose.validUntil.length > 0
+          ? purpose.validUntil
+          : "—"}</span
+      >
+    </span>
+  {/if}
+{/snippet}
+
 <section id="autonomy" aria-label="自律メモの管理" class="feature-panel">
-  <h2>自律メモの管理</h2>
-  <div id="autonomy-control">
-    <p id="autonomy-control-status" aria-live="polite">{controlStatus}</p>
-    <button
-      id="autonomy-stop-button"
-      type="button"
-      onclick={() => void setControl(true)}
+  <header class="autonomy-bar">
+    <div
+      id="autonomy-control"
+      data-state={controlStatus.length === 0
+        ? "unknown"
+        : controlStatus.includes("停止中")
+          ? "paused"
+          : "running"}
     >
-      自律動作を止める／自律作業を止める
-    </button>
-    <button
-      id="autonomy-resume-button"
-      type="button"
-      onclick={() => void setControl(false)}
-    >
-      自律動作を再開／自律作業を再開
-    </button>
-  </div>
-  <form
-    id="autonomy-purpose-form"
-    onsubmit={(event) => {
-      event.preventDefault();
-      void createPurpose();
-    }}
-  >
-    <label>
-      範囲
-      <input
-        id="autonomy-purpose-scope"
-        type="text"
-        autocomplete="off"
-        bind:value={purposeScope}
-      />
-    </label>
-    <label>
-      目的の内容
-      <textarea id="autonomy-purpose-statement" bind:value={purposeStatement}
-      ></textarea>
-    </label>
-    <label>
-      種類
-      <select id="autonomy-purpose-kind" bind:value={purposeKind}>
-        <option value="goal">目標</option>
-        <option value="preference">好み</option>
-        <option value="constraint">制約</option>
-        <option value="permission">許可の記録</option>
-        <option value="wish">希望</option>
-        <option value="temporary_state">一時状態</option>
-      </select>
-    </label>
-    <label>
-      出所
-      <select id="autonomy-purpose-source" bind:value={purposeSource}>
-        <option value="user">本人</option>
-        <option value="self">記録</option>
-        <option value="external">外部</option>
-      </select>
-    </label>
-    <label>
-      本人の明示的な記録（外すと推測の記録）
-      <input id="autonomy-purpose-explicit" type="checkbox" bind:checked={purposeExplicit} />
-    </label>
-    <label>
-      解釈（元の記録と別に保存）
-      <textarea id="autonomy-purpose-interpretation" bind:value={purposeInterpretation}></textarea>
-    </label>
-    <label>
-      適用開始（任意・厳密な日時）
-      <input
-        id="autonomy-purpose-valid-from"
-        type="text"
-        autocomplete="off"
-        bind:value={purposeValidFrom}
-      />
-    </label>
-    <label>
-      適用終了（任意・厳密な日時）
-      <input
-        id="autonomy-purpose-valid-until"
-        type="text"
-        autocomplete="off"
-        bind:value={purposeValidUntil}
-      />
-    </label>
-    <button id="autonomy-purpose-create" type="submit">目的を記録</button>
-  </form>
-  <ul id="autonomy-purpose-list">
-    {#each purposes as purpose (purpose.id)}
-      <li id={purpose.id}>
+      <h2>自律メモの管理</h2>
+      <span class="autonomy-dot" aria-hidden="true"></span>
+      <p id="autonomy-control-status" aria-live="polite">{controlStatus}</p>
+      <div class="autonomy-segmented" role="group" aria-label="自律動作の切り替え">
         <button
+          id="autonomy-stop-button"
           type="button"
-          onclick={() => void selectPurpose(purpose.id)}
+          onclick={() => void setControl(true)}
         >
-          {purpose.statement}（{purpose.kind}・{purpose.status}{purpose.validFrom
-              .length > 0 || purpose.validUntil.length > 0
-            ? `・期間 ${purpose.validFrom.length > 0 ? purpose.validFrom : "指定なし"}〜${purpose.validUntil.length > 0 ? purpose.validUntil : "指定なし"}`
-            : ""}）
+          自律動作を止める／自律作業を止める
         </button>
-        {#if isConversationAdoptedGoal(purpose)}
-          <span class="goal-unconfirmed-badge">{UNCONFIRMED_GOAL_BADGE}</span>
+        <button
+          id="autonomy-resume-button"
+          type="button"
+          onclick={() => void setControl(false)}
+        >
+          自律動作を再開／自律作業を再開
+        </button>
+      </div>
+    </div>
+    <div class="autonomy-log">
+      <p id="autonomy-status" aria-live="polite">{statusText}</p>
+      <p id="autonomy-pending" aria-live="polite">{pendingLine}</p>
+      <button
+        id="autonomy-retry-button"
+        type="button"
+        hidden={pendingLine.length === 0}
+        onclick={() => void retryPendingAutonomy()}
+      >
+        同じ内容で再送
+      </button>
+    </div>
+  </header>
+
+  <div class="autonomy-rail">
+    <h3 class="autonomy-heading">
+      目的<span class="autonomy-count">{purposes.length}</span>
+    </h3>
+    <ul id="autonomy-purpose-list" class="autonomy-cards">
+      {#each purposes as purpose (purpose.id)}
+        <li
+          id={purpose.id}
+          class="autonomy-card"
+          data-status={purpose.status}
+          aria-current={selectedPurpose === purpose.id ? "true" : undefined}
+        >
           <button
-            id={`autonomy-purpose-confirm-${purpose.id}`}
             type="button"
-            onclick={() => void confirmGoal(purpose.id)}
+            class="autonomy-card-main"
+            onclick={() => void selectPurpose(purpose.id)}
           >
-            {CONFIRM_GOAL_LABEL}
+            <span class="autonomy-card-title">{purpose.statement}</span>
+            {@render purposeMeta(purpose)}
           </button>
+          {#if isConversationAdoptedGoal(purpose)}
+            <span class="autonomy-card-confirm">
+              <span class="goal-unconfirmed-badge">{UNCONFIRMED_GOAL_BADGE}</span>
+              <button
+                id={`autonomy-purpose-confirm-${purpose.id}`}
+                type="button"
+                onclick={() => void confirmGoal(purpose.id)}
+              >
+                {CONFIRM_GOAL_LABEL}
+              </button>
+            </span>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  </div>
+
+  <div class="autonomy-work">
+    <div
+      id="autonomy-purpose-detail"
+      class="autonomy-focus"
+      hidden={!purposeDetailVisible}
+    >
+      {#each purposes as purpose (purpose.id)}
+        {#if purpose.id === selectedPurpose}
+          <div class="autonomy-focus-head" data-status={purpose.status}>
+            <p class="autonomy-eyebrow">選択中の目的</p>
+            <p class="autonomy-focus-title">{purpose.statement}</p>
+            {@render purposeMeta(purpose)}
+          </div>
         {/if}
-      </li>
-    {/each}
-  </ul>
-  <div id="autonomy-purpose-detail" hidden={!purposeDetailVisible}>
-    <pre id="autonomy-purpose-detail-body">{purposeDetailBody}</pre>
-    <label>
-      訂正内容
-      <textarea id="autonomy-purpose-correct-input" bind:value={purposeCorrectInput}></textarea>
-    </label>
-    <label>
-      適用開始の訂正（空で維持・clearで解除）
-      <input
-        id="autonomy-purpose-correct-valid-from"
-        type="text"
-        autocomplete="off"
-        bind:value={purposeCorrectValidFrom}
-      />
-    </label>
-    <label>
-      適用終了の訂正（空で維持・clearで解除）
-      <input
-        id="autonomy-purpose-correct-valid-until"
-        type="text"
-        autocomplete="off"
-        bind:value={purposeCorrectValidUntil}
-      />
-    </label>
-    <button
-      id="autonomy-purpose-correct-button"
-      type="button"
-      onclick={() => void correctPurpose()}
-    >
-      訂正を記録
-    </button>
-    <button
-      id="autonomy-purpose-revoke-button"
-      type="button"
-      onclick={() => void transitionPurpose("revoke")}
-    >
-      取り消す
-    </button>
-    <button
-      id="autonomy-purpose-achieve-button"
-      type="button"
-      onclick={() => void transitionPurpose("achieve")}
-    >
-      達成にする
-    </button>
-    <button
-      id="autonomy-purpose-history-more-button"
-      type="button"
-      hidden={!purposeHistoryMoreVisible}
-      onclick={() => void loadMorePurposeHistory()}
-    >
-      履歴をもっと見る
-    </button>
-    <p id="autonomy-conflicts" aria-live="polite">{conflictsText}</p>
-    <button
-      id="autonomy-conflict-mark-button"
-      type="button"
-      onclick={() => void markConflict()}
-    >
-      競合として記録
-    </button>
-  </div>
-  <form
-    id="autonomy-task-form"
-    onsubmit={(event) => {
-      event.preventDefault();
-      void createTask();
-    }}
-  >
-    <label>
-      作業内容
-      <input
-        id="autonomy-task-title"
-        type="text"
-        autocomplete="off"
-        bind:value={taskTitle}
-      />
-    </label>
-    <label>
-      種類
-      <select id="autonomy-task-kind" bind:value={taskKind}>
-        <option value="chat">相談</option>
-        <option value="wish">希望</option>
-        <option value="problem">課題</option>
-        <option value="task">作業</option>
-      </select>
-    </label>
-    <label>
-      話者
-      <select id="autonomy-task-speaker" bind:value={taskSpeaker}>
-        <option value="user">本人</option>
-        <option value="self">記録</option>
-        <option value="external">外部</option>
-      </select>
-    </label>
-    <label>
-      範囲
-      <input
-        id="autonomy-task-scope"
-        type="text"
-        autocomplete="off"
-        bind:value={taskScope}
-      />
-    </label>
-    <label>
-      親の目的
-      <select id="autonomy-task-parent-mode" bind:value={taskParentMode}>
-        <option value="attached">選択中の目的に結びつける</option>
-        <option value="standalone">単独で記録</option>
-      </select>
-    </label>
-    <label>
-      期限（任意・厳密な日時）
-      <input
-        id="autonomy-task-deadline"
-        type="text"
-        autocomplete="off"
-        bind:value={taskDeadline}
-      />
-    </label>
-    <button id="autonomy-task-create" type="submit">作業を記録</button>
-  </form>
-  <ul id="autonomy-task-list">
-    {#each tasks as task (task.id)}
-      <li id={task.id}>
-        <button type="button" onclick={() => void selectTask(task.id)}>
-          {task.title}（{task.kind}・{task.status}{task.deadline.length > 0
-            ? `・期限 ${task.deadline}`
-            : ""}）
+      {/each}
+      <div class="autonomy-ledger-block">
+        <p class="autonomy-eyebrow">記録と履歴</p>
+        <pre id="autonomy-purpose-detail-body" class="autonomy-ledger">{purposeDetailBody}</pre>
+        <button
+          id="autonomy-purpose-history-more-button"
+          type="button"
+          class="autonomy-link"
+          hidden={!purposeHistoryMoreVisible}
+          onclick={() => void loadMorePurposeHistory()}
+        >
+          履歴をもっと見る
         </button>
-      </li>
-    {/each}
-  </ul>
-  <div id="autonomy-task-detail" hidden={!taskDetailVisible}>
-    <pre id="autonomy-task-detail-body">{taskDetailBody}</pre>
-    <label>
-      保留理由
-      <textarea id="autonomy-task-hold-input" bind:value={taskHoldInput}></textarea>
-    </label>
-    <label>
-      再開の条件
-      <textarea id="autonomy-task-reconsider-input" bind:value={taskReconsiderInput}></textarea>
-    </label>
-    <label>
-      再開の根拠の種類
-      <select id="autonomy-task-evidence-kind" bind:value={taskEvidenceKind}>
-        <option value="user_confirmed">本人が確認</option>
-        <option value="parent_changed">親の変更</option>
-        <option value="dependency_completed">依存作業の完了</option>
-        <option value="correction_applied">訂正の反映</option>
-        <option value="external_input">外部からの入力</option>
-      </select>
-    </label>
-    <label>
-      再開の根拠
-      <textarea id="autonomy-task-resume-input" bind:value={taskResumeInput}></textarea>
-    </label>
-    <label>
-      置き換え先の目的を使う
-      <input
-        id="autonomy-task-resume-use-parent"
-        type="checkbox"
-        bind:checked={taskResumeUseParent}
-      />
-    </label>
-    <button
-      id="autonomy-task-start-button"
-      type="button"
-      onclick={() => void transitionTask("start")}
-    >
-      開始
-    </button>
-    <button
-      id="autonomy-task-hold-button"
-      type="button"
-      onclick={() => void holdTask()}
-    >
-      保留
-    </button>
-    <button
-      id="autonomy-task-resume-button"
-      type="button"
-      onclick={() => void resumeTask()}
-    >
-      再開
-    </button>
-    <button
-      id="autonomy-task-complete-button"
-      type="button"
-      onclick={() => void transitionTask("complete")}
-    >
-      完了
-    </button>
-    <button
-      id="autonomy-task-cancel-button"
-      type="button"
-      onclick={() => void transitionTask("cancel")}
-    >
-      中止
-    </button>
-    <button
-      id="autonomy-task-history-more-button"
-      type="button"
-      hidden={!taskHistoryMoreVisible}
-      onclick={() => void loadMoreTaskHistory()}
-    >
-      履歴をもっと見る
-    </button>
+      </div>
+      <div class="autonomy-action-group">
+        <label class="autonomy-field">
+          <span>訂正内容</span>
+          <textarea
+            id="autonomy-purpose-correct-input"
+            rows="2"
+            bind:value={purposeCorrectInput}
+          ></textarea>
+        </label>
+        <div class="autonomy-correct-row">
+          <label class="autonomy-field">
+            <span>適用開始の訂正（空で維持・clearで解除）</span>
+            <input
+              id="autonomy-purpose-correct-valid-from"
+              type="text"
+              autocomplete="off"
+              bind:value={purposeCorrectValidFrom}
+            />
+          </label>
+          <label class="autonomy-field">
+            <span>適用終了の訂正（空で維持・clearで解除）</span>
+            <input
+              id="autonomy-purpose-correct-valid-until"
+              type="text"
+              autocomplete="off"
+              bind:value={purposeCorrectValidUntil}
+            />
+          </label>
+          <button
+            id="autonomy-purpose-correct-button"
+            type="button"
+            class="autonomy-primary"
+            onclick={() => void correctPurpose()}
+          >
+            訂正を記録
+          </button>
+        </div>
+        <div class="autonomy-btnrow autonomy-btnrow-end">
+          <button
+            id="autonomy-purpose-achieve-button"
+            type="button"
+            onclick={() => void transitionPurpose("achieve")}
+          >
+            達成にする
+          </button>
+          <button
+            id="autonomy-purpose-revoke-button"
+            type="button"
+            class="autonomy-danger"
+            onclick={() => void transitionPurpose("revoke")}
+          >
+            取り消す
+          </button>
+        </div>
+      </div>
+      <div
+        class="autonomy-conflict-row"
+        data-conflict={conflictsText.includes("未解決の競合")}
+      >
+        <p id="autonomy-conflicts" aria-live="polite">{conflictsText}</p>
+        <button
+          id="autonomy-conflict-mark-button"
+          type="button"
+          onclick={() => void markConflict()}
+        >
+          競合として記録
+        </button>
+      </div>
+    </div>
+
+    <div class="autonomy-flow">
+      <h3 class="autonomy-heading">
+        すべての作業<span class="autonomy-count">{tasks.length}</span>
+      </h3>
+      <ul id="autonomy-task-list" class="autonomy-rows">
+        {#each tasks as task (task.id)}
+          <li
+            id={task.id}
+            class="autonomy-row"
+            data-status={task.status}
+            aria-current={selectedTask === task.id ? "true" : undefined}
+          >
+            <button
+              type="button"
+              class="autonomy-row-main"
+              onclick={() => void selectTask(task.id)}
+            >
+              <span class="autonomy-row-title">{task.title}</span>
+              <span class="autonomy-chips">
+                <span class="autonomy-chip">{task.kind}</span>
+                <span class="autonomy-chip autonomy-chip-state">{task.status}</span>
+                {#if task.deadline.length > 0}
+                  <span class="autonomy-chip autonomy-chip-deadline" title={task.deadline}
+                    >期限 {task.deadline}</span
+                  >
+                {/if}
+              </span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+      <div
+        id="autonomy-task-detail"
+        class="autonomy-expand"
+        hidden={!taskDetailVisible}
+      >
+        <div class="autonomy-ledger-block">
+          <p class="autonomy-eyebrow">選択中の作業</p>
+          <pre id="autonomy-task-detail-body" class="autonomy-ledger">{taskDetailBody}</pre>
+          <button
+            id="autonomy-task-history-more-button"
+            type="button"
+            class="autonomy-link"
+            hidden={!taskHistoryMoreVisible}
+            onclick={() => void loadMoreTaskHistory()}
+          >
+            履歴をもっと見る
+          </button>
+        </div>
+        <div class="autonomy-btnrow">
+          <button
+            id="autonomy-task-start-button"
+            type="button"
+            class="autonomy-primary"
+            onclick={() => void transitionTask("start")}
+          >
+            開始
+          </button>
+          <button
+            id="autonomy-task-complete-button"
+            type="button"
+            onclick={() => void transitionTask("complete")}
+          >
+            完了
+          </button>
+          <span class="autonomy-btnrow-spacer"></span>
+          <button
+            id="autonomy-task-cancel-button"
+            type="button"
+            class="autonomy-danger"
+            onclick={() => void transitionTask("cancel")}
+          >
+            中止
+          </button>
+        </div>
+        <div class="autonomy-action-pair">
+          <div class="autonomy-action-group">
+            <div class="autonomy-fields">
+              <label class="autonomy-field autonomy-field-wide">
+                <span>保留理由</span>
+                <textarea id="autonomy-task-hold-input" bind:value={taskHoldInput}></textarea>
+              </label>
+              <label class="autonomy-field autonomy-field-wide">
+                <span>再開の条件</span>
+                <textarea
+                  id="autonomy-task-reconsider-input"
+                  bind:value={taskReconsiderInput}
+                ></textarea>
+              </label>
+            </div>
+            <div class="autonomy-btnrow">
+              <button
+                id="autonomy-task-hold-button"
+                type="button"
+                onclick={() => void holdTask()}
+              >
+                保留
+              </button>
+            </div>
+          </div>
+          <div class="autonomy-action-group">
+            <div class="autonomy-fields">
+              <label class="autonomy-field autonomy-field-wide">
+                <span>再開の根拠の種類</span>
+                <select id="autonomy-task-evidence-kind" bind:value={taskEvidenceKind}>
+                  <option value="user_confirmed">本人が確認</option>
+                  <option value="parent_changed">親の変更</option>
+                  <option value="dependency_completed">依存作業の完了</option>
+                  <option value="correction_applied">訂正の反映</option>
+                  <option value="external_input">外部からの入力</option>
+                </select>
+              </label>
+              <label class="autonomy-field autonomy-field-wide">
+                <span>再開の根拠</span>
+                <textarea id="autonomy-task-resume-input" bind:value={taskResumeInput}
+                ></textarea>
+              </label>
+              <label class="autonomy-check">
+                <input
+                  id="autonomy-task-resume-use-parent"
+                  type="checkbox"
+                  bind:checked={taskResumeUseParent}
+                />
+                <span>置き換え先の目的を使う</span>
+              </label>
+            </div>
+            <div class="autonomy-btnrow">
+              <button
+                id="autonomy-task-resume-button"
+                type="button"
+                onclick={() => void resumeTask()}
+              >
+                再開
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-  <p id="autonomy-status" aria-live="polite">{statusText}</p>
-  <p id="autonomy-pending" aria-live="polite">{pendingLine}</p>
-  <button
-    id="autonomy-retry-button"
-    type="button"
-    onclick={() => void retryPendingAutonomy()}
-  >
-    同じ内容で再送
-  </button>
+
+  <div class="autonomy-dock">
+    <form
+      id="autonomy-purpose-form"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createPurpose();
+      }}
+    >
+      <h3 class="autonomy-heading">目的を追加</h3>
+      <div class="autonomy-form-group">
+        <label class="autonomy-field autonomy-field-wide">
+          <span>目的の内容</span>
+          <textarea id="autonomy-purpose-statement" bind:value={purposeStatement}
+          ></textarea>
+        </label>
+        <label class="autonomy-field">
+          <span>範囲</span>
+          <input
+            id="autonomy-purpose-scope"
+            type="text"
+            autocomplete="off"
+            bind:value={purposeScope}
+          />
+        </label>
+        <label class="autonomy-field">
+          <span>種類</span>
+          <select id="autonomy-purpose-kind" bind:value={purposeKind}>
+            <option value="goal">目標</option>
+            <option value="preference">好み</option>
+            <option value="constraint">制約</option>
+            <option value="permission">許可の記録</option>
+            <option value="wish">希望</option>
+            <option value="temporary_state">一時状態</option>
+          </select>
+        </label>
+        <label class="autonomy-field">
+          <span>出所</span>
+          <select id="autonomy-purpose-source" bind:value={purposeSource}>
+            <option value="user">本人</option>
+            <option value="self">記録</option>
+            <option value="external">外部</option>
+          </select>
+        </label>
+        <label class="autonomy-check">
+          <input id="autonomy-purpose-explicit" type="checkbox" bind:checked={purposeExplicit} />
+          <span>本人の明示的な記録（外すと推測の記録）</span>
+        </label>
+        <label class="autonomy-field autonomy-field-wide">
+          <span>解釈（元の記録と別に保存）</span>
+          <textarea id="autonomy-purpose-interpretation" bind:value={purposeInterpretation}
+          ></textarea>
+        </label>
+        <label class="autonomy-field">
+          <span>適用開始（任意・厳密な日時）</span>
+          <input
+            id="autonomy-purpose-valid-from"
+            type="text"
+            autocomplete="off"
+            bind:value={purposeValidFrom}
+          />
+        </label>
+        <label class="autonomy-field">
+          <span>適用終了（任意・厳密な日時）</span>
+          <input
+            id="autonomy-purpose-valid-until"
+            type="text"
+            autocomplete="off"
+            bind:value={purposeValidUntil}
+          />
+        </label>
+      </div>
+      <div class="autonomy-submit">
+        <button id="autonomy-purpose-create" type="submit">目的を記録</button>
+      </div>
+    </form>
+    <form
+      id="autonomy-task-form"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createTask();
+      }}
+    >
+      <h3 class="autonomy-heading">作業を追加</h3>
+      <div class="autonomy-form-group">
+        <label class="autonomy-field autonomy-field-wide">
+          <span>作業内容</span>
+          <input
+            id="autonomy-task-title"
+            type="text"
+            autocomplete="off"
+            bind:value={taskTitle}
+          />
+        </label>
+        <label class="autonomy-field autonomy-field-wide">
+          <span>親の目的</span>
+          <select id="autonomy-task-parent-mode" bind:value={taskParentMode}>
+            <option value="attached">選択中の目的に結びつける</option>
+            <option value="standalone">単独で記録</option>
+          </select>
+        </label>
+        <label class="autonomy-field">
+          <span>種類</span>
+          <select id="autonomy-task-kind" bind:value={taskKind}>
+            <option value="chat">相談</option>
+            <option value="wish">希望</option>
+            <option value="problem">課題</option>
+            <option value="task">作業</option>
+          </select>
+        </label>
+        <label class="autonomy-field">
+          <span>話者</span>
+          <select id="autonomy-task-speaker" bind:value={taskSpeaker}>
+            <option value="user">本人</option>
+            <option value="self">記録</option>
+            <option value="external">外部</option>
+          </select>
+        </label>
+        <label class="autonomy-field">
+          <span>範囲</span>
+          <input
+            id="autonomy-task-scope"
+            type="text"
+            autocomplete="off"
+            bind:value={taskScope}
+          />
+        </label>
+        <label class="autonomy-field">
+          <span>期限（任意・厳密な日時）</span>
+          <input
+            id="autonomy-task-deadline"
+            type="text"
+            autocomplete="off"
+            bind:value={taskDeadline}
+          />
+        </label>
+      </div>
+      <div class="autonomy-submit">
+        <button id="autonomy-task-create" type="submit">作業を記録</button>
+      </div>
+    </form>
+  </div>
 </section>
