@@ -3329,6 +3329,12 @@ onMount(() => {
     sessions = [];
   }
   void (async () => {
+    // Persona pages hide the agent transcript: no session, presence heartbeat
+    // or companion SSE for a conversation nobody can see.
+    if (!chatSurface) {
+      booted = true;
+      return;
+    }
     await ensureSession();
     if (sessionId !== null) {
       rememberSession(sessionId);

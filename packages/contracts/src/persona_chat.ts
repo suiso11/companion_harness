@@ -18,7 +18,7 @@ export const PERSONA_PROVIDER_CATALOG: readonly {
   {
     id: "deepseek",
     label: "DeepSeek",
-    suggestedModels: ["deepseek-chat", "deepseek-reasoner"],
+    suggestedModels: ["deepseek-chat"],
   },
 ];
 

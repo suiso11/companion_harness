@@ -136,7 +136,6 @@ export function createPersonaChatService(options: {
             await gateway.chat({
               messages,
               maxOutputTokens: 1024,
-              temperature: 0.8,
             })
           ).text;
         } catch {

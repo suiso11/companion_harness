@@ -56,8 +56,27 @@ describe("remote gateway", () => {
     expect(JSON.parse(seen?.init.body as string)).toEqual({
       model: "m-1",
       messages,
-      max_tokens: 1024,
-      temperature: 0.8,
+      [provider === "openai" ? "max_completion_tokens" : "max_tokens"]: 1024,
+      stream: false,
+    });
+  });
+
+  it("forwards an explicit temperature and maxOutputTokens for deepseek", async () => {
+    let body: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_u: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string) as Record<string, unknown>;
+      return ok({ choices: [{ message: { content: "x" } }] });
+    }) as unknown as typeof fetch;
+    await gateway("deepseek", fetchImpl).chat({
+      messages,
+      temperature: 0.2,
+      maxOutputTokens: 512,
+    });
+    expect(body).toEqual({
+      model: "m-1",
+      messages,
+      max_tokens: 512,
+      temperature: 0.2,
       stream: false,
     });
   });

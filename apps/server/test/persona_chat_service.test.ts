@@ -168,7 +168,8 @@ describe("persona chat service", () => {
     expected.push({ role: "user", content: "now" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.messages).toEqual(expected);
-    expect(calls[0]).toMatchObject({ maxOutputTokens: 1024, temperature: 0.8 });
+    expect(calls[0]).toMatchObject({ maxOutputTokens: 1024 });
+    expect(calls[0]?.temperature).toBeUndefined();
   });
 
   it("rejects an unknown chat", async () => {

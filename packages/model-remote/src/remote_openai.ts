@@ -140,7 +140,7 @@ export function createRemoteGateway(options: {
     model,
     async chat(request) {
       const maxTokens = request.maxOutputTokens ?? 1024;
-      const temperature = request.temperature ?? 0.8;
+      const temperature = request.temperature;
       if (
         !Array.isArray(request.messages) ||
         request.messages.length === 0 ||
@@ -153,7 +153,7 @@ export function createRemoteGateway(options: {
         ) ||
         !Number.isInteger(maxTokens) ||
         !inRange(maxTokens, 1, 8192) ||
-        !inRange(temperature, 0, 2)
+        (temperature !== undefined && !inRange(temperature, 0, 2))
       ) {
         throw new RemoteProviderError("invalid_input");
       }
@@ -177,8 +177,11 @@ export function createRemoteGateway(options: {
           body: JSON.stringify({
             model,
             messages: request.messages,
-            max_tokens: maxTokens,
-            temperature,
+            // OpenAI reasoning models reject `max_tokens`; current chat models
+            // accept `max_completion_tokens`. DeepSeek still uses `max_tokens`.
+            [provider === "openai" ? "max_completion_tokens" : "max_tokens"]:
+              maxTokens,
+            ...(temperature === undefined ? {} : { temperature }),
             stream: false,
           }),
           redirect: "error",
