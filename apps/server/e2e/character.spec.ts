@@ -204,6 +204,29 @@ test("the pet page speaks the newest answer without page chrome", async ({
   expect(speechCalls).toBe(1);
 });
 
+test("the pet walks on its own and stops without input", async ({ page }) => {
+  // Deterministic brain: short idle, then always walk to the left margin.
+  await page.addInitScript(() => {
+    (globalThis as { __petRandom?: () => number }).__petRandom = () => 0.1;
+  });
+  await page.goto("/pet");
+  const stage = page.locator("[data-character-panel] .stage");
+  await expect(stage).toHaveAttribute("data-move", "walk", {
+    timeout: 10_000,
+  });
+  const start = Number(await stage.getAttribute("data-x"));
+  await expect
+    .poll(async () => Number(await stage.getAttribute("data-x")), {
+      timeout: 20_000,
+    })
+    .toBeLessThan(start - 0.1);
+  // Arrival snaps to the target and returns to idle (no endless shuffle).
+  await expect(stage).toHaveAttribute("data-move", "idle", {
+    timeout: 20_000,
+  });
+  expect(Number(await stage.getAttribute("data-x"))).toBeCloseTo(0.164, 2);
+});
+
 test("the pet surface is transparent around the avatar", async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 560 });
   await page.goto("/pet");

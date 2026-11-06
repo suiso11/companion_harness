@@ -80,6 +80,22 @@ describe("BehaviorBrain", () => {
     expect(brain.snapshot().speed).toBe(0);
   });
 
+  test("resume during a walk leaves the walk running", () => {
+    const brain = new BehaviorBrain(sequence([0, 0.1, 0.999]), {
+      idleSeconds: [0, 0],
+      maxSpeed: 0.3,
+    });
+    for (let i = 0; i < 20; i += 1) {
+      brain.update(0.05);
+    }
+    const before = brain.snapshot();
+    expect(before.mode).toBe("walk");
+    brain.resume();
+    const after = brain.update(0.05);
+    expect(after.mode).toBe("walk");
+    expect(after.x).toBeGreaterThan(before.x);
+  });
+
   test("walk phase only advances while the body moves", () => {
     const brain = new BehaviorBrain(sequence([0.5]), { idleSeconds: [9, 9] });
     for (let i = 0; i < 40; i += 1) {
