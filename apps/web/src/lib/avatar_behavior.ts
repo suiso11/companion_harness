@@ -87,8 +87,15 @@ export class BehaviorBrain {
     this.#velocity = 0;
   }
 
-  /** Give the character back to its own devices. */
+  /**
+   * Give the character back to its own devices. A no-op unless the user had
+   * the character's attention, so playback stop/cleanup paths cannot cut a
+   * walk short.
+   */
   resume(): void {
+    if (this.#mode !== "interact") {
+      return;
+    }
     this.#mode = "idle";
     this.#velocity = 0;
     this.#targetX = this.#x;

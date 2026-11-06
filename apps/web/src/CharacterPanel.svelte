@@ -37,7 +37,7 @@ let walkX = $state(0.5);
 let walkFacing = $state<-1 | 1>(1);
 let walkAmount = $state(0);
 let walkPhase = $state(0);
-let walkMode = $state("idle");
+let walkMode = $state<"idle" | "walk" | "rest" | "interact">("idle");
 let petBrain: BehaviorBrain | null = null;
 let status = $state("回答を待っています");
 let draft = $state("");
@@ -194,7 +194,10 @@ onMount(() => {
   // turns the snapshot into movement + a procedural walk cycle.
   let petRaf = 0;
   if (pet) {
-    const brain = new BehaviorBrain();
+    // Tests inject a deterministic RNG; production keeps Math.random.
+    const random =
+      (globalThis as { __petRandom?: () => number }).__petRandom ?? Math.random;
+    const brain = new BehaviorBrain(random);
     petBrain = brain;
     let last = performance.now();
     const loop = (now: number): void => {
@@ -264,6 +267,8 @@ onMount(() => {
           facing={walkFacing}
           walk={walkAmount}
           {walkPhase}
+          mode={walkMode}
+          rest={walkMode === "rest" ? 1 : 0}
         />
       {:catch}
         <p class="notice">3Dステージを読み込めませんでした</p>

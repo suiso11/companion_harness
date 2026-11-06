@@ -33,6 +33,8 @@ let {
   facing = 1,
   walk = 0,
   walkPhase = 0,
+  mode = "idle",
+  rest = 0,
 }: {
   url: string;
   texturesUrl?: string | null;
@@ -45,6 +47,10 @@ let {
   walk?: number;
   /** Walk-cycle phase in radians, driven by the distance travelled. */
   walkPhase?: number;
+  /** Behavior mode; "walk" keeps the profile while moving. */
+  mode?: "idle" | "walk" | "rest" | "interact";
+  /** Rest intensity 0..1 (drooping head/chest, heavy lids). */
+  rest?: number;
 } = $props();
 
 /**
@@ -250,13 +256,14 @@ onMount(() => {
               armL: capturePose(walkBones.upperArmL),
               armR: capturePose(walkBones.upperArmR),
             };
-      // Horizontal travel range at the model plane, with a margin.
-      const walkSpan =
-        2 *
-        (height * 2.05) *
-        Math.tan((camera.fov * Math.PI) / 360) *
-        camera.aspect *
-        0.82;
+      // Horizontal travel range at the model plane: the visible width minus
+      // the body so the model (and tail) never clip at the margins.
+      const visibleHeight =
+        2 * (height * 2.05) * Math.tan((camera.fov * Math.PI) / 360);
+      const avatarWidth = Math.max(box.max.x - box.min.x, height * 0.2);
+      const spanFor = (aspect: number): number =>
+        Math.max(visibleHeight * aspect - avatarWidth, visibleHeight * 0.15);
+      let walkSpan = spanFor(camera.aspect);
 
       // Viseme + blink channels (VRChat naming). Missing channels are skipped.
       const visemes: Array<{ mesh: THREE.Mesh; index: number }> = [];
@@ -310,6 +317,7 @@ onMount(() => {
       let opened = 0;
       let raf = 0;
       let heading = 0;
+      let restAmount = 0;
       const frame = (): void => {
         if (disposed) {
           return;
@@ -319,6 +327,7 @@ onMount(() => {
         const idle = idleAngles(t);
         const amount = Math.min(Math.max(walk, 0), 1);
         const step = walkOffsets(walkPhase, amount);
+        restAmount = damp(restAmount, Math.min(Math.max(rest, 0), 1), 3, dt);
         look.yaw = damp(look.yaw, look.targetYaw, 6, dt);
         look.pitch = damp(look.pitch, look.targetPitch, 6, dt);
         opened = damp(opened, Math.min(Math.max(level, 0), 1), 20, dt);
@@ -326,12 +335,17 @@ onMount(() => {
           poseAngles(hipsPose, 0.05 * amount, 0, idle.hipsZ);
         }
         if (chestPose !== null) {
-          poseAngles(chestPose, idle.chestX, 0, -idle.hipsZ * 0.5);
+          poseAngles(
+            chestPose,
+            idle.chestX * (1 - 0.5 * restAmount) + 0.06 * restAmount,
+            0,
+            -idle.hipsZ * 0.5,
+          );
         }
         if (headPose !== null) {
           poseAngles(
             headPose,
-            idle.headX + look.pitch,
+            idle.headX + look.pitch + 0.24 * restAmount,
             idle.headY + look.yaw,
             0,
           );
@@ -353,7 +367,9 @@ onMount(() => {
         // Locomotion: the wrapper carries horizontal travel and the turn.
         avatarRoot.position.x = (Math.min(Math.max(x, 0), 1) - 0.5) * walkSpan;
         avatarRoot.position.y = step.bob * height;
-        const headingTarget = amount > 0.15 ? (facing * Math.PI) / 2 : 0;
+        // Profile only while the brain is walking; idle/rest/interact face
+        // the viewer. Driving this from speed would snap mid-stride.
+        const headingTarget = mode === "walk" ? (facing * Math.PI) / 2 : 0;
         const headingDelta = Math.atan2(
           Math.sin(headingTarget - heading),
           Math.cos(headingTarget - heading),
@@ -366,7 +382,8 @@ onMount(() => {
             influences[index] = opened;
           }
         }
-        const closed = blinker.weight();
+        // Resting eyes stay half shut even between blinks.
+        const closed = Math.max(blinker.weight(), 0.45 * restAmount);
         for (const { mesh, index } of blinks) {
           const influences = mesh.morphTargetInfluences;
           if (influences !== undefined) {
@@ -385,6 +402,7 @@ onMount(() => {
         renderer.setSize(width, heightPx);
         camera.aspect = width / heightPx;
         camera.updateProjectionMatrix();
+        walkSpan = spanFor(camera.aspect);
       };
       window.addEventListener("resize", resize);
 

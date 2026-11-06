@@ -42,10 +42,15 @@ function loadBounds() {
   } catch {
     return {};
   }
-  return pickBounds(
+  const picked = pickBounds(
     saved,
     screen.getAllDisplays().map((display) => display.workArea),
   );
+  // The pet layout needs room to walk; ignore a saved pre-autonomy width.
+  if (typeof picked.width === "number" && picked.width < 560) {
+    return {};
+  }
+  return picked;
 }
 
 function saveSoon() {
