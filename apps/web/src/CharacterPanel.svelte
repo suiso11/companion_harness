@@ -38,6 +38,7 @@ let walkFacing = $state<-1 | 1>(1);
 let walkAmount = $state(0);
 let walkPhase = $state(0);
 let walkMode = $state("idle");
+let petBrain: BehaviorBrain | null = null;
 let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
@@ -68,6 +69,7 @@ function stop(): void {
   }
   level = 0;
   speaking = false;
+  petBrain?.resume();
 }
 
 function tick(): void {
@@ -99,6 +101,8 @@ async function play(blob: Blob): Promise<void> {
   analyser.connect(ctx.destination);
   element.onended = () => stop();
   speaking = true;
+  // While the pet speaks it stands still and turns to the viewer.
+  petBrain?.interrupt();
   await element.play();
   tick();
 }
@@ -191,6 +195,7 @@ onMount(() => {
   let petRaf = 0;
   if (pet) {
     const brain = new BehaviorBrain();
+    petBrain = brain;
     let last = performance.now();
     const loop = (now: number): void => {
       const dt = (now - last) / 1000;
@@ -225,6 +230,7 @@ onMount(() => {
   }, POLL_MS);
   return () => {
     destroyed = true;
+    petBrain = null;
     clearInterval(timer);
     cancelAnimationFrame(petRaf);
     stop();
