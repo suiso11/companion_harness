@@ -6384,6 +6384,10 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - Presence is process-local: after a restart the next heartbeat or the
   latest-session fallback covers the gap. No cross-user/remote sharing.
 
+## ペットの自律行動 (behavior brain)
+
+`/pet` では `apps/web/src/lib/avatar_behavior.ts` の HFSM が `idle → walk / rest` を選び、`apps/web/src/lib/avatar_motion.ts` の `walkOffsets` が**移動距離に同期した**歩行サイクル（脚の振り・膝・腕・上下動）を作る。LLM 推論は関与しない。位置は 0..1 の正規化座標で、`data-move`（状態）と `data-x`（位置）をステージ要素に公開する（E2E 用）。`interrupt()` で移動を止め、`resume()` で自由行動に戻る（会話連携は今後）。
+
 ## デスクトップペット (Electron シェル)
 
 クライアント側マシン（Electron を直接動かせる PC）で `pnpm pet` を実行し、`COMPANION_PET_URL` でサーバのオリジンを渡す（既定 `http://127.0.0.1:3000`、Tailscale 経由なら `https://<host>.ts.net` など）。透明・枠なし・常に手前のウィンドウに `/pet` を表示する（アバターのみ・新しい回答の自動読み上げ・ドラッグで移動）。リモート認証が有効なときはトレイの「ログイン（チャットを開く）」でログインし（cookie は Electron 側プロファイルに残る）、「表示」でペットに戻る。トレイから表示/隠す/マウス透過/常に手前/終了を操作する。位置とサイズは userData の `pet-window.json` に保存される。透過にはコンポジタが必要（X11 は合成マネージャ、Wayland は既定で合成）。`COMPANION_PET_SMOKE=1` でスクリーンショット1枚を撮って終了する（`pnpm --filter @companion/desktop smoke`、出力先 `COMPANION_PET_SMOKE_OUT`）。

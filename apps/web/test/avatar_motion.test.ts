@@ -12,6 +12,7 @@ import {
   lookAngles,
   poseAngles,
   relaxArms,
+  walkOffsets,
 } from "../src/lib/avatar_motion.js";
 
 function worldQuat(object: THREE.Object3D): THREE.Quaternion {
@@ -170,5 +171,43 @@ describe("idleAngles", () => {
     }
     const chest = samples.map((sample) => sample.chestX);
     expect(Math.max(...chest) - Math.min(...chest)).toBeGreaterThan(0.02);
+  });
+});
+
+describe("walkOffsets", () => {
+  test("is neutral when the walk weight is zero", () => {
+    const still = walkOffsets(1.3, 0);
+    for (const value of Object.values(still)) {
+      expect(Math.abs(value)).toBe(0);
+    }
+  });
+
+  test("swings the legs in opposite directions", () => {
+    expect(walkOffsets(Math.PI / 2, 1).upperLegL).toBeGreaterThan(0);
+    expect(walkOffsets(Math.PI / 2, 1).upperLegR).toBeLessThan(0);
+  });
+
+  test("only bends knees backwards and keeps them inside the cycle", () => {
+    for (let phase = 0; phase < Math.PI * 4; phase += 0.1) {
+      const step = walkOffsets(phase, 1);
+      expect(step.lowerLegL).toBeLessThanOrEqual(0);
+      expect(step.lowerLegR).toBeLessThanOrEqual(0);
+      expect(Math.abs(step.upperLegL)).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(step.bob)).toBeLessThanOrEqual(0.018);
+    }
+  });
+
+  test("scales linearly with the walk weight", () => {
+    const half = walkOffsets(0.7, 0.5);
+    const full = walkOffsets(0.7, 1);
+    expect(half.upperLegL * 2).toBeCloseTo(full.upperLegL, 10);
+    expect(half.bob * 2).toBeCloseTo(full.bob, 10);
+  });
+
+  test("bobs twice per stride cycle", () => {
+    expect(walkOffsets(0, 0.4).bob).toBeCloseTo(
+      walkOffsets(Math.PI, 0.4).bob,
+      10,
+    );
   });
 });
