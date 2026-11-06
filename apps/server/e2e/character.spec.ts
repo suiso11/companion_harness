@@ -169,6 +169,12 @@ test("the pet page speaks the newest answer without page chrome", async ({
   const panel = page.locator("[data-character-panel]");
   await expect(panel).toBeVisible();
   await expect(panel).toHaveClass(/pet/);
+  // The behavior brain owns the pet: it picks a mode and a screen position.
+  await expect(panel.locator(".stage")).toHaveAttribute(
+    "data-move",
+    /idle|walk|rest|interact/,
+  );
+  await expect(panel.locator(".stage")).toHaveAttribute("data-x", /^0\.\d{3}$/);
   // No controls, no status line: the window is the avatar.
   await expect(page.getByRole("button")).toHaveCount(0);
   await expect(page.locator("[data-character-status]")).toHaveCount(0);

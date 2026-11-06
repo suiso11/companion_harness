@@ -147,7 +147,61 @@ export function relaxArms(rig: AvatarRig): void {
   }
 }
 
-/** One-pole approach: frame-rate independent, no overshoot. */
+/** Leg bones the walk cycle needs (optional per rig). */
+export interface WalkBones {
+  readonly upperLegL: THREE.Object3D;
+  readonly upperLegR: THREE.Object3D;
+  readonly lowerLegL: THREE.Object3D;
+  readonly lowerLegR: THREE.Object3D;
+  readonly footL: THREE.Object3D | null;
+  readonly footR: THREE.Object3D | null;
+  readonly upperArmL: THREE.Object3D;
+  readonly upperArmR: THREE.Object3D;
+}
+
+export interface WalkOffsets {
+  readonly upperLegL: number;
+  readonly upperLegR: number;
+  readonly lowerLegL: number;
+  readonly lowerLegR: number;
+  readonly footL: number;
+  readonly footR: number;
+  readonly armL: number;
+  readonly armR: number;
+  /** Vertical body bob in body heights (multiply by the model height). */
+  readonly bob: number;
+}
+
+/**
+ * Procedural walk cycle. `phase` is advanced from the distance travelled, so
+ * the feet stay planted at any speed; `amount` (0..1) fades the pose in and
+ * out with the locomotion speed.
+ */
+export function walkOffsets(phase: number, amount: number): WalkOffsets {
+  const swing = Math.sin(phase);
+  const lift = Math.sin(phase - 0.6);
+  const step = 0.5 * amount;
+  const knee = 0.85 * amount;
+  const upperLegL = step * swing;
+  const upperLegR = -step * swing;
+  // Knees only bend one way: the trailing leg lifts its heel.
+  const lowerLegL = -knee * Math.max(0, lift);
+  const lowerLegR = -knee * Math.max(0, -lift);
+  return {
+    upperLegL,
+    upperLegR,
+    lowerLegL,
+    lowerLegR,
+    // Keep the soles roughly level with the ground while the knee lifts.
+    footL: -(upperLegL + lowerLegL) * 0.8,
+    footR: -(upperLegR + lowerLegR) * 0.8,
+    armL: -0.3 * amount * swing,
+    armR: 0.3 * amount * swing,
+    bob: 0.018 * amount * Math.cos(2 * phase),
+  };
+}
+
+/** One-pole approach: frame-rate independent, no overshoot. */ /** One-pole approach: frame-rate independent, no overshoot. */
 export function damp(
   current: number,
   target: number,

@@ -61,7 +61,7 @@ function saveSoon() {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 360,
+    width: 760,
     height: 560,
     ...loadBounds(),
     frame: false,

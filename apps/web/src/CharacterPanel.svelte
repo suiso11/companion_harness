@@ -9,6 +9,7 @@
 // (`ry`) driven by state.
 
 import { onMount } from "svelte";
+import { BehaviorBrain } from "./lib/avatar_behavior.js";
 import {
   type CharacterAvatar,
   fetchCharacterConfig,
@@ -31,6 +32,12 @@ let auto = $state(pet);
 let level = $state(0);
 let speaking = $state(false);
 let visionBusy = $state(false);
+// Pet mode: the brain drives this and the stage consumes it.
+let walkX = $state(0.5);
+let walkFacing = $state<-1 | 1>(1);
+let walkAmount = $state(0);
+let walkPhase = $state(0);
+let walkMode = $state("idle");
 let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
@@ -179,6 +186,25 @@ onMount(() => {
   void (async () => {
     avatar = await fetchCharacterConfig();
   })();
+  // Pet mode owns itself: a local HFSM picks idle/walk/rest and the stage
+  // turns the snapshot into movement + a procedural walk cycle.
+  let petRaf = 0;
+  if (pet) {
+    const brain = new BehaviorBrain();
+    let last = performance.now();
+    const loop = (now: number): void => {
+      const dt = (now - last) / 1000;
+      last = now;
+      const snap = brain.update(dt);
+      walkX = snap.x;
+      walkFacing = snap.facing;
+      walkAmount = snap.speed;
+      walkPhase = snap.walkPhase;
+      walkMode = snap.mode;
+      petRaf = requestAnimationFrame(loop);
+    };
+    petRaf = requestAnimationFrame(loop);
+  }
   // Remember the newest existing answer without voicing it on load: only
   // answers that complete while the panel is open are spoken.
   void (async () => {
@@ -200,6 +226,7 @@ onMount(() => {
   return () => {
     destroyed = true;
     clearInterval(timer);
+    cancelAnimationFrame(petRaf);
     stop();
     void ctx?.close();
   };
@@ -207,7 +234,12 @@ onMount(() => {
 </script>
 
 <section class="character" class:pet data-character-panel="true">
-  <div class="stage" data-speaking={speaking ? "true" : "false"}>
+  <div
+    class="stage"
+    data-speaking={speaking ? "true" : "false"}
+    data-move={walkMode}
+    data-x={walkX.toFixed(3)}
+  >
     {#if avatar?.kind === "vrm"}
       {#await import("./VrmStage.svelte") then mod}
         <svelte:component this={mod.default} url={avatar.url} {level} />
@@ -222,6 +254,10 @@ onMount(() => {
           texturesUrl={avatar.texturesUrl}
           version={avatar.assetVersion}
           {level}
+          x={walkX}
+          facing={walkFacing}
+          walk={walkAmount}
+          {walkPhase}
         />
       {:catch}
         <p class="notice">3Dステージを読み込めませんでした</p>
