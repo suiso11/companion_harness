@@ -25,9 +25,14 @@ afterEach(() => {
 });
 
 async function setup(
-  keys: { openai: string | null; deepseek: string | null } = {
+  keys: {
+    openai: string | null;
+    deepseek: string | null;
+    opencode: string | null;
+  } = {
     openai: "sk-test",
     deepseek: null,
+    opencode: null,
   },
   reply: () => Promise<string> = async () => "hello back",
 ) {
@@ -70,6 +75,7 @@ describe("persona chat service", () => {
     expect(service.providers().map((p) => [p.id, p.available])).toEqual([
       ["openai", true],
       ["deepseek", false],
+      ["opencode", false],
       ["local", false],
     ]);
   });
@@ -130,6 +136,7 @@ describe("persona chat service", () => {
     const { store, service, chat, calls } = await setup({
       openai: null,
       deepseek: null,
+      opencode: null,
     });
     await expect(
       service.send({ chatId: chat.id, text: "hi" }),
@@ -228,7 +235,7 @@ describe("persona chat service", () => {
       let clock = T0 + 1000;
       const service = createPersonaChatService({
         store,
-        keys: { openai: "sk-test", deepseek: null },
+        keys: { openai: "sk-test", deepseek: null, opencode: null },
         now: () => (clock += 10),
         createGateway: () => ({
           chat: async (request: RemoteChatRequest) => ({

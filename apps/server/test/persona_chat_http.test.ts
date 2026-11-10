@@ -35,7 +35,11 @@ interface Fixture {
 async function makeFixture(
   options: {
     personaChat?: boolean;
-    keys?: { openai: string | null; deepseek: string | null };
+    keys?: {
+      openai: string | null;
+      deepseek: string | null;
+      opencode: string | null;
+    };
   } = {},
 ): Promise<Fixture> {
   const handle = openKernelDatabase(":memory:");
@@ -57,7 +61,7 @@ async function makeFixture(
   let fails = false;
   const service = createPersonaChatService({
     store,
-    keys: options.keys ?? { openai: "sk-test", deepseek: null },
+    keys: options.keys ?? { openai: "sk-test", deepseek: null, opencode: null },
     now,
     createGateway: () => ({
       chat: async () => {
@@ -133,7 +137,12 @@ describe("persona chat routes", () => {
     const avail = Object.fromEntries(
       list.providers.map((p: Json) => [p.id, p.available]),
     );
-    expect(avail).toEqual({ openai: true, deepseek: false, local: false });
+    expect(avail).toEqual({
+      openai: true,
+      deepseek: false,
+      opencode: false,
+      local: false,
+    });
 
     const patched = await f.request(`/api/personas/${created.id}`, "PATCH", {
       ...PERSONA,
@@ -312,7 +321,9 @@ describe("persona chat routes", () => {
   });
 
   it("maps provider and lookup failures", async () => {
-    const noKey = await makeFixture({ keys: { openai: null, deepseek: null } });
+    const noKey = await makeFixture({
+      keys: { openai: null, deepseek: null, opencode: null },
+    });
     const chat1 = await createChat(noKey, (await createPersona(noKey)).id);
     const unavailable = await noKey.request(
       `/api/chats/${chat1.id}/messages`,

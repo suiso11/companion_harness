@@ -42,12 +42,14 @@ describe("feature navigation grouping", () => {
       "/shadow",
       "/learning",
       "/handoff",
+      "/settings",
     ]);
     expect(DEV_NAV.map((item) => item.label)).toEqual([
       "試行の提案",
       "試行",
       "学び",
       "引継ぎ",
+      "設定",
     ]);
   });
 

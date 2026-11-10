@@ -1,8 +1,15 @@
 import { z } from "zod";
 
-export const PERSONA_PROVIDERS = ["openai", "deepseek", "local"] as const;
+export const PERSONA_PROVIDERS = [
+  "openai",
+  "deepseek",
+  "opencode",
+  "local",
+] as const;
 export const PersonaProviderSchema = z.enum(PERSONA_PROVIDERS);
 export type PersonaProvider = z.infer<typeof PersonaProviderSchema>;
+/** Providers that require a host-held API key (everything except `local`). */
+export type HostedPersonaProvider = Exclude<PersonaProvider, "local">;
 
 /** Suggested model ids only; the model field stays free text. */
 export const PERSONA_PROVIDER_CATALOG: readonly {
@@ -18,7 +25,12 @@ export const PERSONA_PROVIDER_CATALOG: readonly {
   {
     id: "deepseek",
     label: "DeepSeek",
-    suggestedModels: ["deepseek-chat"],
+    suggestedModels: ["deepseek-flash", "deepseek-v4-pro"],
+  },
+  {
+    id: "opencode",
+    label: "OpenCode Zen",
+    suggestedModels: ["deepseek-v4.1-flash", "glm-5.3", "qwen3.8-max"],
   },
   { id: "local", label: "ローカル", suggestedModels: [] },
 ];

@@ -766,6 +766,7 @@ export interface ServerConfig {
   readonly personaProviders: Readonly<{
     openai: string | null;
     deepseek: string | null;
+    opencode: string | null;
   }>;
   /** Opt-in AGORA participation; null (unset) means disabled. */
   readonly agora: AgoraConfig | null;
@@ -3253,6 +3254,7 @@ export function loadServerConfig(
     personaProviders: Object.freeze({
       openai: parsePersonaProviderKey(env.COMPANION_OPENAI_API_KEY),
       deepseek: parsePersonaProviderKey(env.COMPANION_DEEPSEEK_API_KEY),
+      opencode: parsePersonaProviderKey(env.COMPANION_OPENCODE_API_KEY),
     }),
     voice,
     tts,

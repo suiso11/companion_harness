@@ -168,6 +168,7 @@ import {
   type PersonaChatService,
   PersonaChatServiceError,
 } from "./persona_chat_service.js";
+import { isHostedProviderId, type ProviderKeyStore } from "./provider_keys.js";
 import {
   hashRemoteToken,
   issueRemoteToken,
@@ -211,6 +212,10 @@ import {
   MAX_VISION_BODY_BYTES,
 } from "./vision.js";
 
+const ProviderKeyRequestSchema = z.strictObject({
+  apiKey: z.string().max(4096),
+});
+
 /**
  * PR-5: non-chat feature pages. Every path returns the SAME Svelte shell as
  * `/` (the client derives the page from `location.pathname`), so refresh and
@@ -222,6 +227,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/memory",
   "/tasks",
   "/notifications",
+  "/settings",
   "/trials",
   "/learning",
   "/shadow",
@@ -563,6 +569,8 @@ export interface CreateAppDeps {
    * only decide whether a provider is `available`.
    */
   personaChat?: { store: PersonaChatStore; service: PersonaChatService };
+  /** Settings-page key store; routes register only with `personaChat` too. */
+  providerKeys?: ProviderKeyStore;
 }
 
 export interface ServerControls {
@@ -1553,6 +1561,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const memory = deps.memory ?? null;
   const learningStore = deps.learningStore ?? null;
   const personaChat = deps.personaChat;
+  const providerKeys = deps.providerKeys ?? null;
   const autodispatchForeground = deps.autodispatchForeground;
   const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
@@ -7337,6 +7346,32 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         return personaChatError(c, error);
       }
     });
+
+    // Settings page: key presence only, never key material.
+    if (providerKeys !== null) {
+      app.get("/api/providers", (c) => {
+        if (!strictQuery(c, []).ok) return validationError(c);
+        return c.json({ providers: chatService.providers() }, 200);
+      });
+
+      app.post("/api/providers/:id/key", async (c) => {
+        const id = c.req.param("id");
+        if (!isHostedProviderId(id)) return validationError(c);
+        const body = await parseJsonBody(c, ProviderKeyRequestSchema);
+        if (body === null) return validationError(c);
+        try {
+          if (body.apiKey === "") providerKeys.clear(id);
+          else providerKeys.set(id, body.apiKey);
+          const available =
+            chatService.providers().find((p) => p.id === id)?.available ??
+            false;
+          return c.json({ ok: true, available }, 200);
+        } catch (error) {
+          if (error instanceof ServerConfigError) return validationError(c);
+          return apiError(c, 500, "internal_error", "internal error");
+        }
+      });
+    }
   }
 
   return { app, controls };

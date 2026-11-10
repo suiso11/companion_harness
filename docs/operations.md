@@ -38,6 +38,7 @@ a missing DB fails without creating any DB or backup files.
 | `COMPANION_MARKDOWN_ROOTS_JSON` | `[]` | Strict JSON array of `{ path, alias? }` (see below); unset means no Markdown connector |
 | `COMPANION_MODEL_JSON` | unset (no model) | Strict JSON object `{ adapter, baseUrl, model, apiKey? }` (see M2 below); unset registers no model strategy |
 | `REMIND_LLM_API_KEY` | unset | Bearer token for the remind CLI retention classifier (`activation.llm.apiKeyEnv`). `run-google-readonly.sh` derives it from `.env.litellm` `LITELLM_MASTER_KEY` only when it is not already set, and never logs it. The child inherits it because Companion spawns remind without an `env` override. Same key is already present in `COMPANION_MODEL_JSON` / the LiteLLM proxy config, so the exposure is unchanged |
+| `COMPANION_OPENAI_API_KEY` / `COMPANION_DEEPSEEK_API_KEY` / `COMPANION_OPENCODE_API_KEY` | unset | Bearer keys for persona chat hosted providers (`api.openai.com`, `api.deepseek.com`, OpenCode Zen `https://opencode.ai/inference/openai/v1`). OpenAI/DeepSeek/OpenCode keys can also be entered in the web UI `/settings` page (stored in `provider-keys.json`, 0600, overriding env); see "Persona chat" |
 | `COMPANION_EXECUTION_RECORDS_JSON` | unset (no private records) | Strict JSON object `{ directory, retentionDays? }`: absolute `directory`, `retentionDays` integer `0..3650` default `30` (see "Private execution records" below); no HTTP surface |
 | `COMPANION_CALENDAR_JSON` | unset (no Calendar) | Strict JSON object `{ selection, connector }` (see C14 below); unset registers no Calendar connector |
 | `COMPANION_CALENDAR_PROFILE` | unset (no profile) | Strict opt-in profile selector (see C14 profile below). Unset keeps the previous behavior (explicit host `mcpDefinitions` injection or fail-closed incomplete opt-in). Only `google-readonly` is accepted; any other value fails startup. Requires `COMPANION_CALENDAR_JSON` describing exactly the adopted candidate. |
@@ -198,27 +199,50 @@ registration and NO tool in the model-facing tool list (fail-closed).
 ## Persona chat (hosted providers)
 
 Persona chat (`/chats`, `/personas`, `/api/personas*`, `/api/chats*`) is
-always available; there is no feature flag. A provider is usable once its
-host environment variable holds a key, otherwise sends answer a fixed 409
-(`provider_unavailable`):
+always available; there is no feature flag. Providers:
 
-- `COMPANION_OPENAI_API_KEY` (host `api.openai.com`)
-- `COMPANION_DEEPSEEK_API_KEY` (host `api.deepseek.com`)
+- `openai` (host `api.openai.com`)
+- `deepseek` (host `api.deepseek.com`)
+- `opencode` (`opencode.ai`, OpenAI-compatible gateway, OpenCode Zen)
+- `local` (loopback gateway from `COMPANION_MODEL_JSON`; no API key, no
+  cost; the persona's model field is display-only for it, and it shows as
+  unavailable when no local model is configured)
 
-Hosts are fixed in code (https only, no configurable base URL). A present
-key must be 1..4096 printable ASCII characters (0x21..0x7e) or startup fails
-closed with a fixed message. Keys are read from the environment only: they
-never reach the database, config JSON, logs or API responses, and upstream
-error text is never surfaced (a provider failure is a fixed 502
-`provider_failed` and nothing is stored). Persona prompts and chat messages
-are stored in the local database like other conversation data (see
-Plaintext sensitivity below) and are sent to the chosen provider on each
-turn (the system prompt plus at most the newest 20 messages).
+A hosted provider is usable once it has a key, otherwise sends answer a
+fixed 409 (`provider_unavailable`). A key comes from either:
 
-A third provider, `local`, uses the loopback gateway already configured by
-`COMPANION_MODEL_JSON` (no API key, no cost); the persona's model field is
-display-only for it, and the provider shows as unavailable when no local
-model is configured.
+- the environment: `COMPANION_OPENAI_API_KEY`, `COMPANION_DEEPSEEK_API_KEY`,
+  `COMPANION_OPENCODE_API_KEY`; or
+- the `/settings` page in the web UI. A key saved there is written to
+  `provider-keys.json` next to the configured database
+  (`dirname(COMPANION_DB_PATH)`; the default is
+  `<appData>/provider-keys.json`, e.g.
+  `~/.local/share/companion-harness/provider-keys.json` on Linux) with
+  mode `0600`, outside SQLite and the frozen config JSON. Isolated
+  instances with their own DB path therefore never touch the default
+  instance's keys.
+  The file value overrides the env value. On POSIX a file readable by
+  group/other makes startup fail closed.
+
+Saving or clearing a key applies to the next send without a restart
+(persona chat only). Clearing a UI-saved key removes only its
+`provider-keys.json` entry: the provider falls back to the env key if one
+is set (so it may stay available), otherwise it becomes unavailable. Env
+keys are never copied into the file. Hosts are fixed in code (https only, no configurable
+base URL). A key must be 1..4096 printable ASCII characters (0x21..0x7e);
+an invalid env key fails startup closed with a fixed message, and an
+invalid UI key is rejected with 400.
+
+Security: keys never reach the database, config JSON, logs or API
+responses (reads expose only `available`), and upstream error text is never
+surfaced (a provider failure is a fixed 502 `provider_failed` and nothing
+is stored). `GET /api/providers` and `POST /api/providers/:id/key`
+(`{ apiKey }`, empty string clears) reuse the existing
+Host/Origin/Sec-Fetch-Site/JSON mutation guards and the optional remote
+session gate. Persona prompts and chat messages are stored in the local
+database like other conversation data (see Plaintext sensitivity above)
+and are sent to the chosen provider on each turn (the system prompt plus
+at most the newest 20 messages).
 
 A two-persona chat can be marked **autotalk**: every 10 minutes the server
 looks for autotalk chats whose newest message is more than an hour old and
