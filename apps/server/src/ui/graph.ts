@@ -367,6 +367,13 @@ export const LABEL_FONT_SIZE = 12;
 export const FIT_VIEW_RATIO = 0.85;
 export const MIN_ZOOM = 0.2;
 export const MAX_ZOOM = 3;
+/**
+ * Default fit floor for automatic fits: never shrink below the designed
+ * label size (scale 1), on any canvas. A dense graph is allowed to overflow
+ * and be panned instead of becoming an illegible clump; the explicit
+ * 「全体表示」 button still fits everything.
+ */
+export const FIT_READABLE_MIN_SCALE = 1;
 
 /** Deterministic 32-bit FNV-1a hash of an opaque handle. */
 export function hashHandle(handle: string): number {
@@ -490,6 +497,37 @@ export function zoomAt(
     tx: cursorX - world.x * scale,
     ty: cursorY - world.y * scale,
   };
+}
+
+/** Two-pointer contact geometry, in screen (CSS) pixels. */
+export interface PinchContact {
+  readonly distance: number;
+  readonly centerX: number;
+  readonly centerY: number;
+}
+
+/**
+ * Pinch camera update: the midpoint follows the fingers (pan) and the
+ * distance ratio zooms around that midpoint. Both are applied per pointer
+ * move so a pinch that also drifts does not jump when the other finger wins
+ * the event.
+ */
+export function pinchCamera(
+  camera: GraphCamera,
+  previous: PinchContact,
+  next: PinchContact,
+): GraphCamera {
+  const panned: GraphCamera = {
+    scale: camera.scale,
+    tx: camera.tx + (next.centerX - previous.centerX),
+    ty: camera.ty + (next.centerY - previous.centerY),
+  };
+  // Below a few pixels of separation the ratio is noise; pan only.
+  const factor =
+    previous.distance > 4 && next.distance > 4
+      ? next.distance / previous.distance
+      : 1;
+  return zoomAt(panned, next.centerX, next.centerY, factor);
 }
 
 export interface PositionedNode {
@@ -623,6 +661,34 @@ export function estimateLabelWidth(
   return width;
 }
 
+/**
+ * Shorten a label until it fits the horizontal room left between its disc
+ * and the canvas edge. Zooming in multiplies the label font with the camera,
+ * so on a narrow phone canvas a full CJK label would cross the edge and be
+ * dropped entirely; a shorter visible label is better than none.
+ */
+export function truncateLabelToWidth(
+  label: string,
+  charLimit: number,
+  maxWidth: number,
+  fontSize = LABEL_FONT_SIZE,
+): string {
+  if (maxWidth <= 0) {
+    return "";
+  }
+  for (let limit = charLimit; limit > 0; limit -= 1) {
+    const text = truncateLabel(label, limit);
+    // A lone ellipsis (possibly preceded by spaces) says nothing.
+    if (text.trim() === "…") {
+      continue;
+    }
+    if (estimateLabelWidth(text, fontSize) <= maxWidth) {
+      return text;
+    }
+  }
+  return "";
+}
+
 /** Screen-space input for greedy label placement. */
 export interface LabelCandidate {
   readonly handle: string;
@@ -735,7 +801,12 @@ export function selectVisibleLabels(
       candidate.selected === true ||
       candidate.hovered === true ||
       candidate.nearFocus === true;
-    const text = truncateLabel(candidate.label, charLimit);
+    // Zoomed-in labels scale with the camera; without this an edge-crossing
+    // label on a narrow canvas was dropped instead of shortened.
+    const available = width - (candidate.x + candidate.radius + gap);
+    const text = forced
+      ? truncateLabel(candidate.label, charLimit)
+      : truncateLabelToWidth(candidate.label, charLimit, available, fontSize);
     if (text.length === 0) {
       continue;
     }
@@ -800,6 +871,13 @@ export function createLayout(
 }
 
 /**
+ * World area (px²) the simulation reserves per node. Below this the viewport
+ * alone would decide the density, so every added memory would only pack the
+ * graph tighter.
+ */
+const LAYOUT_NODE_AREA = 72 * 72;
+
+/**
  * One deterministic simulation tick: O(n²) repulsion (n ≤ 500), spring
  * links, per-node x/y gravity toward the origin, velocity damping and alpha
  * decay. A collision pass keeps resting nodes from overlapping even in dense
@@ -815,10 +893,13 @@ export function layoutStep(layout: GraphLayout): GraphLayout {
     layout.alpha = 0;
     return layout;
   }
-  const area = layout.width * layout.height;
   // Scale the force model with the *real* canvas: a wide desktop canvas has
-  // room for clusters to separate, while the old 800x480 constants clumped
-  // every node into roughly a quarter of the available area.
+  // room for clusters to separate. A node, however, needs its own world
+  // area: the brain can hold up to MEMORY_GRAPH_NODE_MAX (500) memories, and
+  // pinning the layout area to the viewport packed every added memory into
+  // the same pixels (60+ nodes touched, 500 overlapped). Past ~72^2 world px
+  // per node the graph grows instead, and the camera pans/zooms it.
+  const area = Math.max(layout.width * layout.height, count * LAYOUT_NODE_AREA);
   const spread = Math.sqrt(area / count) * 0.5;
   const desired = Math.max(72, Math.min(190, spread * 1.15));
   const repulsion = spread * spread * 0.045;
@@ -987,13 +1068,23 @@ export interface GraphCanvasCallbacks {
 
 interface PointerGesture {
   mode: "pan" | "node";
+  /** The pointer that owns this gesture; other pointers pinch instead. */
+  pointerId: number;
   handle: string | null;
   lastX: number;
   lastY: number;
+  startX: number;
+  startY: number;
   offsetX: number;
   offsetY: number;
   moved: boolean;
 }
+
+/**
+ * Movement (CSS px) before a press on a node becomes a drag. Below it the
+ * finger jitter of a tap must not shove the node or reheat the simulation.
+ */
+const DRAG_THRESHOLD = 4;
 
 interface RenderedNode {
   readonly layout: LayoutNode;
@@ -1034,6 +1125,12 @@ export class GraphCanvas {
   private frame: number | null = null;
   private destroyed = false;
   private gesture: PointerGesture | null = null;
+  /** Active pointers by id: one drives pan/node, two or more pinch. */
+  private readonly pointers = new Map<
+    number,
+    { readonly x: number; readonly y: number }
+  >();
+  private pinch: PinchContact | null = null;
   /** Refit once when the current simulation comes to rest. */
   private fitPending = true;
   /** The user panned/zoomed: never steal their camera on settle. */
@@ -1072,8 +1169,11 @@ export class GraphCanvas {
     this.resizeObserver =
       typeof ResizeObserver === "function"
         ? new ResizeObserver(() => {
-            if (!this.destroyed) {
-              this.fitToView();
+            // Mobile browser chrome collapses on scroll and resizes the
+            // canvas; refitting on every resize yanks a camera the user has
+            // already panned or zoomed.
+            if (!this.destroyed && !this.userAdjusted) {
+              this.autoFit();
             }
           })
         : null;
@@ -1109,6 +1209,8 @@ export class GraphCanvas {
     this.neighbors.clear();
     this.hovered = null;
     this.gesture = null;
+    this.pointers.clear();
+    this.pinch = null;
     this.fitPending = true;
     this.userAdjusted = false;
     this.syncViewportSize();
@@ -1126,6 +1228,7 @@ export class GraphCanvas {
       layout.nodes,
       this.viewportWidth,
       this.viewportHeight,
+      { minScale: FIT_READABLE_MIN_SCALE },
     );
     for (const [handle, set] of buildNeighborMap(layout.nodes, layout.edges)) {
       this.neighbors.set(handle, set);
@@ -1229,6 +1332,7 @@ export class GraphCanvas {
         layout.nodes,
         this.viewportWidth,
         this.viewportHeight,
+        { minScale: FIT_READABLE_MIN_SCALE },
       );
       this.fitPending = false;
       this.render();
@@ -1237,8 +1341,25 @@ export class GraphCanvas {
     this.startFrame();
   }
 
-  /** Fit the resting graph into the canvas (also used on container resize). */
+  /**
+   * Exact fit-all (the 「全体表示」 action): the whole graph inside the canvas,
+   * down to MIN_ZOOM. Unlike the automatic fit it deliberately crams a large
+   * graph, because that is what the button promises.
+   */
   fitToView(): void {
+    this.applyFit(MIN_ZOOM);
+  }
+
+  /**
+   * Automatic fit after settle/resize: floored at the readable scale so a
+   * phone pans a slightly overflowing graph instead of shrinking labels
+   * below their designed size.
+   */
+  private autoFit(): void {
+    this.applyFit(FIT_READABLE_MIN_SCALE);
+  }
+
+  private applyFit(minScale: number): void {
     const layout = this.layout;
     if (layout === null) {
       return;
@@ -1248,9 +1369,10 @@ export class GraphCanvas {
       layout.nodes,
       this.viewportWidth,
       this.viewportHeight,
+      { minScale },
     );
-    // "全体表示" is an explicit request: it also cancels the keep-my-camera
-    // flag set by a previous pan/zoom.
+    // An explicit fit cancels the keep-my-camera flag set by a pan/zoom; the
+    // automatic call sites already checked it.
     this.userAdjusted = false;
     // A resize mid-simulation keeps the pending settle refit.
     if (layout.alpha <= 0) {
@@ -1449,8 +1571,8 @@ export class GraphCanvas {
         // Refit the *resting* layout (not the deterministic seed cloud):
         // disconnected components can drift under repulsion, and a topic-hub
         // toggle replaces the node set, so every settled simulation needs a
-        // fresh camera. fitToView clears fitPending and repaints.
-        this.fitToView();
+        // fresh camera. autoFit clears fitPending and repaints.
+        this.autoFit();
       } else {
         if (layout.alpha <= 0) {
           this.fitPending = false;
@@ -1527,12 +1649,22 @@ export class GraphCanvas {
     if (event.button !== 0) {
       return;
     }
+    const point = this.svgPoint(event);
+    this.pointers.set(event.pointerId, point);
+    this.svg.setPointerCapture(event.pointerId);
+    if (this.pointers.size > 1) {
+      // A second finger pinches the camera. It must never inherit the
+      // single-pointer pan/node baseline: mixing the two fingers' coordinates
+      // jumped the view by the distance between them.
+      this.startPinch();
+      event.preventDefault();
+      return;
+    }
     const target = event.target;
     const group =
       target instanceof Element
         ? target.closest<SVGGElement>(".memory-graph-node")
         : null;
-    const point = this.svgPoint(event);
     const handle = group?.dataset.handle ?? null;
     if (handle !== null && this.rendered.has(handle)) {
       const node = this.rendered.get(handle)?.layout;
@@ -1542,41 +1674,63 @@ export class GraphCanvas {
         node.vy = 0;
         this.gesture = {
           mode: "node",
+          pointerId: event.pointerId,
           handle,
           lastX: point.x,
           lastY: point.y,
+          startX: point.x,
+          startY: point.y,
           offsetX: node.x - screenToWorld(this.camera, point.x, point.y).x,
           offsetY: node.y - screenToWorld(this.camera, point.x, point.y).y,
           moved: false,
         };
-        this.svg.setPointerCapture(event.pointerId);
         event.preventDefault();
         return;
       }
     }
     this.gesture = {
       mode: "pan",
+      pointerId: event.pointerId,
       handle: null,
       lastX: point.x,
       lastY: point.y,
+      startX: point.x,
+      startY: point.y,
       offsetX: 0,
       offsetY: 0,
       moved: false,
     };
     this.svg.classList.add("memory-graph--panning");
-    this.svg.setPointerCapture(event.pointerId);
     event.preventDefault();
   };
 
   private readonly handlePointerMove = (event: PointerEvent): void => {
-    const gesture = this.gesture;
-    if (gesture === null) {
+    if (!this.pointers.has(event.pointerId)) {
       return;
     }
     const point = this.svgPoint(event);
+    this.pointers.set(event.pointerId, point);
+    if (this.pointers.size > 1) {
+      const next = this.pinchContact();
+      if (this.pinch !== null && next !== null) {
+        this.camera = pinchCamera(this.camera, this.pinch, next);
+        this.userAdjusted = true;
+        this.render();
+      }
+      this.pinch = next;
+      return;
+    }
+    const gesture = this.gesture;
+    if (gesture === null || gesture.pointerId !== event.pointerId) {
+      return;
+    }
     const dx = point.x - gesture.lastX;
     const dy = point.y - gesture.lastY;
-    if (Math.abs(dx) + Math.abs(dy) > 2) {
+    if (
+      !gesture.moved &&
+      Math.hypot(point.x - gesture.startX, point.y - gesture.startY) >
+        DRAG_THRESHOLD
+    ) {
       gesture.moved = true;
     }
     gesture.lastX = point.x;
@@ -1591,7 +1745,7 @@ export class GraphCanvas {
       this.render();
       return;
     }
-    if (gesture.handle !== null) {
+    if (gesture.handle !== null && gesture.moved) {
       const node = this.rendered.get(gesture.handle)?.layout;
       if (node === undefined) {
         return;
@@ -1601,33 +1755,100 @@ export class GraphCanvas {
       node.y = world.y + gesture.offsetY;
       node.vx = 0;
       node.vy = 0;
-      this.reheat();
+      // Keep the simulation lukewarm under the finger: a full reheat on
+      // every touch sample made the untouched nodes thrash while dragging.
+      this.reheat(0.2);
       this.render();
     }
   };
 
   private readonly handlePointerUp = (event: PointerEvent): void => {
-    const gesture = this.gesture;
-    if (gesture === null) {
-      return;
-    }
-    this.gesture = null;
-    this.svg.classList.remove("memory-graph--panning");
+    this.endPointer(event.pointerId, event.type !== "pointercancel");
     if (this.svg.hasPointerCapture(event.pointerId)) {
       this.svg.releasePointerCapture(event.pointerId);
     }
-    if (gesture.mode === "node" && gesture.handle !== null) {
+  };
+
+  /**
+   * Remove one pointer from the gesture state. A release with `activate`
+   * false still unfixes the dragged node but never opens its detail (a touch
+   * the OS cancelled is not a tap).
+   */
+  private endPointer(pointerId: number, activate: boolean): void {
+    this.pointers.delete(pointerId);
+    // A finger lifting changes which pair is pinching: re-anchor the contact
+    // geometry instead of zooming by the jump between pairs.
+    this.pinch = this.pointers.size >= 2 ? this.pinchContact() : null;
+    const gesture = this.gesture;
+    if (gesture !== null && gesture.pointerId === pointerId) {
+      this.gesture = null;
+      this.svg.classList.remove("memory-graph--panning");
+      if (gesture.mode === "node" && gesture.handle !== null) {
+        const node = this.rendered.get(gesture.handle)?.layout;
+        if (node !== undefined) {
+          node.fixed = false;
+        }
+        if (!gesture.moved && activate) {
+          this.activate(gesture.handle);
+        } else if (gesture.moved) {
+          this.reheat(0.4);
+        }
+      }
+    }
+    if (this.gesture === null && this.pointers.size === 1) {
+      // A pinch that loses one finger continues as a one-finger pan instead
+      // of freezing until the remaining finger is lifted.
+      const [id, point] = [...this.pointers.entries()][0] ?? [];
+      if (id !== undefined && point !== undefined) {
+        this.gesture = {
+          mode: "pan",
+          pointerId: id,
+          handle: null,
+          lastX: point.x,
+          lastY: point.y,
+          startX: point.x,
+          startY: point.y,
+          offsetX: 0,
+          offsetY: 0,
+          moved: true,
+        };
+        this.svg.classList.add("memory-graph--panning");
+      }
+    }
+    if (this.pointers.size === 0) {
+      this.svg.classList.remove("memory-graph--panning");
+    }
+  }
+
+  /** Drop a node/pan gesture and anchor a two-pointer pinch instead. */
+  private startPinch(): void {
+    const gesture = this.gesture;
+    if (
+      gesture !== null &&
+      gesture.mode === "node" &&
+      gesture.handle !== null
+    ) {
       const node = this.rendered.get(gesture.handle)?.layout;
       if (node !== undefined) {
         node.fixed = false;
       }
-      if (!gesture.moved) {
-        this.activate(gesture.handle);
-      } else {
-        this.reheat();
-      }
     }
-  };
+    this.gesture = null;
+    this.svg.classList.remove("memory-graph--panning");
+    this.pinch = this.pinchContact();
+  }
+
+  private pinchContact(): PinchContact | null {
+    const [a, b] = [...this.pointers.values()];
+    if (a === undefined || b === undefined) {
+      return null;
+    }
+    return {
+      distance: Math.hypot(a.x - b.x, a.y - b.y),
+      centerX: (a.x + b.x) / 2,
+      centerY: (a.y + b.y) / 2,
+    };
+  }
 
   private readonly handleWheel = (event: WheelEvent): void => {
     event.preventDefault();
