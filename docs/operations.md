@@ -5523,12 +5523,21 @@ ops/llm/apply.sh --yes    # /srv/llm へ反映し、main + litellm を収束
    `.env` の変更で再作成され、LiteLLM のルートはそのまま使える。
 4. `-c` / `--cache-type-*` / `--checkpoint-min-step` / `--reasoning-budget` は
    現行モデル向けの実測値。新モデルで再測定し、必要なら compose.yaml を直す。
+5. Companion 側にはモデル依存が 2 つ残っている。内部呼び出し
+   (memory/voice/learning など) は `reasoning: "off"` を
+   `chat_template_kwargs: {enable_thinking: false}` として送り
+   (`packages/model-local/src/openai_compatible.ts`)、これは Qwen/Ornith 系の
+   chat template だけが解釈する — 他モデルでは黙って無視され、内部呼び出しが
+   reasoning を生成し得る。`reasoning_budget_tokens` は llama-server 固有。
+   新モデルでこの 2 つが有効か確認し、効かないなら app 側の変更が要る
+   (この PR では未対応)。
 
 メンテナンス LLM (`maint`) も同じ考え方で、`MAINT_MODEL_DIR` (ホスト側の
-マウント元) と `MAINT_MODEL_FILE` (コンテナ内のファイル名) を `.env` で
+マウント元) と `MAINT_MODEL_FILE` (コンテナ内のパス) を `.env` で
 差し替える。remind は `http://127.0.0.1:18090` と `model` 文字列しか持たず、
 llama-server は要求の `model` を検証しない (2026-11-10 実測: 任意の
-`model` で 200、応答はサーバーの alias)。
+`model` で 200、応答はサーバーの alias)。ただし後述の通り remind の
+`model` 文字列は差し替え時に実ウェイト名へ更新する。
 
 rollback (64k ctx / q8_0 KV の変更だけを戻す): `ops/llm/compose.yaml` の
 `main.command` を `-c 49152` (または切替前の `-c 16384`、`--cache-type-k/v` なし)
@@ -5611,10 +5620,14 @@ curl -s http://127.0.0.1:18090/health
 ```
 
 remind 側の設定 (`~/.config/remind/memory.config.json`)。llama-server は
-要求の `model` を検証しないため値は任意だが、compose の alias に揃えておく:
+要求の `model` を検証しない (2026-11-10 実測: 任意の `model` で 200) が、
+remind はこの文字列を来歴 (`llm:v2:<model>`) として保存し、変更すると
+再分類のトリガになる。**実ウェイトを指す名前のまま**にすること
+(現在は `ornith-1.5-9b`。compose の alias とは一致しなくてよい)。
+GGUF を差し替えたら `llm.model` と `activation.llm.model` を同時に更新する:
 
 ```json
-"llm": { "backend": "openai", "enabled": true, "baseUrl": "http://127.0.0.1:18090", "model": "companion-maint" }
+"llm": { "backend": "openai", "enabled": true, "baseUrl": "http://127.0.0.1:18090", "model": "ornith-1.5-9b" }
 ```
 
 この openai バックエンドは remind 側の対応 (suiso11/remind#31) が
