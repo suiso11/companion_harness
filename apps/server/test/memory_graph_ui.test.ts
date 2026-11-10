@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildNeighborMap,
   createLayout,
+  estimateLabelWidth,
+  FIT_READABLE_MIN_SCALE,
   FIT_VIEW_RATIO,
   fitCamera,
   formatRecordedAt,
@@ -26,6 +28,7 @@ import {
   MIN_ZOOM,
   memoryListRows,
   parseGraphData,
+  pinchCamera,
   runLayout,
   screenToWorld,
   selectVisibleLabels,
@@ -33,6 +36,7 @@ import {
   TOPIC_HUB_PREFIX,
   topicHubHandle,
   truncateLabel,
+  truncateLabelToWidth,
   withTopicHubs,
   worldToScreen,
   zoomAt,
@@ -105,6 +109,29 @@ describe("memory graph layout", () => {
       return bounds === null ? 0 : bounds.width + bounds.height;
     };
     expect(span(large)).toBeGreaterThan(span(small));
+  });
+
+  it("grows the world with node count instead of packing on a phone canvas", () => {
+    // A real brain can hold MEMORY_GRAPH_NODE_MAX (500) memories. Pinning
+    // the layout area to the viewport made every extra memory pack the same
+    // pixels; the bbox must grow roughly with sqrt(count) instead.
+    const graph = (count: number): GraphNodeData[] =>
+      Array.from({ length: count }, (_, index) => ({
+        handle: `m${index}`,
+        label: `memory ${index}`,
+        status: "active" as const,
+        kind: "user_fact" as const,
+        episode: null,
+      }));
+    const span = (count: number): number => {
+      const layout = runLayout(createLayout(graph(count), [], 390, 590));
+      const bounds = graphBounds(layout.nodes);
+      return bounds === null ? 0 : bounds.width + bounds.height;
+    };
+    const small = span(120);
+    const large = span(360);
+    // sqrt(3) ≈ 1.73; gravity/settling make the exact ratio a little lower.
+    expect(large / small).toBeGreaterThan(1.4);
   });
 
   it("does not pin nodes into rows on the canvas top/bottom edges", () => {
@@ -205,9 +232,54 @@ describe("memory graph layout", () => {
     expect(after.x).toBeCloseTo(before.x, 8);
     expect(after.y).toBeCloseTo(before.y, 8);
   });
+
+  it("pinches around the finger midpoint and pans with it", () => {
+    const camera = { scale: 1.5, tx: 100, ty: 80 };
+    const anchor = { x: 100, y: 80 };
+    const before = screenToWorld(camera, anchor.x, anchor.y);
+    const zoomed = pinchCamera(
+      camera,
+      { distance: 100, centerX: anchor.x, centerY: anchor.y },
+      { distance: 200, centerX: anchor.x, centerY: anchor.y },
+    );
+    // Spread fingers apart => zoom in, keeping the midpoint's world point.
+    expect(zoomed.scale).toBe(3);
+    const after = screenToWorld(zoomed, anchor.x, anchor.y);
+    expect(after.x).toBeCloseTo(before.x, 8);
+    expect(after.y).toBeCloseTo(before.y, 8);
+    // Same spread, moved midpoint => pure pan by the midpoint delta.
+    const panned = pinchCamera(
+      camera,
+      { distance: 100, centerX: 100, centerY: 80 },
+      { distance: 100, centerX: 130, centerY: 60 },
+    );
+    expect(panned.scale).toBe(camera.scale);
+    expect(panned.tx).toBe(camera.tx + 30);
+    expect(panned.ty).toBe(camera.ty - 20);
+    // Two fingers landing on the same point must not collapse the zoom.
+    const coincident = pinchCamera(
+      camera,
+      { distance: 100, centerX: 100, centerY: 80 },
+      { distance: 0, centerX: 100, centerY: 80 },
+    );
+    expect(coincident.scale).toBe(camera.scale);
+  });
 });
 
 describe("memory graph fit-to-view and labels", () => {
+  it("keeps the default fit readable on a phone canvas", () => {
+    const nodes = [
+      { x: -200, y: -140, radius: 8 },
+      { x: 200, y: 140, radius: 8 },
+    ];
+    // The raw fit on a 366x590 phone canvas is ~0.75; the readable floor
+    // keeps the designed 12px label size and lets the graph overflow.
+    expect(fitCamera(nodes, 366, 590).scale).toBeLessThan(1);
+    expect(
+      fitCamera(nodes, 366, 590, { minScale: FIT_READABLE_MIN_SCALE }).scale,
+    ).toBe(FIT_READABLE_MIN_SCALE);
+  });
+
   it("fits the bounding box to 85% of the limiting canvas dimension", () => {
     const nodes = [
       { x: -120, y: -80, radius: 8 },
@@ -327,6 +399,20 @@ describe("memory graph fit-to-view and labels", () => {
       Array.from(truncateLabel("日本語のとても長いラベルです".repeat(3))),
     ).toHaveLength(LABEL_MAX_CHARS);
   });
+
+  it("shortens a label to the room before the canvas edge", () => {
+    const label = "日本語のとても長いラベルです";
+    // Wide CJK chars at 24px need ~24px each; 144px fits about five + ellipsis.
+    const text = truncateLabelToWidth(label, LABEL_MAX_CHARS, 144, 24);
+    expect(text.endsWith("…")).toBe(true);
+    expect(estimateLabelWidth(text, 24)).toBeLessThanOrEqual(144);
+    // A full budget still applies when there is room.
+    expect(truncateLabelToWidth(label, 4, 10_000, 24)).toBe("日本語…");
+    // No room at all: the label is dropped rather than drawn off-canvas.
+    expect(truncateLabelToWidth(label, LABEL_MAX_CHARS, 10, 24)).toBe("");
+    // Only an ellipsis would fit: that says nothing, so drop it too.
+    expect(truncateLabelToWidth("abcdef", LABEL_MAX_CHARS, 20, 24)).toBe("");
+  });
 });
 
 describe("label declutter", () => {
@@ -367,6 +453,28 @@ describe("label declutter", () => {
         expect(overlap).toBe(false);
       }
     }
+  });
+
+  it("shortens a label that crosses the right canvas edge instead of dropping it", () => {
+    // Zoomed-in phone case: one wide node near the edge, 366px canvas.
+    const visible = selectVisibleLabels(
+      [
+        candidate({
+          handle: "edge",
+          x: 240,
+          radius: 18,
+          label: "日本語のとても長いラベルです".repeat(2),
+        }),
+      ],
+      { fontSize: 24, width: 366, height: 590, gap: 4 },
+    );
+    expect(visible).toHaveLength(1);
+    const [label] = visible;
+    if (label === undefined) {
+      return;
+    }
+    expect(label.text.endsWith("…")).toBe(true);
+    expect(label.x + label.width).toBeLessThanOrEqual(366);
   });
 
   it("prioritises selected/hovered, then hubs, then degree", () => {
