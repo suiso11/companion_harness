@@ -254,6 +254,25 @@ local autotalk turn takes the shared background admission first, so it never
 overlaps the foreground chat or memory/learning extraction on the local
 model; a busy gate skips that hour and the next sweep retries.
 
+### Main-conversation persona
+
+The main chat (not persona chat) always runs with the fixed
+`AGENT_SYSTEM_PROMPT` (the safety contract); it can never be replaced. The
+`/personas` page has a 「メインAIのペルソナ」 editor: saving stores up to 4000
+characters in the `main_persona` table (migration 0047), and the agent
+strategy appends that text to the fixed prompt on the NEXT run. No restart
+is needed, and a reply that is already running is not affected. Empty text
+clears the row; input containing NUL or longer than 4000 characters is
+rejected with 400.
+
+API: `GET /api/main-persona` -> `{ instructions, updatedAt }`;
+`PUT /api/main-persona` `{ instructions }` (empty string clears). The PUT
+reuses the existing mutation guards (Host/Origin/Sec-Fetch-Site/JSON and the
+optional remote session gate). Like persona prompts, the text is user
+content: it is stored in plaintext in the local DB (see Plaintext
+sensitivity above) and is sent to the configured model as part of the
+system prompt.
+
 ## Markdown references (M1, read-only)
 
 Unset `COMPANION_MARKDOWN_ROOTS_JSON` (default `[]`) means no Markdown

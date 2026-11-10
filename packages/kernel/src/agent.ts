@@ -3098,9 +3098,10 @@ export interface AgentStrategyOptions {
   readonly learning?: AgentLessonRecall;
   /**
    * Optional experimental prompt variant appended to the immutable base
-   * safety/system instructions (never replaces them).
+   * safety/system instructions (never replaces them). A function is resolved
+   * once per run, so a UI edit applies to the next run without a restart.
    */
-  readonly systemPrompt?: string;
+  readonly systemPrompt?: string | (() => string | null);
   readonly promptVariantName?: string;
   /** Opt-in private local execution recorder (separate from public audit). */
   readonly executionRecorder?: ExecutionRecorder;
@@ -3207,25 +3208,31 @@ export function createAgentStrategy(
     options.voice?.profile === undefined
       ? null
       : buildVoiceAwarenessNote(options.voice.profile);
-  const promptAppend = [options.systemPrompt, voiceNote]
-    .filter(
-      (part): part is string => typeof part === "string" && part.length > 0,
-    )
-    .join("\n\n");
-  const systemPrompt = composeAgentSystemPrompt(
-    promptAppend.length === 0 ? undefined : promptAppend,
-  );
-  const harnessFingerprint = agentHarnessFingerprint({
-    model,
-    provider: gateway.provider,
-    systemPrompt,
-    tools: toolDefinitions,
-  });
+  const readSystemPrompt = (): string | null | undefined =>
+    typeof options.systemPrompt === "function"
+      ? options.systemPrompt()
+      : options.systemPrompt;
 
   return async (ctx) => {
     if (ctx.signal.aborted) {
       throw new StrategyError("execution_cancelled");
     }
+    // Append (never replace) the current variant and the voice-layer note.
+    // Resolved per run: a main-persona edit applies to the next request.
+    const promptAppend = [readSystemPrompt(), voiceNote]
+      .filter(
+        (part): part is string => typeof part === "string" && part.length > 0,
+      )
+      .join("\n\n");
+    const systemPrompt = composeAgentSystemPrompt(
+      promptAppend.length === 0 ? undefined : promptAppend,
+    );
+    const harnessFingerprint = agentHarnessFingerprint({
+      model,
+      provider: gateway.provider,
+      systemPrompt,
+      tools: toolDefinitions,
+    });
     // Wall budget starts at strategy invocation so synchronous preparation
     // (loadHistory/loadReferenceSummary/ordinal-map/projectPrompt) counts
     // toward the 600s whole-run deadline (r3946692097). The setTimeout below

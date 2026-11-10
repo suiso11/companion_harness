@@ -125,6 +125,8 @@ import {
   LearningStateConflictError,
   type LearningStore,
   LearningVersionConflictError,
+  MAX_MAIN_PERSONA_INSTRUCTIONS,
+  type MainPersonaStore,
   NotificationKeyConflictError,
   NotificationProjectionResetError,
   type PersonaChatStore,
@@ -214,6 +216,12 @@ import {
 
 const ProviderKeyRequestSchema = z.strictObject({
   apiKey: z.string().max(4096),
+});
+const MainPersonaRequestSchema = z.strictObject({
+  instructions: z
+    .string()
+    .max(MAX_MAIN_PERSONA_INSTRUCTIONS)
+    .refine((value) => !value.includes("\0")),
 });
 
 /**
@@ -569,6 +577,8 @@ export interface CreateAppDeps {
    * only decide whether a provider is `available`.
    */
   personaChat?: { store: PersonaChatStore; service: PersonaChatService };
+  /** Main-conversation persona editor; absent keeps both routes 404. */
+  mainPersona?: MainPersonaStore;
   /** Settings-page key store; routes register only with `personaChat` too. */
   providerKeys?: ProviderKeyStore;
 }
@@ -1562,6 +1572,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const learningStore = deps.learningStore ?? null;
   const personaChat = deps.personaChat;
   const providerKeys = deps.providerKeys ?? null;
+  const mainPersona = deps.mainPersona;
   const autodispatchForeground = deps.autodispatchForeground;
   const agora = deps.agora ?? null;
   const shadowWake = deps.shadowWake;
@@ -7372,6 +7383,33 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         }
       });
     }
+  }
+
+  // Main-conversation persona: an append-only instruction block for the
+  // fixed agent prompt. Reads never touch a run; a save applies to the next
+  // run because the strategy resolves the getter per invocation.
+  if (mainPersona !== undefined) {
+    const view = () => {
+      const row = mainPersona.get();
+      return {
+        instructions: row?.instructions ?? "",
+        updatedAt: row?.updatedAt ?? null,
+      };
+    };
+    app.get("/api/main-persona", (c) => {
+      if (!strictQuery(c, []).ok) return validationError(c);
+      return c.json(view(), 200);
+    });
+    app.put("/api/main-persona", async (c) => {
+      const body = await parseJsonBody(c, MainPersonaRequestSchema);
+      if (body === null) return validationError(c);
+      try {
+        mainPersona.set(body.instructions, now());
+        return c.json(view(), 200);
+      } catch (error) {
+        return mapDomainError(c, error);
+      }
+    });
   }
 
   return { app, controls };
