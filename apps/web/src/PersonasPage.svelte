@@ -8,6 +8,7 @@ import {
   type PersonaProviderInfo,
   patchJson,
 } from "./lib/persona_chat.js";
+import { personaAiLabel } from "./lib/persona_display.js";
 
 let personas = $state<Persona[]>([]);
 let providers = $state<PersonaProviderInfo[]>([]);
@@ -31,8 +32,7 @@ const valid = $derived(
     [...avatar].length <= 16 &&
     model.trim().length > 0 &&
     systemPrompt.trim().length > 0 &&
-    systemPrompt.length <= 8000 &&
-    info?.available === true,
+    systemPrompt.length <= 8000,
 );
 
 async function load(): Promise<void> {
@@ -108,25 +108,28 @@ async function remove(p: Persona): Promise<void> {
         <form onsubmit={save}>
           <label>名前<input bind:value={name} maxlength="80" required /></label>
           <label>アバター（絵文字や短い名前）<input bind:value={avatar} maxlength="16" required /></label>
+          <fieldset class="ai">
+            <legend>このペルソナが使うAI</legend>
+            <label
+              >プロバイダ
+              <select bind:value={provider}>
+                {#each providers as p (p.id)}
+                  <option value={p.id}>{p.label}{p.available ? "" : p.id === "local" ? "（未設定）" : "（APIキー未設定）"}</option>
+                {/each}
+              </select>
+            </label>
+            {#if info && !info.available}<p class="hint">{provider === "local" ? "ローカルモデルが未設定です" : "APIキー未設定"}</p>{/if}
+            <label
+              >モデル
+              <input bind:value={model} list="persona-models" maxlength="256" required />
+              <datalist id="persona-models">
+                {#each info?.suggestedModels ?? [] as m (m)}<option value={m}></option>{/each}
+              </datalist>
+            {#if provider === "local"}<p class="hint">サーバのローカルモデルを使います（モデル名は表示用）</p>{/if}
+            </label>
+          </fieldset>
           <label
-            >プロバイダ
-            <select bind:value={provider}>
-              {#each providers as p (p.id)}
-                <option value={p.id}>{p.label}{p.available ? "" : "（APIキー未設定）"}</option>
-              {/each}
-            </select>
-          </label>
-          {#if info && !info.available}<p class="hint">{provider === "local" ? "ローカルモデルが未設定です" : "APIキー未設定"}</p>{/if}
-          <label
-            >モデル
-            <input bind:value={model} list="persona-models" maxlength="256" required />
-            <datalist id="persona-models">
-              {#each info?.suggestedModels ?? [] as m (m)}<option value={m}></option>{/each}
-            </datalist>
-          {#if provider === "local"}<p class="hint">サーバのローカルモデルを使います（モデル名は表示用）</p>{/if}
-          </label>
-          <label
-            >システムプロンプト
+            >システムプロンプト（このAIの人格・口調）
             <textarea bind:value={systemPrompt} rows="6" maxlength="8000" required></textarea>
             <span class="hint">{systemPrompt.length} / 8000</span>
           </label>
@@ -144,7 +147,7 @@ async function remove(p: Persona): Promise<void> {
         {#each personas as p (p.id)}
           <li>
             <span class="avatar" aria-hidden="true">{p.avatar}</span>
-            <span class="meta"><strong>{p.name}</strong><small>{p.provider} / {p.model}</small></span>
+            <span class="meta"><strong>{p.name}</strong><small>{personaAiLabel(providers, p)}</small></span>
             <button type="button" onclick={() => openForm(p)}>編集</button>
             <button type="button" class="danger" onclick={() => remove(p)}>削除</button>
           </li>
@@ -169,6 +172,8 @@ async function remove(p: Persona): Promise<void> {
   li { padding: 0.5rem 0.75rem; background: var(--card); border: 1px solid var(--border-subtle); border-radius: var(--radius); }
   .meta { flex: 1; display: grid; min-width: 0; }
   small, .hint { color: var(--muted-foreground); font-size: 0.8rem; margin: 0; }
+  fieldset { display: grid; gap: 0.6rem; margin: 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border-subtle); border-radius: var(--radius); }
+  legend { padding: 0 0.3rem; font-size: 0.85rem; color: var(--muted-foreground); }
   .avatar { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 50%; background: var(--accent); }
   .banner { margin: 0; padding: 0.5rem 0.75rem; border: 1px solid var(--destructive); border-radius: var(--radius-sm); color: var(--destructive); }
 </style>
