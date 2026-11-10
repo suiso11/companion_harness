@@ -148,6 +148,19 @@ describe("persona chat routes", () => {
     ).toBe(404);
   });
 
+  it("creates a persona with the opencode provider", async () => {
+    // Regression: the DB provider CHECK must accept every id in the
+    // contracts enum; 0045 only knew openai/deepseek/local.
+    const f = await makeFixture();
+    const res = await f.request("/api/personas", "POST", {
+      ...PERSONA,
+      provider: "opencode",
+      model: "deepseek-v4.1-flash",
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as Json).provider).toBe("opencode");
+  });
+
   it("rejects bad persona bodies with 400", async () => {
     const f = await makeFixture();
     const extra = await f.request("/api/personas", "POST", {
