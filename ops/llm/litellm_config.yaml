@@ -1,9 +1,12 @@
-# LiteLLM model list for the local stack. The qwen-local alias was removed;
-# `local-chat` is the model Companion uses.
+# LiteLLM model list for the local stack.
+# `local-chat` is the model Companion uses; it is a stable routing name.
+# The upstream model must match main's llama.cpp `--alias` in compose.yaml:
+# both are model-independent, so swapping the GGUF only changes
+# MAIN_MODEL_FILE in /srv/llm/.env.
 model_list:
   - model_name: local-chat
     litellm_params:
-      model: openai/huihui-ornith-35b
+      model: openai/companion-main
       api_base: http://main:8080/v1
       api_key: os.environ/LLAMA_API_KEY
       # The relay abandons a turn at 60s, but llama.cpp keeps generating.
