@@ -6356,6 +6356,18 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   learning signal (no automatic frequency change yet).
 - The agent prompt includes prior `companion_text` turns as assistant-only
   history, so a user reply sees the message it answers.
+- Scheduling: each loop re-arms only AFTER its pass settles. A pass that
+  acquired the shared background gate (admitted) paces the next attempt by its
+  interval; a pass blocked before admission (gate held, active run, quiet
+  hours, no target, no open thought) retries on a 10-minute tick instead of
+  losing the whole interval. The next fire is scheduled at
+  `last + interval + 1ms`: the thought loop paces from the thought's
+  `created_at` (written after the model calls), not from the fire time, which
+  is why the old fixed re-arm landed a hair short and silently skipped every
+  other thought pass.
+- Every gateway call is bounded by `SPONTANEOUS_MODEL_TIMEOUT_MS` (120s, the
+  same local-gateway bound as memory extraction), so a hung model call cannot
+  hold the shared gate or stall the loops until a restart.
 - No UI panel for the journal yet; it is internal. Raw conversation originals
   stay in remind (per-speaker chunks); thoughts never write remind memory.
 
@@ -6378,9 +6390,11 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   write. The chat page sends it on boot/switch/visibility and every 60s
   while visible.
 - The spontaneous speech service targets the freshest presence session
-  (validated against the DB), falling back to the newest session. This makes
-  the daily message arrive in the conversation the user is actually viewing,
-  instead of an arbitrary `last_active_at` session.
+  (validated against the DB) only when that session already has a user turn;
+  otherwise it falls back to the newest session WITH a user turn. A newly
+  created, empty session is therefore never a target (it used to be the
+  newest `last_active_at` row and silently blocked every speech pass), and a
+  companion message always lands in a real conversation.
 - Presence is process-local: after a restart the next heartbeat or the
   latest-session fallback covers the gap. No cross-user/remote sharing.
 
