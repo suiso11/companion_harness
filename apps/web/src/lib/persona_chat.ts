@@ -88,6 +88,14 @@ export function patchJson(path: string, body: unknown) {
   });
 }
 
+export function putJson(path: string, body: unknown) {
+  return fetchJson(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function deleteJson(path: string) {
   return fetchJson(path, { method: "DELETE" });
 }

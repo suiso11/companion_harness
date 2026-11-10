@@ -7,6 +7,7 @@ import {
   type PersonaProvider,
   type PersonaProviderInfo,
   patchJson,
+  putJson,
 } from "./lib/persona_chat.js";
 import { personaAiLabel } from "./lib/persona_display.js";
 
@@ -51,6 +52,40 @@ async function load(): Promise<void> {
   loaded = true;
 }
 void load();
+
+// Appended to the main AI's fixed system prompt; separate state so a failure
+// here never blanks the persona list.
+let mainInstructions = $state("");
+let mainLoaded = $state(false);
+let mainSaving = $state(false);
+let mainStatus = $state<"" | "saved" | "failed" | "loadFailed">("");
+
+async function loadMain(): Promise<void> {
+  const res = await fetchJson("/api/main-persona");
+  if (res.status === 200) {
+    mainInstructions = (res.body as { instructions: string }).instructions;
+    mainLoaded = true;
+  } else {
+    mainStatus = "loadFailed";
+  }
+}
+void loadMain();
+
+async function saveMain(event: Event): Promise<void> {
+  event.preventDefault();
+  if (!mainLoaded || mainSaving) return;
+  mainSaving = true;
+  // Preserve text exactly; whitespace-only counts as cleared.
+  const instructions = mainInstructions.trim() === "" ? "" : mainInstructions;
+  const res = await putJson("/api/main-persona", { instructions });
+  mainSaving = false;
+  if (res.status === 200) {
+    mainInstructions = (res.body as { instructions: string }).instructions;
+    mainStatus = "saved";
+  } else {
+    mainStatus = "failed";
+  }
+}
 
 function openForm(p: Persona | null): void {
   editingId = p?.id ?? "";
@@ -102,6 +137,26 @@ async function remove(p: Persona): Promise<void> {
         <h2 id="personas-title">ペルソナ</h2>
         <button type="button" onclick={() => openForm(null)}>新規作成</button>
       </header>
+
+      <form class="main-persona" onsubmit={saveMain} aria-labelledby="main-persona-title">
+        <h3 id="main-persona-title">メインAIのペルソナ</h3>
+        <p class="hint">基本の安全指示に追記されます（置き換えではありません）。次回のチャットから反映されます。空にして保存すると追記が削除されます。</p>
+        <textarea
+          rows="5"
+          maxlength="4000"
+          aria-labelledby="main-persona-title"
+          disabled={!mainLoaded}
+          bind:value={mainInstructions}
+          oninput={() => (mainStatus = "")}
+        ></textarea>
+        <div class="row">
+          <button type="submit" disabled={!mainLoaded || mainSaving}>保存</button>
+          <small>{mainInstructions.length} / 4000</small>
+          {#if mainStatus === "saved"}<small role="status">保存しました</small>{/if}
+          {#if mainStatus === "failed"}<small role="alert">保存できませんでした</small>{/if}
+          {#if mainStatus === "loadFailed"}<small role="alert">読み込めませんでした</small>{/if}
+        </div>
+      </form>
       {#if error}<p class="banner" role="alert">{error}</p>{/if}
 
       {#if editingId !== null}
@@ -161,7 +216,7 @@ async function remove(p: Persona): Promise<void> {
   .personas { display: grid; gap: 0.75rem; max-width: 40rem; padding: 1rem; }
   header, .row, li { display: flex; align-items: center; gap: 0.5rem; }
   header { justify-content: space-between; }
-  h2 { margin: 0; font-size: 1.1rem; }
+  h2, h3 { margin: 0; font-size: 1.1rem; }
   form { display: grid; gap: 0.6rem; padding: 0.75rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
   label { display: grid; gap: 0.25rem; font-size: 0.85rem; }
   input, select, textarea, button { font: inherit; color: var(--foreground); background: var(--muted); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.35rem 0.6rem; }

@@ -570,6 +570,12 @@ export {
   LOOP_TOOL_FAILURE_OUTCOMES,
   labelRun,
 } from "./loop_metrics.js";
+export {
+  createMainPersonaStore,
+  MAX_MAIN_PERSONA_INSTRUCTIONS,
+  type MainPersona,
+  type MainPersonaStore,
+} from "./main_persona.js";
 export type {
   CreateM1ToolRegistrationsOptions,
   MarkdownConnectorBinding,

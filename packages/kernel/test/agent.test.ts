@@ -200,6 +200,7 @@ function makeStrategy(
     wallMs?: number;
     maxSteps?: number;
     onCitationsDropped?: (dropped: AgentCitationsDropped) => void;
+    systemPrompt?: string | (() => string | null);
   },
 ): ReturnType<typeof createAgentStrategy> {
   return createAgentStrategy({
@@ -216,6 +217,9 @@ function makeStrategy(
     ...(extra?.onCitationsDropped === undefined
       ? {}
       : { onCitationsDropped: extra.onCitationsDropped }),
+    ...(extra?.systemPrompt === undefined
+      ? {}
+      : { systemPrompt: extra.systemPrompt }),
   });
 }
 
@@ -1951,6 +1955,39 @@ describe("transient model-step retry", () => {
       expect(retried).toHaveLength(0);
     } finally {
       vi.useRealTimers();
+      const { closeKernelDatabase } = await import("../src/index.js");
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
+describe("live system-prompt getter", () => {
+  it("resolves the getter once per run and keeps the base contract", async () => {
+    const { handle, repo } = await setup();
+    try {
+      const broker = makeBroker(handle, repo, []);
+      const { gateway, calls } = scriptGateway([
+        chatResult([answerCall([{ text: "first", citations: [] }])]),
+        chatResult([answerCall([{ text: "second", citations: [] }])]),
+      ]);
+      let instructions = "persona-one";
+      const strategy = makeStrategy(handle, repo, broker, gateway, {
+        systemPrompt: () => instructions,
+      });
+
+      const first = newRunningTurn(repo, T0);
+      await strategy(strategyCtx(repo, first.sessionId, first.runId));
+      instructions = "persona-two";
+      const second = newRunningTurn(repo, T0 + 100);
+      await strategy(strategyCtx(repo, second.sessionId, second.runId));
+
+      const firstPrompt = calls[0]?.messages[0]?.content ?? "";
+      const secondPrompt = calls[1]?.messages[0]?.content ?? "";
+      expect(firstPrompt).toContain("persona-one");
+      expect(firstPrompt).toContain("read-only research assistant");
+      expect(secondPrompt).toContain("persona-two");
+      expect(secondPrompt).not.toContain("persona-one");
+    } finally {
       const { closeKernelDatabase } = await import("../src/index.js");
       closeKernelDatabase(handle);
     }

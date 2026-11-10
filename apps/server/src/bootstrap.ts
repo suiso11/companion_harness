@@ -79,6 +79,7 @@ import {
   createKernelRepository,
   createLearningRegistrations,
   createM1ToolRegistrations,
+  createMainPersonaStore,
   createMemorySearchRegistration,
   createMemoryStageRegistrations,
   createPersonaChatStore,
@@ -1428,6 +1429,9 @@ export async function startServer(
       backupDir: join(dirname(config.dbPath), "backups"),
     });
     logger.info("server.migrated", { status: migrated.toVersion });
+    // Main-conversation persona (append-only instruction block). Reads the
+    // row per run, so a /personas edit applies to the next request.
+    const mainPersona = createMainPersonaStore({ db: handle.raw });
 
     // Opt-in private execution records (COMPANION_EXECUTION_RECORDS_JSON).
     // Construction validates/creates the absolute private root fail-closed
@@ -2809,6 +2813,7 @@ export async function startServer(
           broker: agentBroker,
           gateway: modelGateway,
           model: modelName,
+          systemPrompt: () => mainPersona.get()?.instructions ?? null,
           // MAIN conversation only: the configured provider-side thinking
           // budget is forwarded on every agent step/repair request. Auxiliary
           // memory/voice/learning calls keep their own reasoning-off requests.
@@ -3441,6 +3446,7 @@ export async function startServer(
       ...(learning !== null ? { learningStore: learning.store } : {}),
       personaChat,
       providerKeys,
+      mainPersona,
       // Human STOP aborts only this service's owned in-flight intake; the
       // narrow app port never kills a worker/global process.
       ...(autodispatch !== null
