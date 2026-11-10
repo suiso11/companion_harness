@@ -14,6 +14,7 @@ import {
   previewOf,
   relativeTime,
 } from "./lib/persona_chat.js";
+import { pairAiLabel, personaAiLabel } from "./lib/persona_display.js";
 
 const STORAGE_KEY = "ch.personaChatId";
 
@@ -265,18 +266,19 @@ function onKey(event: KeyboardEvent): void {
 
 <ChatPage activePath="/chats" chatSurface={false}>
   {#snippet children()}
+    {@const selectedPartner = selected ? personas.find((p) => p.id === selected.partnerId) : undefined}
     <div class="chats">
       <aside class:open={drawer} aria-label="会話一覧">
         <div class="new">
           <select bind:value={pickerId} disabled={usable.length === 0} aria-label="ペルソナを選択">
-            {#each usable as p (p.id)}<option value={p.id}>{p.avatar} {p.name}</option>{/each}
+            {#each usable as p (p.id)}<option value={p.id}>{p.avatar} {p.name}（{personaAiLabel(providers, p)}）</option>{/each}
           </select>
           <button type="button" disabled={usable.length === 0} onclick={create}>新しい会話</button>
         </div>
         <div class="new opts">
           <select bind:value={partnerId} disabled={usable.length < 2} aria-label="相手（省略可）">
             <option value="">相手（省略可）</option>
-            {#each usable.filter((p) => p.id !== pickerId) as p (p.id)}<option value={p.id}>{p.avatar} {p.name}</option>{/each}
+            {#each usable.filter((p) => p.id !== pickerId) as p (p.id)}<option value={p.id}>{p.avatar} {p.name}（{personaAiLabel(providers, p)}）</option>{/each}
           </select>
           <label><input type="checkbox" bind:checked={autotalkNew} disabled={partnerId === "" || partnerId === pickerId} /> 自走で話す（1時間おき）</label>
         </div>
@@ -290,12 +292,13 @@ function onKey(event: KeyboardEvent): void {
         {/if}
         <ul>
           {#each chats as chat (chat.id)}
+            {@const partner = personas.find((p) => p.id === chat.partnerId)}
             <li class:active={chat.id === selectedId}>
               <button type="button" class="row" onclick={() => select(chat.id)}>
                 <span class="avatar" aria-hidden="true">{chat.avatar}</span>
                 {#if chat.partnerAvatar}<span class="avatar partner" aria-hidden="true">{chat.partnerAvatar}</span>{/if}
                 <span class="body">
-                  <span class="top"><strong>{chatTitle(chat)}</strong><small>{relativeTime(now, chat.updatedAt)}</small></span>
+                  <span class="top"><span><strong>{chatTitle(chat)}</strong> <small>{pairAiLabel(providers, chat.provider, partner?.provider ?? null)}</small></span><small>{relativeTime(now, chat.updatedAt)}</small></span>
                   <span class="title">{chat.title}{#if chat.autotalk} <span class="badge">自走</span>{/if}</span>
                   <small class="preview">{previewOf(chat.preview)}</small>
                 </span>
@@ -312,7 +315,7 @@ function onKey(event: KeyboardEvent): void {
       <section class="pane">
         <header>
           <button type="button" class="toggle" aria-label="会話一覧を開く" aria-expanded={drawer} onclick={() => { drawer = !drawer; now = Date.now(); }}>☰</button>
-          <span class="who"><strong>{selected ? `${chatTitle(selected)} · ${selected.title}` : "ペルソナとの会話"}</strong>{#if selected?.autotalk}<small>1時間おきに自動で話します</small>{/if}</span>
+          <span class="who"><strong>{selected ? `${chatTitle(selected)} · ${selected.title}` : "ペルソナとの会話"}</strong>{#if selected}<small>{pairAiLabel(providers, selected.provider, selectedPartner?.provider ?? null)}</small>{/if}{#if selected?.autotalk}<small>1時間おきに自動で話します</small>{/if}</span>
           {#if selected?.partnerId}
             <button type="button" aria-pressed={selected.autotalk} onclick={toggleAutotalk}>自走 {selected.autotalk ? "ON" : "OFF"}</button>
           {/if}
