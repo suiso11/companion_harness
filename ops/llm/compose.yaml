@@ -1,6 +1,13 @@
 # Local LLM stack (llama.cpp + LiteLLM) mirrored from the host's
-# /srv/llm/compose.yaml. qwen was removed; images are pinned by digest.
+# /srv/llm/compose.yaml. Images are pinned by digest.
 # Secrets stay in /srv/llm/.env (never committed) — see .env.example.
+#
+# Model-independent: service/container names, llama.cpp --alias values, and
+# the LiteLLM model are stable routing identities. The GGUF to serve comes
+# from /srv/llm/.env (MAIN_MODEL_FILE, MAINT_MODEL_DIR, MAINT_MODEL_FILE), so
+# swapping models must not require editing this file. The tuning flags below
+# (context size, checkpoint spacing, reasoning budget) were measured against
+# the current model — re-measure them when the GGUF changes.
 services:
   main:
     # Chat model for Companion (LiteLLM `local-chat`). Source:
@@ -15,7 +22,7 @@ services:
     # (rejected at 17,026). At 49152 q8_0 measured GPU0 21.0/24.0 GiB,
     # prefill ~557 tok/s @20k, decode 59 tok/s short / 32 tok/s @20k.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
-    container_name: huihui-ornith-35b
+    container_name: companion-main
     restart: unless-stopped
     environment:
       LLAMA_API_KEY: ${LLAMA_API_KEY}
@@ -30,7 +37,7 @@ services:
               capabilities: [gpu]
     command:
       - -m
-      - /root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf
+      - ${MAIN_MODEL_FILE:-/root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf}
       - --host
       - 0.0.0.0
       - --port
@@ -75,22 +82,22 @@ services:
       - --reasoning-budget-message
       - "\n\n考えはここまで。回答します。\n"
       - --alias
-      - huihui-ornith-35b
+      - companion-main
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
     stop_grace_period: 30s
 
-  ornith:
+  maint:
     # Maintenance LLM for remind (importance / topics / consolidation),
     # called directly on loopback by remind. Not registered in LiteLLM.
     # Shares the pinned llama.cpp build with main.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
-    container_name: ornith-1.5-9b
+    container_name: companion-maint
     restart: unless-stopped
     volumes:
       # Host GGUF dir; ~/models/ornith on the current host. Override with
-      # ORNITH_MODEL_DIR when the file lives elsewhere.
-      - ${ORNITH_MODEL_DIR:-${HOME}/models/ornith}:/models:ro
+      # MAINT_MODEL_DIR when the file lives elsewhere.
+      - ${MAINT_MODEL_DIR:-${HOME}/models/ornith}:/models:ro
     deploy:
       resources:
         reservations:
@@ -102,7 +109,7 @@ services:
               capabilities: [gpu]
     command:
       - -m
-      - /models/Ornith-1.5-9B-Q5_K_M.gguf
+      - ${MAINT_MODEL_FILE:-/models/Ornith-1.5-9B-Q5_K_M.gguf}
       - --host
       - 0.0.0.0
       - --port
@@ -115,7 +122,7 @@ services:
       - "on"
       - --jinja
       - --alias
-      - ornith-1.5-9b
+      - companion-maint
     ports:
       # Loopback only: remind calls http://127.0.0.1:18090 directly.
       - "127.0.0.1:18090:8080"

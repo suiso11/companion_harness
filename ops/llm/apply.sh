@@ -246,4 +246,4 @@ if [ -n "$RECREATE_SERVICES" ]; then
   docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
     -f "$DEST/compose.yaml" up -d --remove-orphans --force-recreate $RECREATE_SERVICES
 fi
-printf 'apply: containers reconciled (litellm on :4000, main/huihui-ornith-35b internal :8080, ornith on 127.0.0.1:18090, searxng on 127.0.0.1:8888)\n'
+printf 'apply: containers reconciled (litellm on :4000, main/companion-main internal :8080, maint on 127.0.0.1:18090, searxng on 127.0.0.1:8888)\n'

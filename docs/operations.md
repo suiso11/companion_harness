@@ -5455,10 +5455,12 @@ ops/llm/apply.sh --yes
 ### メインチャットモデル (Huihui Ornith 1.5 35B A3B abliterated, P40)
 
 2026-10-22 に chat model を Gemma 4 26B-A4B から切り替えた。LiteLLM の
-`local-chat` は compose service `main` (container `huihui-ornith-35b`) を指す。
+`local-chat` は compose service `main` (container `companion-main`) を指す。
+配信する GGUF は `main` の識別名ではなく `/srv/llm/.env` の
+`MAIN_MODEL_FILE` で決まる (下記「モデル差し替え」)。
 
 - 配置: P40 (`device_ids: ["0"]`)、llama.cpp image は従来と同じ digest pin。
-- `-c 65536 --cache-type-k q8_0 --cache-type-v q8_0 --n-gpu-layers 99 -fa on --jinja --alias huihui-ornith-35b`。
+- `-c 65536 --cache-type-k q8_0 --cache-type-v q8_0 --n-gpu-layers 99 -fa on --jinja --alias companion-main`。
   投機デコード (MTP) は使わない。KV cache は q8_0 に量子化して 64k context を
   P40 (24 GiB) に収める。64k は pi-orch guest の `contextWindow` (65536) 以上に
   する必要がある (guest 側の compaction より先に llama.cpp が overflow すると
@@ -5517,8 +5519,9 @@ wget -c \
 ```
 
 `/srv/models/huggingface` はコンテナの `/root/.cache/huggingface` に
-マウントされるため、コンテナ内の `-m` は
-`/root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf`。
+マウントされるため、コンテナ内の `-m` は既定で
+`/root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf`
+(`/srv/llm/.env` の `MAIN_MODEL_FILE` で上書きできる)。
 
 反映:
 
@@ -5529,7 +5532,36 @@ ops/llm/apply.sh --yes    # /srv/llm へ反映し、main + litellm を収束
 
 `apply.sh` は litellm_config.yaml 変更時に litellm を force-recreate する。
 起動後は LiteLLM の `/v1/models` で `local-chat` が
-`huihui-ornith-35b` を向いていることと、`/health` を確認する。
+`companion-main` を向いていることと、`/health` を確認する。
+
+#### モデル差し替え (リポジトリ編集なし)
+
+`main` のルーティング名 (`local-chat` → `companion-main`) と `maint` の
+`--alias companion-maint` は固定。差し替えるのは GGUF だけ:
+
+1. 新しい GGUF を配置する。`main` は `/srv/models/huggingface` を
+   `/root/.cache/huggingface` にマウントしているので、その配下に置く。
+2. `/srv/llm/.env` に `MAIN_MODEL_FILE=/root/.cache/huggingface/<dir>/<model>.gguf`
+   を追加する (未設定時は compose.yaml の既定値 = 現在の Ornith GGUF)。
+3. `ops/llm/apply.sh --yes`。compose.yaml は変わらないが、`main` は
+   `.env` の変更で再作成され、LiteLLM のルートはそのまま使える。
+4. `-c` / `--cache-type-*` / `--checkpoint-min-step` / `--reasoning-budget` は
+   現行モデル向けの実測値。新モデルで再測定し、必要なら compose.yaml を直す。
+5. Companion 側にはモデル依存が 2 つ残っている。内部呼び出し
+   (memory/voice/learning など) は `reasoning: "off"` を
+   `chat_template_kwargs: {enable_thinking: false}` として送り
+   (`packages/model-local/src/openai_compatible.ts`)、これは Qwen/Ornith 系の
+   chat template だけが解釈する — 他モデルでは黙って無視され、内部呼び出しが
+   reasoning を生成し得る。`reasoning_budget_tokens` は llama-server 固有。
+   新モデルでこの 2 つが有効か確認し、効かないなら app 側の変更が要る
+   (この PR では未対応)。
+
+メンテナンス LLM (`maint`) も同じ考え方で、`MAINT_MODEL_DIR` (ホスト側の
+マウント元) と `MAINT_MODEL_FILE` (コンテナ内のパス) を `.env` で
+差し替える。remind は `http://127.0.0.1:18090` と `model` 文字列しか持たず、
+llama-server は要求の `model` を検証しない (2026-11-10 実測: 任意の
+`model` で 200、応答はサーバーの alias)。ただし後述の通り remind の
+`model` 文字列は差し替え時に実ウェイト名へ更新する。
 
 rollback (64k ctx / q8_0 KV の変更だけを戻す): `ops/llm/compose.yaml` の
 `main.command` を `-c 49152` (または切替前の `-c 16384`、`--cache-type-k/v` なし)
@@ -5570,7 +5602,7 @@ draft acceptance 72.7%、VRAM +~0.5 GiB、tool call は有効。
 
 ### Ornith 1.5 9B メンテナンス LLM (P5000, loopback のみ)
 
-`ornith` は remind のメンテナンス処理 (重要度判定・トピック抽出・
+`maint` は remind のメンテナンス処理 (重要度判定・トピック抽出・
 統合/整理) 専用のローカル LLM。Companion のチャット (`local-chat` /
 main) とは別系統で、remind が loopback の
 `http://127.0.0.1:18090` を直接叩く。LiteLLM には登録しない
@@ -5581,7 +5613,7 @@ main) とは別系統で、remind が loopback の
   同じ方式で固定する。
 - 実測: VRAM 約 6.2 GiB、約 28 tok/s (P5000)。
 - `-c 8192`、`-ngl 99`、`-fa on`、`--jinja`、
-  `--alias ornith-1.5-9b`。投機デコード (MTP) は使わない。
+  `--alias companion-maint`。投機デコード (MTP) は使わない。
 - ホスト側の公開は `127.0.0.1:18090` のみ。tailnet / LAN には出さない。
 
 モデル配置 (ホスト):
@@ -5592,10 +5624,12 @@ hf download ornith-ai/Ornith-1.5-9B-GGUF Ornith-1.5-9B-Q5_K_M.gguf \
   --local-dir ~/models/ornith
 ```
 
-`compose.yaml` は `${ORNITH_MODEL_DIR:-${HOME}/models/ornith}` を
-コンテナの `/models` に読み取り専用でマウントする。別の場所に置く場合は
-`/srv/llm/.env` に `ORNITH_MODEL_DIR=/path/to/dir` を追加する
+`compose.yaml` は `${MAINT_MODEL_DIR:-${HOME}/models/ornith}` を
+コンテナの `/models` に読み取り専用でマウントし、`MAINT_MODEL_FILE`
+(未設定時 `/models/Ornith-1.5-9B-Q5_K_M.gguf`) を配信する。別の場所に置く場合は
+`/srv/llm/.env` に `MAINT_MODEL_DIR=/path/to/dir` を追加する
 (Compose の `~` は展開されないため、シェル側で展開した絶対パスを渡す)。
+モデルを替えるときは `MAINT_MODEL_DIR` と `MAINT_MODEL_FILE` の両方を設定する。
 
 反映 (compose のみの変更なので `apply.sh` の通常の `up -d` 経路で
 全サービスが収束する。bind mount の force-recreate は不要):
@@ -5605,11 +5639,16 @@ hf download ornith-ai/Ornith-1.5-9B-GGUF Ornith-1.5-9B-Q5_K_M.gguf \
 docker rm -f ornith-eval
 ops/llm/apply.sh          # 差分確認
 ops/llm/apply.sh --yes
-docker ps --filter name=ornith-1.5-9b --format '{{.Status}}'
+docker ps --filter name=companion-maint --format '{{.Status}}'
 curl -s http://127.0.0.1:18090/health
 ```
 
-remind 側の設定 (`~/.config/remind/memory.config.json`):
+remind 側の設定 (`~/.config/remind/memory.config.json`)。llama-server は
+要求の `model` を検証しない (2026-11-10 実測: 任意の `model` で 200) が、
+remind はこの文字列を来歴 (`llm:v2:<model>`) として保存し、変更すると
+再分類のトリガになる。**実ウェイトを指す名前のまま**にすること
+(現在は `ornith-1.5-9b`。compose の alias とは一致しなくてよい)。
+GGUF を差し替えたら `llm.model` と `activation.llm.model` を同時に更新する:
 
 ```json
 "llm": { "backend": "openai", "enabled": true, "baseUrl": "http://127.0.0.1:18090", "model": "ornith-1.5-9b" }
@@ -5618,7 +5657,7 @@ remind 側の設定 (`~/.config/remind/memory.config.json`):
 この openai バックエンドは remind 側の対応 (suiso11/remind#31) が
 入ってから有効になる。それまでは `enabled: false` のままにする。
 
-rollback: `compose.yaml` から `ornith` サービスを削除して
+rollback: `compose.yaml` から `maint` サービスを削除して
 `ops/llm/apply.sh --yes` を実行する (`--remove-orphans` でコンテナも消える)。
 remind 側は `llm.enabled: false` に戻す。
 
