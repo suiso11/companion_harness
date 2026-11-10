@@ -175,6 +175,10 @@ import {
 } from "./notification_service.js";
 import { createPersonaChatService } from "./persona_chat_service.js";
 import {
+  createProviderKeyStore,
+  PROVIDER_KEYS_FILE_NAME,
+} from "./provider_keys.js";
+import {
   createReflectService,
   type ReflectService,
 } from "./reflect_service.js";
@@ -3375,11 +3379,15 @@ export async function startServer(
     const personaChatStore = createPersonaChatStore({ db: handle.raw });
     // Autotalk's local side: the same configured gateway/model as the agent.
     const personaGateway = modelGateway;
+    const providerKeys = createProviderKeyStore({
+      filePath: join(dirname(config.dbPath), PROVIDER_KEYS_FILE_NAME),
+      env: config.personaProviders,
+    });
     const personaChat = {
       store: personaChatStore,
       service: createPersonaChatService({
         store: personaChatStore,
-        keys: config.personaProviders,
+        keys: providerKeys.keys,
         now,
         acquireLocal: () => {
           const reservation = backgroundResource.tryAcquire(
@@ -3432,6 +3440,7 @@ export async function startServer(
       sessionPresence,
       ...(learning !== null ? { learningStore: learning.store } : {}),
       personaChat,
+      providerKeys,
       // Human STOP aborts only this service's owned in-flight intake; the
       // narrow app port never kills a worker/global process.
       ...(autodispatch !== null

@@ -12,14 +12,20 @@ export interface RemoteChatResult {
   readonly text: string;
   readonly usage: { promptTokens: number; completionTokens: number } | null;
 }
-export type RemoteProviderId = "openai" | "deepseek";
+export type RemoteProviderId = "openai" | "deepseek" | "opencode";
 
-/** Fixed hosts: the caller never supplies a URL, so there is no SSRF surface. */
-export const REMOTE_PROVIDER_HOSTS: Readonly<Record<RemoteProviderId, string>> =
-  {
-    openai: "api.openai.com",
-    deepseek: "api.deepseek.com",
-  };
+/**
+ * Fixed endpoints: the caller never supplies a URL, so there is no SSRF
+ * surface. OpenCode Zen exposes an OpenAI-compatible gateway under a path
+ * prefix instead of `/v1`.
+ */
+export const REMOTE_PROVIDER_ENDPOINTS: Readonly<
+  Record<RemoteProviderId, string>
+> = {
+  openai: "https://api.openai.com/v1/chat/completions",
+  deepseek: "https://api.deepseek.com/v1/chat/completions",
+  opencode: "https://opencode.ai/inference/openai/v1/chat/completions",
+};
 
 export type RemoteProviderErrorCode =
   | "invalid_input"
@@ -124,7 +130,7 @@ export function createRemoteGateway(options: {
   const timeoutMs = options.timeoutMs ?? 60_000;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (
-    !Object.hasOwn(REMOTE_PROVIDER_HOSTS, provider) ||
+    !Object.hasOwn(REMOTE_PROVIDER_ENDPOINTS, provider) ||
     typeof model !== "string" ||
     !MODEL_RE.test(model) ||
     typeof apiKey !== "string" ||
@@ -133,7 +139,7 @@ export function createRemoteGateway(options: {
   ) {
     throw new RemoteProviderError("invalid_input");
   }
-  const url = `https://${REMOTE_PROVIDER_HOSTS[provider]}/v1/chat/completions`;
+  const url = REMOTE_PROVIDER_ENDPOINTS[provider];
 
   return {
     provider,

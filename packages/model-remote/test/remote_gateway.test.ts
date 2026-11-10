@@ -32,6 +32,7 @@ describe("remote gateway", () => {
   it.each([
     ["openai", "https://api.openai.com/v1/chat/completions"],
     ["deepseek", "https://api.deepseek.com/v1/chat/completions"],
+    ["opencode", "https://opencode.ai/inference/openai/v1/chat/completions"],
   ] as const)("sends the expected request for %s", async (provider, url) => {
     let seen: { url: string; init: RequestInit } | undefined;
     const fetchImpl = (async (u: string, init: RequestInit) => {

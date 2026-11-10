@@ -3,8 +3,8 @@
 // prompts and API keys never reach logs or errors.
 
 import {
+  type HostedPersonaProvider,
   PERSONA_PROVIDER_CATALOG,
-  type PersonaProvider,
   type PersonaProviderInfoSchema,
 } from "@companion/contracts";
 import type {
@@ -78,11 +78,15 @@ export interface PersonaChatService {
 
 export function createPersonaChatService(options: {
   store: PersonaChatStore;
-  keys: Readonly<{ openai: string | null; deepseek: string | null }>;
+  /**
+   * Live key map (env or the settings-page store). Read on every call so a
+   * runtime key change applies without rebuilding the service.
+   */
+  keys: Readonly<Record<HostedPersonaProvider, string | null>>;
   now: () => number;
   /** Test seam: defaults to createRemoteGateway. */
   createGateway?: (input: {
-    provider: PersonaProvider;
+    provider: HostedPersonaProvider;
     model: string;
     apiKey: string;
   }) => { chat(request: RemoteChatRequest): Promise<RemoteChatResult> };

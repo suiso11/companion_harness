@@ -75,6 +75,11 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     label: "ペルソナ",
     sectionId: "personas",
   },
+  {
+    path: "/settings",
+    label: "設定",
+    sectionId: "settings",
+  },
 ];
 
 export interface NavItem {
@@ -115,6 +120,7 @@ export const DEV_NAV: readonly NavItem[] = [
   navItem("/shadow", "試行"),
   navItem("/learning", "学び"),
   navItem("/handoff", "引継ぎ"),
+  navItem("/settings", "設定"),
 ];
 
 /** Feature section ids hidden on a page (chat stays visible for context). */

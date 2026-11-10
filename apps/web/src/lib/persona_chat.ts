@@ -3,7 +3,7 @@ import { fetchJson } from "./api.js";
 // Local mirrors of the persona-chat API payloads (server: /api/personas, /api/chats)
 // plus pure display helpers shared by ChatsPage and PersonasPage.
 
-export type PersonaProvider = "openai" | "deepseek" | "local";
+export type PersonaProvider = "openai" | "deepseek" | "opencode" | "local";
 
 export interface Persona {
   id: string;
