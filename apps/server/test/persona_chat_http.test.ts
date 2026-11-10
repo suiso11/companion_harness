@@ -2,19 +2,12 @@
 // persona chat store + service, fake provider gateway (the createGateway seam).
 
 import { randomUUID } from "node:crypto";
-import {
-  closeKernelDatabase,
-  createKernelRepository,
-  createPersonaChatStore,
-  migrateKernelDatabase,
-  openKernelDatabase,
-  RunEngine,
-} from "@companion/kernel";
+import { createPersonaChatStore } from "@companion/kernel";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import { loadServerConfig } from "../src/config.js";
 import { createCollectingLogger } from "../src/logger.js";
 import { createPersonaChatService } from "../src/persona_chat_service.js";
+import { createServerFixtureContext } from "./server_fixture.js";
 
 const T0 = 1_790_000_000_000;
 
@@ -42,18 +35,8 @@ async function makeFixture(
     };
   } = {},
 ): Promise<Fixture> {
-  const handle = openKernelDatabase(":memory:");
-  cleanups.push(() => closeKernelDatabase(handle));
-  await migrateKernelDatabase({ db: handle.raw });
-  const repo = createKernelRepository(handle.raw);
-  const config = loadServerConfig({
-    COMPANION_DB_PATH: ":memory:",
-    COMPANION_HOST: "127.0.0.1",
-    COMPANION_PORT: "3000",
-    COMPANION_TIME_ZONE: "UTC",
-    COMPANION_LOG_LEVEL: "debug",
-  });
-  const engine = new RunEngine({ db: handle.raw, repo, cancelGraceMs: 30 });
+  const { handle, repo, config, engine } =
+    await createServerFixtureContext(cleanups);
   let clock = T0;
   const now = () => ++clock;
   const store = createPersonaChatStore({ db: handle.raw });

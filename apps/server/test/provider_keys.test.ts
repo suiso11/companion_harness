@@ -36,9 +36,11 @@ describe("provider key store", () => {
     });
   });
 
-  it("persists a set key with mode 0600 and reloads it", () => {
+  it("persists a set key and reloads it", () => {
     open().set("opencode", "sk-saved");
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    }
     expect(open().keys.opencode).toBe("sk-saved");
   });
 
