@@ -9,7 +9,7 @@ import {
   openKernelDatabase,
 } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SpeechConfig } from "../src/config.js";
 import {
   createSpontaneousService,
@@ -136,6 +136,16 @@ function close(
 ) {
   void service?.stop();
   closeKernelDatabase(handle);
+}
+
+/** Captures the loop's pending timer instead of arming it. */
+function recordingTimers() {
+  const calls: { run: () => void; delay: number }[] = [];
+  const setTimeoutFn = ((run: () => void, delay: number) => {
+    calls.push({ run, delay });
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as unknown as typeof setTimeout;
+  return { calls, setTimeout: setTimeoutFn };
 }
 
 const RESEARCH = JSON.stringify({
@@ -348,6 +358,164 @@ describe("spontaneous speech pass", () => {
           .getHistory(sessionId, { limit: 10 })
           .items.some((item) => item.kind === "companion_text"),
       ).toBe(false);
+    } finally {
+      close(handle, service);
+    }
+  });
+  it("targets the newest conversation with a user turn, not an empty newest session", async () => {
+    const { handle, repo, store, sessionId, service } = await setup({
+      gateway: gatewayWith([
+        JSON.stringify({ action: "speak", message: "何が決め手だった？" }),
+      ]),
+    });
+    try {
+      // A newer session with no turns used to win the latest-session lookup,
+      // so every speech attempt was skipped until another session appeared.
+      const empty = repo.createSession({
+        key: crypto.randomUUID(),
+        now: T0 + 20 * HOUR,
+      }).body.sessionId;
+      store.insert({
+        sessionId,
+        kind: "question",
+        body: "道具の話",
+        topics: [],
+        memoryIds: [],
+        sources: [],
+        now: T0 + 3,
+      });
+      expect(await service.runSpeechPass()).toBe("spoken");
+      expect(repo.getHistory(empty, { limit: 10 }).items).toHaveLength(0);
+      expect(
+        repo
+          .getHistory(sessionId, { limit: 10 })
+          .items.some((item) => item.kind === "companion_text"),
+      ).toBe(true);
+    } finally {
+      close(handle, service);
+    }
+  });
+
+  it("falls back from a presence session that has no user turn", async () => {
+    let presenceId: string | null = null;
+    const { handle, repo, store, sessionId, service } = await setup({
+      gateway: gatewayWith([
+        JSON.stringify({ action: "speak", message: "何が決め手だった？" }),
+      ]),
+      presence: { active: () => presenceId },
+    });
+    try {
+      presenceId = repo.createSession({
+        key: crypto.randomUUID(),
+        now: T0 + 20 * HOUR,
+      }).body.sessionId;
+      store.insert({
+        sessionId,
+        kind: "question",
+        body: "道具の話",
+        topics: [],
+        memoryIds: [],
+        sources: [],
+        now: T0 + 3,
+      });
+      expect(await service.runSpeechPass()).toBe("spoken");
+      expect(repo.getHistory(presenceId, { limit: 10 }).items).toHaveLength(0);
+      expect(
+        repo
+          .getHistory(sessionId, { limit: 10 })
+          .items.some((item) => item.kind === "companion_text"),
+      ).toBe(true);
+    } finally {
+      close(handle, service);
+    }
+  });
+});
+
+describe("spontaneous scheduling", () => {
+  it("retries a gate-blocked thought pass on the short tick", async () => {
+    const timers = recordingTimers();
+    let clock = T0 + 10 * 60 * 1000;
+    const { handle, service } = await setup({
+      now: () => clock,
+      setTimeout: timers.setTimeout,
+      gateway: gatewayWith([RESEARCH, THOUGHT]),
+      memoryCall: async () =>
+        envelope([memoryItem("rec1", "ユーザーは釣り道具を買い替えた")]),
+      search: async () => [],
+      background: { closed: false, tryAcquire: () => null, release: () => {} },
+    });
+    try {
+      // Boot lead: thought then speech.
+      expect(timers.calls.map((call) => call.delay)).toEqual([
+        300_000, 360_000,
+      ]);
+      clock += 300_000;
+      timers.calls[0]?.run();
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
+      // Blocked before admission: the day is not spent.
+      expect(timers.calls[2]?.delay).toBe(10 * 60 * 1000);
+    } finally {
+      close(handle, service);
+    }
+  });
+
+  it("waits the full interval after an admitted thought pass", async () => {
+    const timers = recordingTimers();
+    let clock = T0 + 10 * 60 * 1000;
+    let token = 0;
+    const { handle, service } = await setup({
+      now: () => clock,
+      setTimeout: timers.setTimeout,
+      gateway: gatewayWith([RESEARCH, THOUGHT]),
+      // The row is created only after the model work, i.e. later than the
+      // admitted instant: the next fire must count from the row.
+      memoryCall: async () => {
+        clock += 60_000;
+        return envelope([memoryItem("rec1", "ユーザーは釣り道具を買い替えた")]);
+      },
+      search: async () => [],
+      background: {
+        closed: false,
+        tryAcquire: () => ({ owner: "spontaneous", token: ++token }),
+        release: () => {},
+      },
+    });
+    try {
+      clock += 300_000;
+      timers.calls[0]?.run();
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
+      // Full interval from created_at (+1ms): pacing from the admitted instant
+      // would be 60s short and the next guard check would skip.
+      expect(timers.calls[2]?.delay).toBe(24 * HOUR + 1);
+    } finally {
+      close(handle, service);
+    }
+  });
+
+  it("waits the full interval after a spoken message", async () => {
+    const timers = recordingTimers();
+    let clock = T0 + 10 * 60 * 1000;
+    const { handle, store, sessionId, service } = await setup({
+      now: () => clock,
+      setTimeout: timers.setTimeout,
+      gateway: gatewayWith([
+        JSON.stringify({ action: "speak", message: "何が決め手だった？" }),
+      ]),
+    });
+    try {
+      store.insert({
+        sessionId,
+        kind: "question",
+        body: "道具の話",
+        topics: [],
+        memoryIds: [],
+        sources: [],
+        now: T0 + 3,
+      });
+      clock += 300_000;
+      timers.calls[1]?.run();
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
+      expect(timers.calls[2]?.delay).toBe(24 * HOUR + 1);
     } finally {
       close(handle, service);
     }

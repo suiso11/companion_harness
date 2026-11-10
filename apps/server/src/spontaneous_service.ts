@@ -40,12 +40,19 @@ import {
 } from "./thought_store.js";
 import { isRecord } from "./type_guards.js";
 
-export const SPONTANEOUS_MODEL_TIMEOUT_MS = 30_000;
+/**
+ * Wall bound for one background gateway call. Same local-gateway bound as
+ * memory extraction (`MEMORY_EXTRACT_TIMEOUT_MS`): without it a hung call
+ * holds the shared background gate and stalls every other background unit.
+ */
+export const SPONTANEOUS_MODEL_TIMEOUT_MS = 120_000;
 export const SPONTANEOUS_MAX_MEMORIES = 60;
 export const SPONTANEOUS_MAX_QUERIES = 3;
 export const SPONTANEOUS_MAX_SEARCH_RESULTS = 5;
 export const SPONTANEOUS_MAX_CONTEXT_CP = 3000;
 const SPEECH_FEEDBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Retry cadence while a pass is blocked BEFORE it spends its interval. */
+const SPONTANEOUS_RETRY_MS = 10 * 60_000;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -186,6 +193,11 @@ export function createSpontaneousService(
   let stopped = false;
   let thoughtTimer: ReturnType<typeof setTimeout> | undefined;
   let speechTimer: ReturnType<typeof setTimeout> | undefined;
+  // Last wall time of a pass that actually acquired the shared gate. A pass
+  // blocked before admission must not spend the whole interval: the loops
+  // retry it on the short tick instead of losing a day.
+  let thoughtAdmittedAt: number | null = null;
+  let speechAdmittedAt: number | null = null;
   const controllers = new Set<AbortController>();
 
   function log(
@@ -246,17 +258,36 @@ export function createSpontaneousService(
       : minute >= start || minute < end;
   }
 
+  /**
+   * Where a companion message can land: preference for the session the user
+   * is viewing, but only one that has a user turn. A freshly created (empty)
+   * session is the newest row and used to win here, which made the speech
+   * pass skip every attempt until a newer session appeared.
+   */
   function targetSession(at: number): string | null {
     const active = deps.presence?.active(at) ?? null;
     if (active !== null) {
       try {
         repo.getSession(active);
-        return active;
+        if (store.lastUserTurnAt(active) !== null) return active;
       } catch {
-        // Stale/foreign presence: fall through to the latest session.
+        // Stale/foreign presence: fall through to the latest conversation.
       }
     }
-    return repo.latestSessionId();
+    try {
+      const latest = repo.latestSessionId();
+      if (latest !== null && store.lastUserTurnAt(latest) !== null) {
+        return latest;
+      }
+      // Only the (uncommon) empty-newest-session case pays the wider scan.
+      return (
+        repo
+          .listSessions({ limit: 50 })
+          .sessions.find((session) => session.lastUserAt !== null)?.id ?? null
+      );
+    } catch {
+      return null;
+    }
   }
 
   async function memoryItems(): Promise<MemoryItem[]> {
@@ -368,7 +399,10 @@ export function createSpontaneousService(
           reasoning: "off",
         },
         {
-          signal: controller.signal,
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(SPONTANEOUS_MODEL_TIMEOUT_MS),
+          ]),
           maxResponseBytes: 256 * 1024,
         },
       );
@@ -541,13 +575,14 @@ export function createSpontaneousService(
     if (last !== null && at - last < config.thoughtIntervalMs) {
       return "skipped";
     }
+    const sessionId = targetSession(at);
+    if (sessionId === null) return "skipped";
     if (background?.closed) return "skipped";
     const lease = background?.tryAcquire(BACKGROUND_OWNER_SPONTANEOUS) ?? null;
     if (background !== null && lease === null) return "skipped";
+    thoughtAdmittedAt = at;
     const controller = newController();
     try {
-      const sessionId = targetSession(at);
-      if (sessionId === null) return "skipped";
       const memories = await memoryItems();
       if (memories.length === 0) {
         log("info", "speech.thought_skipped_no_memories");
@@ -661,6 +696,7 @@ export function createSpontaneousService(
     if (background?.closed) return "skipped";
     const lease = background?.tryAcquire(BACKGROUND_OWNER_SPONTANEOUS) ?? null;
     if (background !== null && lease === null) return "skipped";
+    speechAdmittedAt = at;
     const controller = newController();
     try {
       const message = await speakFromThought(
@@ -692,13 +728,40 @@ export function createSpontaneousService(
     }
   }
 
+  /**
+   * Delay until the next attempt. `last` is the last attempt the loop already
+   * paid for (an admitted pass, or for the thought loop the last created
+   * thought): the interval runs from there, plus 1ms so a due fire can never
+   * be skipped as a strict-boundary no-op. A pass blocked before admission
+   * leaves `last` stale, so the loop retries on the short tick instead of
+   * losing a day.
+   */
+  function nextDelay(last: number | null, intervalMs: number): number {
+    const nowMs = now();
+    const due = last === null ? nowMs + 1 : last + intervalMs + 1;
+    return Math.max(SPONTANEOUS_RETRY_MS, due - nowMs);
+  }
+
+  function lastThoughtAt(): number | null {
+    let last = thoughtAdmittedAt;
+    try {
+      const created = store.lastThoughtAt();
+      if (created !== null && (last === null || created > last)) last = created;
+    } catch {
+      // Best effort: the admitted attempt still paces the loop.
+    }
+    return last;
+  }
+
   function scheduleThought(delay: number): void {
     thoughtTimer = setTimeoutFn(() => {
       thoughtTimer = undefined;
-      void runThoughtPass().catch(() => undefined);
-      if (started && !stopped) {
-        scheduleThought(config.thoughtIntervalMs);
-      }
+      void runThoughtPass()
+        .catch(() => undefined)
+        .finally(() => {
+          if (!started || stopped) return;
+          scheduleThought(nextDelay(lastThoughtAt(), config.thoughtIntervalMs));
+        });
     }, delay);
     thoughtTimer.unref?.();
   }
@@ -706,10 +769,12 @@ export function createSpontaneousService(
   function scheduleSpeech(delay: number): void {
     speechTimer = setTimeoutFn(() => {
       speechTimer = undefined;
-      void runSpeechPass().catch(() => undefined);
-      if (started && !stopped) {
-        scheduleSpeech(config.speechIntervalMs);
-      }
+      void runSpeechPass()
+        .catch(() => undefined)
+        .finally(() => {
+          if (!started || stopped) return;
+          scheduleSpeech(nextDelay(speechAdmittedAt, config.speechIntervalMs));
+        });
     }, delay);
     speechTimer.unref?.();
   }
