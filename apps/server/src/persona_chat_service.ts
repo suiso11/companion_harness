@@ -28,6 +28,8 @@ export const PERSONA_CHAT_HISTORY_LIMIT = 20;
 /** An autotalk chat is due once its newest message is this old. */
 export const AUTOTALK_INTERVAL_MS = 3_600_000;
 const AUTOTALK_BATCH = 10;
+/** Seed transcript cap for a main-agent turn (chars). */
+const MAIN_TRANSCRIPT_MAX_CHARS = 8_000;
 const AUTOTALK_PROMPT =
   "直前の流れに続く短い一言だけを返してください。前置きや説明は不要です。";
 const AUTOTALK_START_PROMPT = "会話を始めてください。";
@@ -64,6 +66,8 @@ export interface PersonaChatExchange {
 
 export interface PersonaChatService {
   providers(): PersonaProviderInfo[];
+  /** true when the real main agent can participate in persona chat. */
+  mainAvailable(): boolean;
   send(input: {
     chatId: string;
     text: string;
@@ -101,6 +105,16 @@ export function createPersonaChatService(options: {
    * never acquire it.
    */
   acquireLocal?: () => (() => void) | null;
+  /**
+   * Real main-agent turn for a `partnerMain` chat. Resolves with the agent's
+   * final answer text; absent marks the main partner unavailable.
+   */
+  mainChat?: (input: {
+    chatId: string;
+    personaName: string;
+    text: string;
+    transcript: string;
+  }) => Promise<string>;
 }): PersonaChatService {
   const { store, keys, now, localChat, acquireLocal } = options;
   const createGateway = options.createGateway ?? createRemoteGateway;
@@ -132,20 +146,61 @@ export function createPersonaChatService(options: {
   };
 
   async function autotalkOne(chat: ChatSummaryRow): Promise<boolean> {
-    const { partnerId } = chat;
-    if (partnerId === null) return false;
+    const { partnerId, partnerMain } = chat;
+    if (partnerId === null && !partnerMain) return false;
     const history = store.listMessages(chat.id, {
       limit: PERSONA_CHAT_HISTORY_LIMIT,
     }).messages;
-    const newest = history.filter((m) => m.personaId !== null).at(-1);
-    const speakerId =
-      newest === undefined || newest.personaId === partnerId
+    const newest = history.filter((m) => m.role === "assistant").at(-1);
+
+    if (partnerMain) {
+      const persona = store.getPersona(chat.personaId);
+      if (persona === null) return false;
+      // The primary persona starts; the main agent replies to its last turn.
+      const mainSpeaks = newest?.personaId === chat.personaId;
+      if (mainSpeaks) {
+        const main = options.mainChat;
+        if (main === undefined) return false;
+        const lines = history.map((m) => {
+          const label =
+            m.role === "user"
+              ? "ユーザー"
+              : m.personaId === chat.personaId
+                ? persona.name
+                : "メインAI";
+          return `${label}: ${m.content}`;
+        });
+        // Bound the seed transcript; keep the newest lines, drop oldest.
+        const kept: string[] = [];
+        let used = 0;
+        for (const line of lines.reverse()) {
+          if (used + line.length + 1 > MAIN_TRANSCRIPT_MAX_CHARS) break;
+          kept.unshift(line);
+          used += line.length + 1;
+        }
+        const transcript = kept.join("\n");
+        const reply = await main({
+          chatId: chat.id,
+          personaName: persona.name,
+          text: history.length === 0 ? AUTOTALK_START_PROMPT : newest.content,
+          transcript,
+        });
+        store.appendMainMessage(chat.id, reply, now());
+        return true;
+      }
+    }
+
+    const speakerId = partnerMain
+      ? chat.personaId
+      : newest === undefined || newest.personaId === partnerId
         ? chat.personaId
         : partnerId;
+    if (speakerId === null) return false;
     const otherId = speakerId === chat.personaId ? partnerId : chat.personaId;
     const speaker = store.getPersona(speakerId);
-    const other = store.getPersona(otherId);
-    if (speaker === null || other === null) return false;
+    const other = otherId === null ? null : store.getPersona(otherId);
+    if (speaker === null || (!partnerMain && other === null)) return false;
+    const otherName = partnerMain ? "メインAI" : (other?.name ?? "");
     const call = providerCall(speaker);
     if (call === null) return false;
     const gate = speaker.provider === "local" ? acquireLocal : undefined;
@@ -155,7 +210,7 @@ export function createPersonaChatService(options: {
       const reply = await call([
         {
           role: "system",
-          content: `${speaker.systemPrompt}\n会話の相手は${other.name}です。`,
+          content: `${speaker.systemPrompt}\n会話の相手は${otherName}です。`,
         },
         ...history.map((m) => ({
           role:
@@ -186,6 +241,7 @@ export function createPersonaChatService(options: {
         available:
           p.id === "local" ? localChat !== undefined : keys[p.id] !== null,
       })),
+    mainAvailable: () => options.mainChat !== undefined,
 
     async autotalk(nowMs) {
       let written = 0;

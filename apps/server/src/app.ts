@@ -7193,6 +7193,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
           {
             personas: chatStore.listPersonas(),
             providers: chatService.providers(),
+            mainAvailable: chatService.mainAvailable(),
           },
           200,
         );
@@ -7259,10 +7260,17 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         ) {
           return validationError(c);
         }
+        if (
+          body.partnerMain === true &&
+          (body.partnerId !== undefined || !chatService.mainAvailable())
+        ) {
+          return validationError(c);
+        }
         const chat = chatStore.createChat(body.personaId, body.title, now(), {
           ...(body.partnerId !== undefined
             ? { partnerId: body.partnerId }
             : {}),
+          ...(body.partnerMain === true ? { partnerMain: true } : {}),
           ...(body.autotalk !== undefined ? { autotalk: body.autotalk } : {}),
         });
         return chat === null

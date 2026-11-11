@@ -370,4 +370,95 @@ describe("persona chat service", () => {
       expect(texts()).toEqual(["once"]);
     });
   });
+
+  describe("main-agent partner", () => {
+    const HOUR = 3_600_000;
+
+    async function setupMain(options: { withMain: boolean }) {
+      const handle = openKernelDatabase(":memory:");
+      await migrateKernelDatabase({ db: handle.raw });
+      fixtures.push(() => closeKernelDatabase(handle));
+      const store = createPersonaChatStore({ db: handle.raw });
+      const ada = store.createPersona(
+        {
+          name: "Ada",
+          avatar: "A",
+          provider: "openai",
+          model: "gpt-4.1-mini",
+          systemPrompt: "You are Ada.",
+        },
+        T0,
+      );
+      const chat = store.createChat(ada.id, undefined, T0, {
+        partnerMain: true,
+        autotalk: true,
+      });
+      if (chat === null) throw new Error("chat setup failed");
+      const remote = vi.fn(async (_request: RemoteChatRequest) => "from ada");
+      const main = vi.fn(
+        async (_input: {
+          chatId: string;
+          personaName: string;
+          text: string;
+          transcript: string;
+        }) => "from main",
+      );
+      let clock = T0 + 1000;
+      const service = createPersonaChatService({
+        store,
+        keys: { openai: "sk-test", deepseek: null, opencode: null },
+        now: () => (clock += 10),
+        createGateway: () => ({
+          chat: async (request: RemoteChatRequest) => ({
+            text: await remote(request),
+            usage: null,
+          }),
+        }),
+        ...(options.withMain ? { mainChat: main } : {}),
+      });
+      return { store, service, ada, chat, remote, main };
+    }
+
+    it("alternates persona then real main agent", async () => {
+      const { store, service, ada, chat, remote, main } = await setupMain({
+        withMain: true,
+      });
+      expect(service.mainAvailable()).toBe(true);
+
+      expect(await service.autotalk(T0 + HOUR)).toBe(1);
+      expect(main).not.toHaveBeenCalled();
+
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(1);
+      expect(main).toHaveBeenCalledTimes(1);
+      expect(main.mock.calls[0]?.[0]).toMatchObject({
+        chatId: chat.id,
+        personaName: "Ada",
+        text: "from ada",
+      });
+      expect(main.mock.calls[0]?.[0].transcript).toContain("Ada: from ada");
+
+      expect(await service.autotalk(T0 + 3 * HOUR)).toBe(1);
+      expect(remote).toHaveBeenCalledTimes(2);
+      expect(
+        store
+          .listMessages(chat.id, { limit: 10 })
+          .messages.map((m) => [m.role, m.personaId, m.content]),
+      ).toEqual([
+        ["assistant", ada.id, "from ada"],
+        ["assistant", null, "from main"],
+        ["assistant", ada.id, "from ada"],
+      ]);
+    });
+
+    it("skips when the main agent is unavailable", async () => {
+      const { service, chat } = await setupMain({ withMain: false });
+      expect(service.mainAvailable()).toBe(false);
+      expect(await service.autotalk(T0 + HOUR)).toBe(1); // persona still speaks
+      expect(await service.autotalk(T0 + 2 * HOUR)).toBe(0); // main turn skipped
+      expect(
+        service.providers().some((p) => p.id === "local" && !p.available),
+      ).toBe(true);
+      expect(chat.partnerMain).toBe(true);
+    });
+  });
 });

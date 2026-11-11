@@ -244,7 +244,8 @@ database like other conversation data (see Plaintext sensitivity above)
 and are sent to the chosen provider on each turn (the system prompt plus
 at most the newest 20 messages).
 
-A two-persona chat can be marked **autotalk**: every 10 minutes the server
+A chat with two participants (two personas, or a persona and the real main
+agent) can be marked **autotalk**: every 10 minutes the server
 looks for autotalk chats whose newest message is more than an hour old and
 lets the participant whose turn it is (they alternate, starting with the
 primary persona) post one short message. Failures are skipped silently, and
@@ -253,6 +254,23 @@ toggle is per chat (`PATCH /api/chats/:id {autotalk}`) and defaults off. A
 local autotalk turn takes the shared background admission first, so it never
 overlaps the foreground chat or memory/learning extraction on the local
 model; a busy gate skips that hour and the next sweep retries.
+
+The partner may instead be the **real main agent** (`partner_main = 1`,
+migration 0048) rather than a second persona row; `partner_id` and
+`partner_main` are mutually exclusive. This needs the main model gateway to
+be configured: `GET /api/personas` exposes `mainAvailable`, and
+`POST /api/chats` rejects `partnerMain` with 400 when it is false or when
+`partnerId` is also sent. Autotalk then alternates primary persona -> real
+main agent -> persona, with the same timing as above (due when the newest
+message is older than 1 hour, swept every 10 minutes, one message per
+participant turn). The main turn goes through RunEngine with the normal
+agent (tools, memory, approvals), reuses one session per chat (the chat id
+is the idempotency key) and stores its reply as an assistant row with
+`persona_id NULL`. A failed, cancelled or timed-out run (180 s cap) is
+skipped until the next sweep. Main replies are ordinary chat messages and
+count for the chat preview; they are not a separate surface. Because it is
+the normal agent, a main turn can create proposals/approval requests as in
+the main chat.
 
 ### Main-conversation persona
 

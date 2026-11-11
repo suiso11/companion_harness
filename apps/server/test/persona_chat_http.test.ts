@@ -33,6 +33,7 @@ async function makeFixture(
       deepseek: string | null;
       opencode: string | null;
     };
+    mainAvailable?: boolean;
   } = {},
 ): Promise<Fixture> {
   const { handle, repo, config, engine } =
@@ -53,6 +54,9 @@ async function makeFixture(
         return { text: `reply ${gatewayCalls.length}`, usage: null };
       },
     }),
+    ...(options.mainAvailable === true
+      ? { mainChat: async () => "main reply" }
+      : {}),
   });
   const { app } = createApp({
     config,
@@ -174,6 +178,47 @@ describe("persona chat routes", () => {
       name: "   ",
     });
     expect(blank.status).toBe(400);
+  });
+
+  it("creates a main-agent partner chat only when available", async () => {
+    const off = await makeFixture();
+    const offList = (await (await off.request("/api/personas")).json()) as Json;
+    expect(offList.mainAvailable).toBe(false);
+    const personaOff = await createPersona(off);
+    expect(
+      (
+        await off.request("/api/chats", "POST", {
+          personaId: personaOff.id,
+          partnerMain: true,
+        })
+      ).status,
+    ).toBe(400);
+
+    const on = await makeFixture({ mainAvailable: true });
+    const onList = (await (await on.request("/api/personas")).json()) as Json;
+    expect(onList.mainAvailable).toBe(true);
+    const persona = await createPersona(on);
+    const created = await on.request("/api/chats", "POST", {
+      personaId: persona.id,
+      partnerMain: true,
+      autotalk: true,
+    });
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({
+      partnerId: null,
+      partnerMain: true,
+      partnerName: null,
+      autotalk: true,
+    });
+    expect(
+      (
+        await on.request("/api/chats", "POST", {
+          personaId: persona.id,
+          partnerId: persona.id,
+          partnerMain: true,
+        })
+      ).status,
+    ).toBe(400);
   });
 
   it("chat CRUD", async () => {

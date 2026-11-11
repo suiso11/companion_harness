@@ -59,7 +59,11 @@ export interface PersonaChatStore {
     personaId: string,
     title: string | undefined,
     now: number,
-    options?: { partnerId?: string; autotalk?: boolean },
+    options?: {
+      partnerId?: string;
+      partnerMain?: boolean;
+      autotalk?: boolean;
+    },
   ): ChatSummaryRow | null;
   setAutotalk(
     chatId: string,
@@ -71,6 +75,12 @@ export interface PersonaChatStore {
   appendParticipantMessage(
     chatId: string,
     personaId: string,
+    content: string,
+    now: number,
+  ): ChatMessageRow;
+  /** Append one main-agent assistant message (persona_id stays NULL). */
+  appendMainMessage(
+    chatId: string,
     content: string,
     now: number,
   ): ChatMessageRow;
@@ -105,7 +115,7 @@ const CHAT_SELECT = `SELECT c.id, c.persona_id AS personaId, p.name AS personaNa
   COALESCE((SELECT substr(m.content, 1, 80) FROM persona_chat_messages m
     WHERE m.chat_id = c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1), '') AS preview,
   (SELECT count(*) FROM persona_chat_messages m WHERE m.chat_id = c.id) AS messageCount,
-  c.partner_id AS partnerId, pp.name AS partnerName, pp.avatar AS partnerAvatar,
+  c.partner_id AS partnerId, c.partner_main AS partnerMain, pp.name AS partnerName, pp.avatar AS partnerAvatar,
   c.autotalk <> 0 AS autotalk
   FROM persona_chats c JOIN personas p ON p.id = c.persona_id
   LEFT JOIN personas pp ON pp.id = c.partner_id`;
@@ -133,14 +143,30 @@ export function createPersonaChatStore(options: {
       | undefined) ?? null;
   const getChat = (id: string) => {
     const row = db.prepare(`${CHAT_SELECT} WHERE c.id = ?`).get(id) as
-      | (Omit<ChatSummaryRow, "autotalk"> & { autotalk: number })
+      | (Omit<ChatSummaryRow, "autotalk" | "partnerMain"> & {
+          autotalk: number;
+          partnerMain: number;
+        })
       | undefined;
-    return row ? { ...row, autotalk: row.autotalk === 1 } : null;
+    return row
+      ? {
+          ...row,
+          autotalk: row.autotalk === 1,
+          partnerMain: row.partnerMain === 1,
+        }
+      : null;
   };
   const toRows = (rows: unknown[]) =>
-    (rows as (Omit<ChatSummaryRow, "autotalk"> & { autotalk: number })[]).map(
-      (r) => ({ ...r, autotalk: r.autotalk === 1 }),
-    );
+    (
+      rows as (Omit<ChatSummaryRow, "autotalk" | "partnerMain"> & {
+        autotalk: number;
+        partnerMain: number;
+      })[]
+    ).map((r) => ({
+      ...r,
+      autotalk: r.autotalk === 1,
+      partnerMain: r.partnerMain === 1,
+    }));
   const getMessage = (id: string) =>
     db
       .prepare(`SELECT ${MSG_COLS} FROM persona_chat_messages WHERE id = ?`)
@@ -231,10 +257,12 @@ export function createPersonaChatStore(options: {
       const persona = getPersona(personaId);
       if (!persona) return null;
       const partnerId = options?.partnerId ?? null;
+      const partnerMain = options?.partnerMain === true;
+      if (partnerId !== null && partnerMain) return null;
       if (partnerId !== null && !getPersona(partnerId)) return null;
       const id = newId();
       db.prepare(
-        "INSERT INTO persona_chats (id, persona_id, title, created_at, updated_at, partner_id, autotalk) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO persona_chats (id, persona_id, title, created_at, updated_at, partner_id, partner_main, autotalk) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       ).run(
         id,
         personaId,
@@ -242,6 +270,7 @@ export function createPersonaChatStore(options: {
         now,
         now,
         partnerId,
+        partnerMain ? 1 : 0,
         options?.autotalk ? 1 : 0,
       );
       return getChat(id);
@@ -258,12 +287,35 @@ export function createPersonaChatStore(options: {
       toRows(
         db
           .prepare(
-            `${CHAT_SELECT} WHERE c.autotalk = 1 AND c.partner_id IS NOT NULL
+            `${CHAT_SELECT} WHERE c.autotalk = 1 AND (c.partner_id IS NOT NULL OR c.partner_main = 1)
              AND COALESCE((SELECT max(m.created_at) FROM persona_chat_messages m WHERE m.chat_id = c.id), -1) < ?
              ORDER BY c.updated_at, c.id LIMIT ?`,
           )
           .all(cutoff, limit),
       ),
+    appendMainMessage(chatId, content, now) {
+      const text = check(
+        ChatMessageTextSchema.safeParse(content),
+        "invalid_text",
+      );
+      const chat = db
+        .prepare("SELECT partner_main FROM persona_chats WHERE id = ?")
+        .get(chatId) as { partner_main: number } | undefined;
+      if (!chat) throw new PersonaChatStoreError("chat_not_found");
+      if (chat.partner_main !== 1) {
+        throw new PersonaChatStoreError("invalid_persona");
+      }
+      const id = newId();
+      db.transaction(() => {
+        db.prepare(
+          "INSERT INTO persona_chat_messages (id, chat_id, role, content, client_key, created_at, persona_id) VALUES (?, ?, 'assistant', ?, NULL, ?, NULL)",
+        ).run(id, chatId, text, now);
+        db.prepare(
+          "UPDATE persona_chats SET updated_at = max(updated_at, ?) WHERE id = ?",
+        ).run(now, chatId);
+      })();
+      return getMessage(id);
+    },
     appendParticipantMessage(chatId, personaId, content, now) {
       const text = check(
         ChatMessageTextSchema.safeParse(content),
