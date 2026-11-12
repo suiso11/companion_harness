@@ -200,16 +200,15 @@ async function search(): Promise<void> {
   try {
     const runId = await latestRunId(sessionId);
     if (seq !== searchSeq) return;
-    if (runId === null) {
-      failSearch(
-        "error: Run がありません",
-        "メッセージを送信して Run を作ってから検索してください",
-      );
-      return;
-    }
+    // A session with no completed Run may still search read-only: the
+    // snapshot is session-scoped and omits the originating run.
     const res = await postJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/memory/search`,
-      { query: text, limit: 5, runId },
+      {
+        query: text,
+        limit: 5,
+        ...(runId !== null ? { runId } : {}),
+      },
       null,
     );
     if (seq !== searchSeq) return;

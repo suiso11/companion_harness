@@ -510,10 +510,12 @@ export interface MemoryService {
    * snapshot and returns opaque session-scoped `mN` handles, never raw
    * canonical ids. Search never heats, reactivates, or grants feedback:
    * explicit search/open/mere UI display never calls `record.feedback`.
+   * `runId` is an optional originating binding: null mints a run-less
+   * read-only snapshot (mutations still require an owned Run).
    */
   searchMemories(input: {
     sessionId: string;
-    runId: string;
+    runId: string | null;
     query: string;
     limit?: number;
     signal?: AbortSignal;
@@ -4464,7 +4466,8 @@ export function createMemoryService(
 
   async function searchMemories(input: {
     sessionId: string;
-    runId: string;
+    /** Null for a run-less (view-only) search in a session with no Run. */
+    runId: string | null;
     query: string;
     limit?: number;
     signal?: AbortSignal;
@@ -4490,6 +4493,8 @@ export function createMemoryService(
     }
     let envelope: MemoryCliEnvelope;
     try {
+      // `runId` is only an optional audit/snapshot binding: omit it entirely
+      // for a run-less search (the remind CLI rejects `null`).
       envelope = await cliCall(
         address,
         "record.search",
@@ -4497,7 +4502,7 @@ export function createMemoryService(
           query: trimmed,
           scope,
           limit,
-          runId: input.runId,
+          ...(input.runId !== null ? { runId: input.runId } : {}),
         },
         undefined,
         { ...(input.signal !== undefined ? { signal: input.signal } : {}) },

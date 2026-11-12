@@ -523,7 +523,8 @@ class ConversationApp {
   private memoryListScope: {
     readonly sessionId: string;
     readonly searchId: string;
-    readonly runId: string;
+    /** Null for a run-less (view-only) explicit search snapshot. */
+    readonly runId: string | null;
   } | null = null;
   /**
    * Last explicit search scope: binds every mN handle to its originating
@@ -3626,11 +3627,9 @@ class ConversationApp {
       this.showAllMemories();
       return;
     }
+    // A session with no completed Run may still search read-only: the
+    // snapshot is session-scoped and omits the originating run.
     const runId = this.activeRunId ?? this.latestRenderedRunId();
-    if (runId === null) {
-      this.showNotice("メッセージを送信して Run を作ってから検索してください");
-      return;
-    }
     this.memorySearchSeq += 1;
     const seq = this.memorySearchSeq;
     this.setMemoryListMode("search");
@@ -3651,7 +3650,7 @@ class ConversationApp {
     try {
       res = await postJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/memory/search`,
-        { query, limit: 5, runId },
+        { query, limit: 5, ...(runId !== null ? { runId } : {}) },
         null,
       );
     } catch {
