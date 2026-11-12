@@ -2863,8 +2863,10 @@ export function createMemoryService(
    * One bounded idle maintenance pass (remind PR #29), in order:
    * 1. Topic backfill: `topic.pending {scope, limit: 8}` -> one MODEL call
    *    per item (same gateway/model/abort/timeout as extraction) -> a
-   *    direct `topic.set` write keyed by (id, bodyHash). No outbox schema
-   *    change is needed: the stable key makes reminder replay idempotent.
+   *    direct `topic.set` write keyed by (scope, pass nonce, id). A
+   *    per-pass key is required: a stable key replays the stored envelope,
+   *    so a record that re-enters `topic.pending` (prune after retire, or a
+   *    concurrent associate wipe) is never rewritten and stays pending.
    *    Each MODEL call holds the shared background admission unit: a busy
    *    gate skips the WHOLE pass (no overlap with extraction/shadow), and a
    *    foreground preemption aborts it instead of continuing with the next
@@ -2918,6 +2920,8 @@ export function createMemoryService(
       let attempted = false;
       let errorCode: string | null = null;
       let completed = false;
+      // Per-pass key: a retry must rewrite, never replay a stored answer.
+      const passNonce = randomUUID();
       try {
         const pending = await idleMaintenanceCliCall("topic.pending", {
           scope,
@@ -2985,7 +2989,7 @@ export function createMemoryService(
             counts.skipped += 1;
             continue;
           }
-          const key = stableMemoryJobKey("topic", item.id, item.bodyHash);
+          const key = stableMemoryJobKey("topic", scope, passNonce, item.id);
           const stored = await idleMaintenanceCliCall(
             "topic.set",
             {

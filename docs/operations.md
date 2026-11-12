@@ -724,7 +724,8 @@ connector instance owns **all** configured roots.
   `topic.pending {scope, limit:8}` → one conversation-model
   classification call per item (same gateway/model/abort/timeout as
   extraction) → a direct `topic.set {id, bodyHash, topics}` keyed by
-  `(id, bodyHash)`, bounded per tick and preemptible by foreground
+  `(scope, pass nonce, id)` so a record that re-enters `topic.pending` is
+  rewritten, not replayed; bounded per tick and preemptible by foreground
   activity/stop, then `maintain.associate {scope}` once after each new
   remember and while the last pass reported `remaining > 0`. The graph
   adds derived `similar` edges plus client-only topic-hub nodes
