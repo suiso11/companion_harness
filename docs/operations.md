@@ -762,6 +762,18 @@ connector instance owns **all** configured roots.
   old-remind `BAD_REQUEST` latch-until-restart (silent, no retry storm).
   `LIMIT_EXCEEDED` is treated as a permanent misconfiguration: logged once
   and latched off until restart, never retried every tick.
+- Episode index (remind `maintain.episodes`, P2): the same idle pass runs
+  one bounded `maintain.episodes {scope, kind:"session"}` when a RAW
+  `event.append` was ACKED since the last pass (and once at startup for
+  the existing raw-event backlog). Session is the only raw-event stream
+  Companion ingests; no `limit` is sent (remind's `episodes.batchMax`
+  applies). The flag is re-armed only while the real response reports
+  `applied > 0`; each applied pass also re-arms association/consolidation
+  for the new records. Episode and distill share remind's cultivation
+  lease: a concurrent completion/recovery drain makes remind answer
+  CONFLICT, which stays armed for the next tick. `BAD_REQUEST` latches it
+  off until restart; a transient failure keeps it armed for the next tick.
+  Counts stored per run: `episodes` (selected), `applied`, `degraded`.
 - Not implemented (unchanged): memory perception, user export, and
   memory/session deletion APIs. There is no per-session memory
   delete/export endpoint.

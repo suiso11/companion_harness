@@ -64,6 +64,7 @@ const LATEST_OPS: readonly MemoryMaintenanceOp[] = [
   "maintain.activation",
   "topic.backfill",
   "maintain.distill",
+  "maintain.episodes",
 ];
 let latestTimes = $derived(
   summary === null
@@ -188,7 +189,7 @@ onMount(() => {
     </button>
   </div>
   <p class="activity-lead">
-    バックグラウンドの記憶学習（統合・関連付け・重要度・トピック付与）の実行履歴です。保存されるのは件数のみです。
+    バックグラウンドの記憶学習（統合・関連付け・重要度・トピック付与・エピソード要約）の実行履歴です。保存されるのは件数のみです。
   </p>
   <p class="activity-legend">
     成功=変更が確定 / 縮退=状態を変えず継続 / 失敗=この回は反映されない（成功済みは保持） / 中断=後で再試行

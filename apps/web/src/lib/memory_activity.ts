@@ -10,7 +10,8 @@ export type MemoryMaintenanceOp =
   | "maintain.associate"
   | "maintain.consolidate"
   | "maintain.activation"
-  | "maintain.distill";
+  | "maintain.distill"
+  | "maintain.episodes";
 
 export const MEMORY_MAINTENANCE_OPS: readonly MemoryMaintenanceOp[] = [
   "maintain.consolidate",
@@ -18,6 +19,7 @@ export const MEMORY_MAINTENANCE_OPS: readonly MemoryMaintenanceOp[] = [
   "maintain.activation",
   "topic.backfill",
   "maintain.distill",
+  "maintain.episodes",
 ];
 
 export interface ActivityRun {
@@ -87,6 +89,7 @@ const OP_LABELS: Record<MemoryMaintenanceOp, string> = {
   "maintain.activation": "重要度スコア",
   "topic.backfill": "トピック付与",
   "maintain.distill": "蒸留（学習）",
+  "maintain.episodes": "エピソード記憶",
 };
 
 export function opLabel(op: string): string {
@@ -225,6 +228,10 @@ export function outcomeText(run: ActivityRun): string {
         ["残り", n("remaining")],
         ["失敗", n("failed")],
       ]);
+    case "maintain.episodes":
+      return join(`エピソードを ${n("episodes")} 件処理`, [
+        ["適用", n("applied")],
+      ]);
   }
 }
 
@@ -247,6 +254,7 @@ const COUNT_LABELS: Record<string, string> = {
   skipped: "スキップ",
   failed: "失敗",
   degraded: "縮退",
+  episodes: "エピソード",
 };
 
 /** Compact numeric summary for the timeline (never free text). */
@@ -527,6 +535,7 @@ export function parseActivitySummary(body: unknown): ActivitySummary | null {
     "maintain.activation": null,
     "topic.backfill": null,
     "maintain.distill": null,
+    "maintain.episodes": null,
   };
   for (const op of MEMORY_MAINTENANCE_OPS) {
     const raw = body.latestByOp[op];

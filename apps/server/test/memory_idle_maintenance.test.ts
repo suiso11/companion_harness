@@ -643,3 +643,85 @@ describe("background activity rows", () => {
     }
   });
 });
+
+describe("idle episode index scheduling", () => {
+  it("runs one bounded session episode pass and re-arms only while applied>0", async () => {
+    const f = await openRepo();
+    try {
+      const calls: Array<{
+        params: Record<string, unknown>;
+        key: string | undefined;
+        timeoutMs: number | undefined;
+      }> = [];
+      let episodesRuns = 0;
+      const cliCall: CliCall = async (_address, op, params, key, options) => {
+        if (op === "maintain.associate") {
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        if (op === "maintain.consolidate") {
+          return okEnvelope({ clusters: [], applied: 0, degraded: false });
+        }
+        if (op === "maintain.activation") {
+          return okEnvelope({
+            scored: 0,
+            scoreFailed: 0,
+            retired: 0,
+            reactivated: 0,
+            wouldRetire: 0,
+            wouldReactivate: 0,
+            degraded: false,
+          });
+        }
+        if (op === "maintain.episodes") {
+          calls.push({ params, key, timeoutMs: options?.timeoutMs });
+          episodesRuns += 1;
+          // Two passes made progress (re-arm); the third has nothing left.
+          return episodesRuns <= 2
+            ? okEnvelope({
+                episodes: [{ kind: "session", episodeKey: "s-1" }],
+                applied: 1,
+                degraded: false,
+              })
+            : okEnvelope({ episodes: [], applied: 0, degraded: false });
+        }
+        return okEnvelope(null);
+      };
+      const service = makeService(f.repo, cliCall);
+      service.start();
+
+      await waitFor(() => episodesRuns >= 3, 5000);
+      await sleep(150);
+
+      // applied>0 twice, then applied=0 stops the per-tick polling.
+      expect(episodesRuns).toBe(3);
+      for (const call of calls) {
+        expect(call.params).toEqual({ scope: SCOPE, kind: "session" });
+        expect(call.params).not.toHaveProperty("limit");
+        expect(call.timeoutMs).toBe(MEMORY_DISTILL_TIMEOUT_MS);
+      }
+      // A fresh nonce per pass makes remind recompute instead of replaying.
+      expect(new Set(calls.map((call) => call.key)).size).toBe(3);
+
+      const runs = f.repo
+        .listMemoryMaintenanceRuns({ limit: 100 })
+        .items.filter((run) => run.op === "maintain.episodes");
+      expect(runs[0]).toMatchObject({
+        ok: true,
+        errorCode: null,
+        counts: { episodes: 0, applied: 0, degraded: 0 },
+      });
+      expect(runs.some((run) => run.counts.applied === 1)).toBe(true);
+
+      // Only an ACKED raw event re-arms the index: the drain accepts this
+      // event.append, its follow-up arms the flag, and the next idle pass
+      // runs one more bounded episodes call.
+      enqueueRememberChain(f.repo, []);
+      await waitFor(() => episodesRuns >= 4, 5000);
+      expect(calls).toHaveLength(4);
+      expect(new Set(calls.map((call) => call.key)).size).toBe(4);
+      expect(calls[3]?.params).toEqual({ scope: SCOPE, kind: "session" });
+    } finally {
+      f.close();
+    }
+  });
+});
