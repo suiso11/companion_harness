@@ -161,6 +161,7 @@ import {
   type LearningService,
 } from "./learning_service.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
+import { createMainAgentChat } from "./main_agent_chat.js";
 import {
   measureStoreSize,
   type StatFn,
@@ -3388,11 +3389,16 @@ export async function startServer(
       filePath: join(dirname(config.dbPath), PROVIDER_KEYS_FILE_NAME),
       env: config.personaProviders,
     });
+    const mainChat =
+      engine === undefined || modelGateway === null
+        ? undefined
+        : createMainAgentChat({ repo, engine, now });
     const personaChat = {
       store: personaChatStore,
       service: createPersonaChatService({
         store: personaChatStore,
         keys: providerKeys.keys,
+        ...(mainChat !== undefined ? { mainChat } : {}),
         now,
         acquireLocal: () => {
           const reservation = backgroundResource.tryAcquire(

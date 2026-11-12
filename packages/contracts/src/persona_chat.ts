@@ -82,6 +82,8 @@ export const PersonaSchema = z.strictObject({
 export const PersonasResponseSchema = z.strictObject({
   personas: z.array(PersonaSchema),
   providers: z.array(PersonaProviderInfoSchema),
+  /** true when the real main agent can be a persona-chat partner. */
+  mainAvailable: z.boolean(),
 });
 
 export const ChatTitleSchema = nonBlank(120);
@@ -90,6 +92,7 @@ export const CreateChatRequestSchema = z.strictObject({
   personaId: z.string().uuid(),
   title: ChatTitleSchema.optional(),
   partnerId: z.string().uuid().optional(),
+  partnerMain: z.boolean().optional(),
   autotalk: z.boolean().optional(),
 });
 export const UpdateChatRequestSchema = z.strictObject({
@@ -110,6 +113,8 @@ export const ChatSummarySchema = z.strictObject({
   preview: z.string().max(80),
   messageCount: z.number().int().nonnegative(),
   partnerId: z.string().uuid().nullable(),
+  /** true when the partner is the main agent rather than a persona row. */
+  partnerMain: z.boolean(),
   partnerName: z.string().min(1).max(80).nullable(),
   partnerAvatar: z.string().min(1).max(16).nullable(),
   autotalk: z.boolean(),

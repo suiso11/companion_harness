@@ -115,6 +115,45 @@ describe("persona chat store", () => {
     closeKernelDatabase(handle);
   });
 
+  it("autotalk: main-agent partner is due and stores NULL-persona reply", async () => {
+    const { handle, store } = await setup();
+    const ada = store.createPersona(input, 1);
+    const chat = store.createChat(ada.id, "with main", 10, {
+      partnerMain: true,
+      autotalk: true,
+    });
+    const id = chat?.id as string;
+    expect(chat).toMatchObject({
+      partnerId: null,
+      partnerMain: true,
+      partnerName: null,
+      autotalk: true,
+    });
+    expect(store.listAutotalkDue(1000, 10).map((c) => c.id)).toEqual([id]);
+
+    store.appendParticipantMessage(id, ada.id, "hello main", 20);
+    expect(store.listAutotalkDue(20, 10)).toEqual([]);
+    const reply = store.appendMainMessage(id, "hello ada", 40);
+    expect(reply).toMatchObject({ role: "assistant", personaId: null });
+    expect(store.getChat(id)).toMatchObject({
+      preview: "hello ada",
+      messageCount: 2,
+    });
+    expect(store.listAutotalkDue(41, 10).map((c) => c.id)).toEqual([id]);
+
+    const plain = store.createChat(ada.id, "plain", 2);
+    expect(() => store.appendMainMessage(plain?.id as string, "x", 50)).toThrow(
+      PersonaChatStoreError,
+    );
+    expect(
+      store.createChat(ada.id, "both", 2, {
+        partnerId: ada.id,
+        partnerMain: true,
+      }),
+    ).toBeNull();
+    closeKernelDatabase(handle);
+  });
+
   it("autotalk: partner round-trip, per-row personaId, due listing", async () => {
     const { handle, store } = await setup();
     const luna = store.createPersona(input, 1);

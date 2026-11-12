@@ -14,13 +14,22 @@ import {
   previewOf,
   relativeTime,
 } from "./lib/persona_chat.js";
-import { pairAiLabel, personaAiLabel } from "./lib/persona_display.js";
+import {
+  pairAiLabel,
+  personaAiLabel,
+  providerLabel,
+} from "./lib/persona_display.js";
 
 const STORAGE_KEY = "ch.personaChatId";
+// partnerId sentinel: the real main agent instead of a persona.
+const MAIN_PARTNER = "__main__";
+const MAIN_NAME = "メインAI";
+const MAIN_AVATAR = "🜲";
 
 let chats = $state<ChatSummary[]>([]);
 let personas = $state<Persona[]>([]);
 let providers = $state<PersonaProviderInfo[]>([]);
+let mainAvailable = $state(false);
 let loaded = $state(false);
 let selectedId = $state<string | null>(null);
 let messages = $state<ChatMessage[]>([]);
@@ -89,9 +98,11 @@ async function init(): Promise<void> {
     const body = p.body as {
       personas: Persona[];
       providers: PersonaProviderInfo[];
+      mainAvailable: boolean;
     };
     personas = body.personas;
     providers = body.providers;
+    mainAvailable = body.mainAvailable;
     pickerId = usable[0]?.id ?? "";
   }
   if (c.status !== 200) {
@@ -114,10 +125,12 @@ void init();
 async function create(): Promise<void> {
   const personaId = pickerId || usable[0]?.id;
   if (!personaId) return;
-  const partner = partnerId !== "" && partnerId !== personaId ? partnerId : "";
   const body: Record<string, unknown> = { personaId };
-  if (partner) {
-    body.partnerId = partner;
+  if (partnerId === MAIN_PARTNER) {
+    body.partnerMain = true;
+    body.autotalk = autotalkNew;
+  } else if (partnerId !== "" && partnerId !== personaId) {
+    body.partnerId = partnerId;
     if (autotalkNew) body.autotalk = true;
   }
   const res = await postJson("/api/chats", body, null);
@@ -145,6 +158,8 @@ async function toggleAutotalk(): Promise<void> {
 }
 
 function speaker(m: ChatMessage): { name: string; avatar: string } {
+  if (m.role === "assistant" && m.personaId === null && selected?.partnerMain)
+    return { name: MAIN_NAME, avatar: MAIN_AVATAR };
   const p = m.personaId
     ? personas.find((x) => x.id === m.personaId)
     : undefined;
@@ -152,6 +167,20 @@ function speaker(m: ChatMessage): { name: string; avatar: string } {
     name: p?.name ?? selected?.personaName ?? "",
     avatar: p?.avatar ?? selected?.avatar ?? "",
   };
+}
+
+function titleOf(chat: ChatSummary): string {
+  return chatTitle({
+    personaName: chat.personaName,
+    partnerName: chat.partnerMain ? MAIN_NAME : chat.partnerName,
+  });
+}
+
+function aiLabelOf(chat: ChatSummary): string {
+  if (chat.partnerMain)
+    return `${providerLabel(providers, chat.provider)} × ${MAIN_NAME}`;
+  const partner = personas.find((p) => p.id === chat.partnerId);
+  return pairAiLabel(providers, chat.provider, partner?.provider ?? null);
 }
 
 // Autotalk messages arrive server-side; poll while visible, keep scroll if reading history.
@@ -266,7 +295,6 @@ function onKey(event: KeyboardEvent): void {
 
 <ChatPage activePath="/chats" chatSurface={false}>
   {#snippet children()}
-    {@const selectedPartner = selected ? personas.find((p) => p.id === selected.partnerId) : undefined}
     <div class="chats">
       <aside class:open={drawer} aria-label="会話一覧">
         <div class="new">
@@ -276,11 +304,13 @@ function onKey(event: KeyboardEvent): void {
           <button type="button" disabled={usable.length === 0} onclick={create}>新しい会話</button>
         </div>
         <div class="new opts">
-          <select bind:value={partnerId} disabled={usable.length < 2} aria-label="相手（省略可）">
+          <select bind:value={partnerId} disabled={usable.length < 2 && !mainAvailable} aria-label="相手（省略可）">
             <option value="">相手（省略可）</option>
+            {#if mainAvailable}<option value={MAIN_PARTNER}>メインAI（本物）</option>{/if}
             {#each usable.filter((p) => p.id !== pickerId) as p (p.id)}<option value={p.id}>{p.avatar} {p.name}（{personaAiLabel(providers, p)}）</option>{/each}
           </select>
           <label><input type="checkbox" bind:checked={autotalkNew} disabled={partnerId === "" || partnerId === pickerId} /> 自走で話す（1時間おき）</label>
+          {#if partnerId === MAIN_PARTNER}<p class="hint">メインAIは本物のエージェント（ツール・記憶あり）が、1時間ごとの自走のタイミングで返信します。</p>{/if}
         </div>
         {#if loaded && personas.length === 0}
           <p class="hint">ペルソナがありません。<a href="/personas">ペルソナを作成</a></p>
@@ -292,13 +322,12 @@ function onKey(event: KeyboardEvent): void {
         {/if}
         <ul>
           {#each chats as chat (chat.id)}
-            {@const partner = personas.find((p) => p.id === chat.partnerId)}
             <li class:active={chat.id === selectedId}>
               <button type="button" class="row" onclick={() => select(chat.id)}>
                 <span class="avatar" aria-hidden="true">{chat.avatar}</span>
-                {#if chat.partnerAvatar}<span class="avatar partner" aria-hidden="true">{chat.partnerAvatar}</span>{/if}
+                {#if chat.partnerAvatar}<span class="avatar partner" aria-hidden="true">{chat.partnerAvatar}</span>{:else if chat.partnerMain}<span class="avatar partner" aria-hidden="true">{MAIN_AVATAR}</span>{/if}
                 <span class="body">
-                  <span class="top"><span><strong>{chatTitle(chat)}</strong> <small>{pairAiLabel(providers, chat.provider, partner?.provider ?? null)}</small></span><small>{relativeTime(now, chat.updatedAt)}</small></span>
+                  <span class="top"><span><strong>{titleOf(chat)}</strong> <small>{aiLabelOf(chat)}</small></span><small>{relativeTime(now, chat.updatedAt)}</small></span>
                   <span class="title">{chat.title}{#if chat.autotalk} <span class="badge">自走</span>{/if}</span>
                   <small class="preview">{previewOf(chat.preview)}</small>
                 </span>
@@ -315,8 +344,8 @@ function onKey(event: KeyboardEvent): void {
       <section class="pane">
         <header>
           <button type="button" class="toggle" aria-label="会話一覧を開く" aria-expanded={drawer} onclick={() => { drawer = !drawer; now = Date.now(); }}>☰</button>
-          <span class="who"><strong>{selected ? `${chatTitle(selected)} · ${selected.title}` : "ペルソナとの会話"}</strong>{#if selected}<small>{pairAiLabel(providers, selected.provider, selectedPartner?.provider ?? null)}</small>{/if}{#if selected?.autotalk}<small>1時間おきに自動で話します</small>{/if}</span>
-          {#if selected?.partnerId}
+          <span class="who"><strong>{selected ? `${titleOf(selected)} · ${selected.title}` : "ペルソナとの会話"}</strong>{#if selected}<small>{aiLabelOf(selected)}</small>{/if}{#if selected?.autotalk}<small>1時間おきに自動で話します</small>{/if}</span>
+          {#if selected?.partnerId || selected?.partnerMain}
             <button type="button" aria-pressed={selected.autotalk} onclick={toggleAutotalk}>自走 {selected.autotalk ? "ON" : "OFF"}</button>
           {/if}
         </header>

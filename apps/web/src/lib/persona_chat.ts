@@ -35,6 +35,7 @@ export interface ChatSummary {
   preview: string;
   messageCount: number;
   partnerId: string | null;
+  partnerMain: boolean;
   partnerName: string | null;
   partnerAvatar: string | null;
   autotalk: boolean;
