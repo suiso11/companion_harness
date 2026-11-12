@@ -70,6 +70,12 @@ interface PortCalls {
     depth?: number;
     runId: string | null;
   }>;
+  search: Array<{
+    sessionId: string;
+    query: string;
+    limit?: number;
+    runId: string | null;
+  }>;
 }
 
 function fakeMemory(
@@ -77,8 +83,20 @@ function fakeMemory(
   overrides: Partial<MemoryHttpPort> = {},
 ): MemoryHttpPort {
   const base: MemoryHttpPort = {
-    searchMemories: async () => {
-      throw new Error("search not used by graph routes");
+    searchMemories: async (input) => {
+      calls.search.push({
+        sessionId: input.sessionId,
+        query: input.query,
+        ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        runId: input.runId,
+      });
+      return {
+        searchId: "search-1",
+        hits: [
+          { handle: "m1", snippet: "alpha", status: "active" as const },
+          { handle: "m2", snippet: "beta", status: "retired" as const },
+        ],
+      };
     },
     getMemoryStats: async () => {
       throw new Error("stats not used by graph routes");
@@ -172,13 +190,26 @@ async function get(
   return { status: response.status, body: await response.json() };
 }
 
+async function post(
+  app: CreatedServerApp["app"],
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  const response = await app.request(path, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 function basePath(sessionId: string): string {
   return `/api/sessions/${sessionId}/memory/graph`;
 }
 
 describe("memory graph HTTP routes", () => {
   it("returns the global graph with opaque handles and a string version", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(fakeMemory(calls));
     try {
       const { sessionId, runId } = makeSessionRun(fixture.repo);
@@ -209,7 +240,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("defaults includeRetired to false and returns the local graph", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(fakeMemory(calls));
     try {
       const { sessionId, runId } = makeSessionRun(fixture.repo);
@@ -245,7 +276,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("rejects malformed or extra query parameters with 400", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(fakeMemory(calls));
     try {
       const { sessionId, runId } = makeSessionRun(fixture.repo);
@@ -273,7 +304,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("allows a run-less read-only global graph read", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(fakeMemory(calls));
     try {
       const { sessionId } = makeSessionRun(fixture.repo);
@@ -299,7 +330,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("maps an unknown handle to 404 target_not_found", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(
       fakeMemory(calls, {
         getMemoryGraphLocal: async () => {
@@ -323,7 +354,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("rejects a run that belongs to another session", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(fakeMemory(calls));
     try {
       const owner = makeSessionRun(fixture.repo);
@@ -365,7 +396,7 @@ describe("memory graph HTTP routes", () => {
   });
 
   it("returns 503 memory_graph_unavailable for an old remind build", async () => {
-    const calls: PortCalls = { global: [], local: [] };
+    const calls: PortCalls = { global: [], local: [], search: [] };
     const fixture = await makeApp(
       fakeMemory(calls, {
         getMemoryGraphGlobal: async () => {
@@ -388,6 +419,77 @@ describe("memory graph HTTP routes", () => {
           "memory_graph_unavailable",
         );
       }
+    } finally {
+      fixture.close();
+    }
+  });
+});
+
+// Explicit search is a read: it may be minted run-less (a fresh session has
+// no completed Run) while a supplied run must still belong to the session.
+describe("memory search HTTP route: optional owned Run", () => {
+  function searchPath(sessionId: string): string {
+    return `/api/sessions/${sessionId}/memory/search`;
+  }
+
+  it("mints a run-less search when runId is omitted", async () => {
+    const calls: PortCalls = { global: [], local: [], search: [] };
+    const fixture = await makeApp(fakeMemory(calls));
+    try {
+      const sessionId = fixture.repo.createSession({
+        key: randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const out = await post(fixture.app, searchPath(sessionId), {
+        query: "alpha",
+      });
+      expect(out.status).toBe(200);
+      expect(calls.search).toEqual([
+        { sessionId, query: "alpha", limit: 5, runId: null },
+      ]);
+      const body = out.body as {
+        hits: Array<{ handle: string; status: string }>;
+      };
+      expect(body.hits.map((hit) => hit.status)).toEqual(["active", "retired"]);
+      expect(JSON.stringify(out.body)).not.toContain("rec-");
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("still rejects a run owned by another session", async () => {
+    const calls: PortCalls = { global: [], local: [], search: [] };
+    const fixture = await makeApp(fakeMemory(calls));
+    try {
+      const sessionId = fixture.repo.createSession({
+        key: randomUUID(),
+        now: T0,
+      }).body.sessionId;
+      const foreign = makeSessionRun(fixture.repo);
+      const out = await post(fixture.app, searchPath(sessionId), {
+        query: "alpha",
+        runId: foreign.runId,
+      });
+      expect(out.status).toBe(404);
+      expect(calls.search).toEqual([]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("passes an owned run through to the service", async () => {
+    const calls: PortCalls = { global: [], local: [], search: [] };
+    const fixture = await makeApp(fakeMemory(calls));
+    try {
+      const { sessionId, runId } = makeSessionRun(fixture.repo);
+      const out = await post(fixture.app, searchPath(sessionId), {
+        query: "alpha",
+        runId,
+      });
+      expect(out.status).toBe(200);
+      expect(calls.search).toEqual([
+        { sessionId, query: "alpha", limit: 5, runId },
+      ]);
     } finally {
       fixture.close();
     }

@@ -307,7 +307,8 @@ export interface MemoryGraphHttpResult {
 export interface MemoryHttpPort {
   searchMemories(input: {
     sessionId: string;
-    runId: string;
+    /** Null for a run-less (view-only) search in a session with no Run. */
+    runId: string | null;
     query: string;
     limit?: number;
     signal?: AbortSignal;
@@ -3581,8 +3582,9 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   // Explicit search (read, no idempotency key, allowed while draining:
-  // reads never stage and never heat). Body carries the originating runId
-  // so hits bind to their (sessionId, searchId) scope.
+  // reads never stage and never heat). `runId` is optional: when supplied it
+  // must be an owned Run of this session; when omitted (a fresh session with
+  // no completed Run) the snapshot is minted run-less and stays view-only.
   app.post("/api/sessions/:sessionId/memory/search", async (c) => {
     if (memory === null) {
       return memoryUnavailable(c);
@@ -3599,9 +3601,12 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!parsed.success) {
       return validationError(c);
     }
-    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
-    if (!owned.ok) {
-      return owned.response;
+    const runId = parsed.data.runId ?? null;
+    if (runId !== null) {
+      const owned = requireOwnedRun(c, session.id, runId);
+      if (!owned.ok) {
+        return owned.response;
+      }
     }
     try {
       repo.getSession(session.id);
@@ -3611,7 +3616,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     try {
       const out = await memory.searchMemories({
         sessionId: session.id,
-        runId: parsed.data.runId,
+        runId,
         query: parsed.data.query,
         limit: parsed.data.limit,
       });

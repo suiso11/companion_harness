@@ -30,14 +30,19 @@ export const MemoryHitSchema = z.strictObject({
 });
 export type MemoryHit = z.infer<typeof MemoryHitSchema>;
 
-/** POST .../memory/search request: explicit user-directed query only. */
+/**
+ * POST .../memory/search request: explicit user-directed query only.
+ * `runId` is optional: when supplied it must be a Run owned by the session;
+ * when omitted (a fresh session with no completed Run) the search snapshot is
+ * minted run-less, session-scoped, and view-only.
+ */
 export const MemorySearchRequestSchema = z.strictObject({
   query: z
     .string()
     .min(1)
     .refine(codePointsMax(500), { message: "query over 500 code points" }),
   limit: z.number().int().min(1).max(8).optional().default(5),
-  runId: UuidSchema,
+  runId: UuidSchema.optional(),
 });
 export type MemorySearchRequest = z.infer<typeof MemorySearchRequestSchema>;
 

@@ -638,7 +638,11 @@ connector instance owns **all** configured roots.
   2026-10-15 (local, temp stores only): `POST .../memory/search` is
   explicit user-directed only and returns opaque session-scoped `mN`
   handles for active AND retired records (never archived/superseded);
-  a search never heats, reactivates, or grants feedback (zero
+  `runId` is optional: when supplied it must be a Run owned by that
+  session, and when omitted (e.g. a fresh session with no completed Run)
+  the snapshot is minted run-less — still session-scoped and view-only
+  (management mutations always require a Run); a search never heats,
+  reactivates, or grants feedback (zero
   `record.feedback` jobs from search). `GET .../memory/detail` keeps
   the immutable cited snapshot distinct from the live current record
   (provenance source `companion:conversation`); the UI confirm panel

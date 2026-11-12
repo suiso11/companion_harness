@@ -3,8 +3,9 @@
 -- must be able to browse the global memory graph/list; the snapshot stays
 -- session-scoped (and read-only), so `run_id` becomes nullable.
 --
--- Explicit searches and every management mutation still carry a Run: only
--- the graph projection (`query = 'graph'`) may be minted run-less. SQLite
+-- Explicit searches are also read-only and may be minted run-less (the
+-- snapshot stays session-scoped and view-only). Every management mutation
+-- still carries a Run: `memory_operations.run_id` stays NOT NULL. SQLite
 -- cannot relax a NOT NULL column in place, hence the table rebuild; the
 -- snapshot items and the (session, scope) graph mapping carry no foreign key
 -- to this table, so rebuilding touches no other row.

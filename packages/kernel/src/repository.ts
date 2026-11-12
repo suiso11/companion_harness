@@ -5284,7 +5284,8 @@ export function createKernelRepository(
     input: {
       searchId: string;
       sessionId: string;
-      runId: string;
+      /** Null for a run-less (view-only) explicit search snapshot. */
+      runId: string | null;
       scope: string;
       query: string;
       items: Array<{
@@ -5299,7 +5300,7 @@ export function createKernelRepository(
   ): void {
     const searchId = requireMemoryToken(input.searchId, "searchId");
     const sessionId = requireId(input.sessionId, "sessionId");
-    const runId = requireId(input.runId, "runId");
+    const runId = input.runId === null ? null : requireId(input.runId, "runId");
     const scope = requireMemoryScope(input.scope);
     if (
       typeof input.query !== "string" ||
@@ -5359,6 +5360,7 @@ export function createKernelRepository(
   function getMemorySearch(searchId: string): {
     searchId: string;
     sessionId: string;
+    /** Null for a run-less (view-only) explicit search snapshot. */
     runId: string | null;
     scope: string;
     query: string;

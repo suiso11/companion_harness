@@ -209,6 +209,50 @@ describe("explicit search: opaque handles, no heat, immutable snapshot", () => {
       f.close();
     }
   });
+
+  it("searches run-less (no completed Run) over active+retired, view-only", async () => {
+    const f = await openRepo();
+    try {
+      const ledger: FakeLedger = { ops: [], liveStatus: new Map() };
+      let searchedParams: Record<string, unknown> | null = null;
+      const inner = makeCli(ledger, [
+        { id: "rec-a", snippet: "alpha", status: "active" },
+        { id: "rec-b", snippet: "beta", status: "retired" },
+      ]);
+      const service = makeService(
+        f.repo,
+        async (address, op, params, key, options) => {
+          if (op === "record.search") {
+            searchedParams = params;
+          }
+          return inner(address, op, params, key, options);
+        },
+      );
+      // A fresh session may have no Run at all.
+      const sessionId = f.repo.createSession({ key: randomUUID(), now: T0 })
+        .body.sessionId;
+      const out = await service.searchMemories({
+        sessionId,
+        runId: null,
+        query: "alpha",
+        limit: 5,
+      });
+      expect(out.hits.map((h) => h.status)).toEqual(["active", "retired"]);
+      // The remind CLI never sees a null runId.
+      expect(searchedParams).not.toBeNull();
+      expect(searchedParams).not.toHaveProperty("runId");
+      // The snapshot is durable and run-less (view-only, mutations still need a Run).
+      expect(f.repo.getMemorySearch(out.searchId)?.runId).toBeNull();
+      const detail = await service.getMemoryDetail({
+        sessionId,
+        searchId: out.searchId,
+        handle: "m1",
+      });
+      expect(detail.snapshot.snippet).toBe("alpha");
+    } finally {
+      f.close();
+    }
+  });
 });
 
 describe("target binding: ambiguity, scope, single-match", () => {
