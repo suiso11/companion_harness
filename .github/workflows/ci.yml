@@ -22,11 +22,13 @@ jobs:
       matrix:
         # The full matrix runs on both OSes. Native containment (bwrap) is a
         # Linux-only provision step below; portable tests avoid blanket skips.
-        # Windows is the slow leg (340s for the suite vs 210s on Linux), so it
-        # is split into two shards; Linux runs everything once.
+        # Each OS is split into two vitest shards on independent runners:
+        # windows-latest takes 340s and ubuntu-latest ~300s for the suite.
         include:
           - os: ubuntu-latest
-            shard: 1/1
+            shard: 1/2
+          - os: ubuntu-latest
+            shard: 2/2
           - os: windows-latest
             shard: 1/2
           - os: windows-latest
