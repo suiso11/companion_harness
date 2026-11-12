@@ -1,7 +1,10 @@
 name: ci
 
 on:
+  # Feature branches are covered by pull_request; a branch push used to run
+  # the identical suite a second time (two full runs per commit).
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -19,7 +22,17 @@ jobs:
       matrix:
         # The full matrix runs on both OSes. Native containment (bwrap) is a
         # Linux-only provision step below; portable tests avoid blanket skips.
-        os: [windows-latest, ubuntu-latest]
+        # Each OS is split into two vitest shards on independent runners:
+        # windows-latest takes 340s and ubuntu-latest 260s for the suite.
+        include:
+          - os: ubuntu-latest
+            shard: 1/2
+          - os: ubuntu-latest
+            shard: 2/2
+          - os: windows-latest
+            shard: 1/2
+          - os: windows-latest
+            shard: 2/2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -158,11 +171,24 @@ jobs:
         env:
           COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
           COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
-        run: pnpm test
+        run: pnpm exec vitest run --shard=${{ matrix.shard }}
 
   e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each mode boots its own server, ports and temp DB, so the suites run
+        # as independent jobs instead of ~6 minutes of serial invocations.
+        mode: [smoke, calendar, memory, autodispatch]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      COMPANION_E2E_CALENDAR: ${{ matrix.mode == 'calendar' && '1' || '' }}
+      COMPANION_E2E_MEMORY: ${{ matrix.mode == 'memory' && '1' || '' }}
+      COMPANION_E2E_AUTODISPATCH: ${{ matrix.mode == 'autodispatch' && '1' || '' }}
+      COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
+      COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
+      COMPANION_AD_E2E_MODE: ${{ matrix.mode == 'autodispatch' && 'ci' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -216,6 +242,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Install Linux native containment runtime (autodispatch sealed bridge)
+        if: matrix.mode == 'autodispatch'
         shell: bash
         run: |
           sudo apt-get update
@@ -262,6 +289,7 @@ jobs:
           fi
 
       - name: Start user systemd bus (autodispatch sealed scope)
+        if: matrix.mode == 'autodispatch'
         shell: bash
         run: |
           user="$(id -un)"
@@ -297,31 +325,13 @@ jobs:
       - name: Production UI build
         run: pnpm --filter @companion/server build:ui
 
-      - name: Smoke E2E (chromium, real browser, temp DB only)
-        run: pnpm --filter @companion/server test:e2e
-
-      - name: Calendar + fake Action safety E2E (chromium, temp DB only)
-        env:
-          COMPANION_E2E_CALENDAR: "1"
-        run: pnpm --filter @companion/server test:e2e
-
-      - name: Memory management browser E2E (chromium, temp DB only)
-        env:
-          COMPANION_E2E_MEMORY: "1"
-          COMPANION_MEMORY_TEST_ENTRY: ${{ github.workspace }}/.ci/remind/dist/src/cli.js
-          COMPANION_MEMORY_TEST_CONFIG_TEMPLATE: ${{ github.workspace }}/.ci/remind/memory.config.example.json
-        run: pnpm --filter @companion/server test:e2e
-
-      - name: Auto-dispatch browser E2E (CI executor substitute, not installed pi-orch)
-        env:
-          COMPANION_E2E_AUTODISPATCH: "1"
-          COMPANION_AD_E2E_MODE: "ci"
+      - name: Browser E2E (${{ matrix.mode }}, chromium, temp DB only)
         run: |
           # Real server/UI/planner/materializer/TrialRunner/sealed bridge,
-          # real systemd-user+bwrap confinement, real model relay. Only the
-          # installed pi-orch/OMP executor is replaced by the repo-contained
-          # scripts/pi-orch-bridge/ci-executor.mjs. Never evidence for the
-          # installed binaries; local runs keep real-pi.
+          # real systemd-user+bwrap confinement, real model relay for the
+          # autodispatch mode. Only the installed pi-orch/OMP executor is
+          # replaced by the repo-contained scripts/pi-orch-bridge/ci-executor.mjs.
+          # Never evidence for the installed binaries; local runs keep real-pi.
           timeout --signal=TERM --kill-after=30s 900s \
             pnpm --filter @companion/server test:e2e
 
@@ -329,7 +339,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-failure-artifacts
+          name: e2e-failure-artifacts-${{ matrix.mode }}
           path: |
             apps/server/playwright-report/
             apps/server/test-results/
