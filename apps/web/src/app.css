@@ -158,6 +158,9 @@ body {
   align-items: center;
   gap: 0.15rem;
   min-width: 0;
+  /* The dev menu anchors here, not to the summary: a wrapped summary can
+     sit at the left edge, where right:0 would push the menu off-screen. */
+  position: relative;
 }
 
 .feature-links a,
@@ -205,10 +208,6 @@ body {
 }
 
 /* `開発・運用` disclosure: native <details> keeps keyboard support + CSP. */
-.feature-links-dev {
-  position: relative;
-}
-
 .feature-links-dev summary {
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
@@ -227,6 +226,12 @@ body {
 .feature-links-dev summary:hover {
   background: var(--accent);
   color: var(--accent-foreground);
+}
+
+/* Active page matches a primary link, not the hover/open accent. */
+.feature-links-dev.active summary {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
 }
 
 .feature-links-dev-menu {
@@ -727,6 +732,18 @@ button[data-action-evidence="before"] {
 @media (max-width: 480px) {
   .topbar {
     padding: 0.5rem 0.75rem;
+  }
+
+  /* A wrapped summary sits at the left edge, so open the menu inline and
+     let the header grow instead of overlaying or hanging off-screen. */
+  .feature-links-dev-menu {
+    position: static;
+    margin-top: 0.25rem;
+    box-shadow: none;
+  }
+
+  .feature-links {
+    align-items: flex-start;
   }
 
   .messages {
@@ -1397,6 +1414,13 @@ button[data-action-evidence="before"] {
   align-items: start;
   padding: 1rem 1.25rem 1.25rem;
 }
+
+/* Compact mode keeps only the control bar (/shadow). */
+#autonomy.compact {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "bar";
+  gap: 0;
+}
 /* Layout `display` values below would otherwise defeat the `hidden` bindings. */
 #autonomy [hidden] {
   /* biome-ignore lint/complexity/noImportantStyles: `hidden` must beat the grid/flex rules below. */
@@ -1488,10 +1512,8 @@ button[data-action-evidence="before"] {
 }
 #autonomy .autonomy-segmented {
   display: inline-flex;
-  /* Own row, left-aligned: on /shadow the 開発・運用 <details> menu is
-     open by default and hangs over the panel's top-right corner. Keeping the
-     buttons out of that strip is what makes them clickable (e2e caught it as an
-     intercepted click, not as a missing element). */
+  /* Own row, left-aligned: keeps the control clear of the 開発・運用 dropdown
+     when it is open, and keeps the two buttons together on narrow screens. */
   grid-column: 1 / -1;
   justify-self: start;
   max-width: max-content;

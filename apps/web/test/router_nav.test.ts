@@ -46,10 +46,10 @@ describe("feature navigation grouping", () => {
     ]);
     expect(DEV_NAV.map((item) => item.label)).toEqual([
       "試行の提案",
-      "試行",
+      "試行の記録",
       "学び",
       "引継ぎ",
-      "設定",
+      "APIキー",
     ]);
   });
 

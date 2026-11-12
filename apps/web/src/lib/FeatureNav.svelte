@@ -7,6 +7,13 @@ import { DEV_NAV, DEV_NAV_LABEL, PRIMARY_NAV } from "./router.js";
 
 let { activePath = "/" }: { activePath?: string } = $props();
 
+// The disclosure never auto-opens: an open menu overlays the page (it hid
+// the /shadow controls and the mobile 新規作成 button). The summary shows
+// the active dev page instead, so orientation survives the closed menu.
+let activeDev = $derived(
+  DEV_NAV.find((item) => item.path === activePath) ?? null,
+);
+
 // One local sprite keeps the header markup small; `currentColor` lets the
 // icons follow link/active states without per-icon styles.
 const ICONS: Record<string, string> = {
@@ -97,13 +104,10 @@ function iconFor(path: string): string {
       <span>{item.label}</span>
     </a>
   {/each}
-  <details
-    class="feature-links-dev"
-    open={DEV_NAV.some((item) => item.path === activePath)}
-  >
+  <details class="feature-links-dev" class:active={activeDev !== null}>
     <summary
       ><svg class="nav-icon" aria-hidden="true"><use href="#nav-dev" /></svg
-      ><span>{DEV_NAV_LABEL}</span></summary
+      ><span>{DEV_NAV_LABEL}{activeDev ? ` · ${activeDev.label}` : ""}</span></summary
     >
     <div class="feature-links-dev-menu">
       {#each DEV_NAV as item (item.path)}

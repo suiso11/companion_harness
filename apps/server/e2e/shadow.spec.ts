@@ -212,13 +212,24 @@ async function api(
 }
 
 async function boot(page: Page, origin: string): Promise<string> {
-  await page.goto(`${origin}/shadow`);
+  // Autonomy controls (purpose/task creation, stop/resume) live on /tasks.
+  // /shadow only keeps the compact stop/resume switch.
+  await page.goto(`${origin}/tasks`);
   await page.locator("#autonomy-control-status").waitFor({ timeout: 30_000 });
   const sessionId = await page.evaluate(() =>
     localStorage.getItem("ch.sessionId"),
   );
   expect(typeof sessionId).toBe("string");
   return sessionId as string;
+}
+
+async function gotoShadow(page: Page, origin: string): Promise<void> {
+  await page.goto(`${origin}/shadow`);
+  await page.locator("#shadow-request-form").waitFor({ timeout: 30_000 });
+  await page.locator("#autonomy-control-status").waitFor({ timeout: 30_000 });
+  await page
+    .locator('#autonomy-control:not([data-state="unknown"])')
+    .waitFor({ timeout: 30_000 });
 }
 
 async function createPurposeUi(
@@ -352,6 +363,7 @@ test("trial-only execute proposal renders 未実行 under a CODE policy, untrust
       statement: "ui evening permission claim",
       kind: "permission",
     });
+    await gotoShadow(page, fx.origin);
     await page.locator("#shadow-refresh").click();
     await expect(page.locator("#shadow-status")).toContainText(
       "試行の記録はまだありません",
@@ -452,6 +464,7 @@ test("aborted first POST keeps the frozen request; edited retry refuses and the 
     );
     expect(await listShadowJobs(page, sessionId)).toHaveLength(0);
 
+    await gotoShadow(page, fx.origin);
     // Hold the FIRST real POST: commit it for real, abort ONLY the response.
     let firstPost = true;
     await page.route("**/api/sessions/*/shadow-jobs", async (route) => {
@@ -562,6 +575,7 @@ test("held detail GET never restores the stale selection after rebinding", async
     );
     expect(await listShadowJobs(page, sessionId)).toHaveLength(0);
 
+    await gotoShadow(page, fx.origin);
     // Sequential COMPLETED jobs (global one-claim bound: never parallel).
     await requestShadowUi(page, "scope-a", "first");
     await waitShadowJob(page, sessionId, "scope-a", "completed");
@@ -649,6 +663,7 @@ test("STOP-held background output leaves the composer draft alone while ordinary
     );
     expect(await listShadowJobs(page, sessionId)).toHaveLength(0);
 
+    await gotoShadow(page, fx.origin);
     // Draft in the composer BEFORE the background result lands.
     await page.locator("#composer-input").fill("draft must survive");
     await page.locator("#composer-input").focus();

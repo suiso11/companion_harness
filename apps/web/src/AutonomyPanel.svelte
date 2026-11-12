@@ -131,6 +131,8 @@ function formatHistoryEvents(events: unknown, withNote: boolean): string[] {
   return lines;
 }
 
+let { compact = false }: { compact?: boolean } = $props();
+
 let statusText = $state("");
 let controlStatus = $state("");
 let pendingLine = $state("");
@@ -356,6 +358,9 @@ async function setControl(paused: boolean): Promise<void> {
 async function refreshLists(): Promise<void> {
   const sessionId = getSessionId();
   if (sessionId === null) return;
+  // Compact mode renders only the control bar; the retry path can call this
+  // too, so the guard belongs here rather than at each call site.
+  if (compact) return;
   // Session guard (UI4): a session switch clears selections + drafts.
   if (listedSession !== null && listedSession !== sessionId) {
     selectedPurpose = null;
@@ -1228,7 +1233,12 @@ $effect(() => {
   {/if}
 {/snippet}
 
-<section id="autonomy" aria-label="自律メモの管理" class="feature-panel">
+<section
+  id="autonomy"
+  aria-label={compact ? "自律動作" : "自律メモの管理"}
+  class="feature-panel"
+  class:compact
+>
   <header class="autonomy-bar">
     <div
       id="autonomy-control"
@@ -1238,7 +1248,7 @@ $effect(() => {
           ? "paused"
           : "running"}
     >
-      <h2>自律メモの管理</h2>
+      <h2>{compact ? "自律動作" : "自律メモの管理"}</h2>
       <span class="autonomy-dot" aria-hidden="true"></span>
       <p id="autonomy-control-status" aria-live="polite">{controlStatus}</p>
       <div class="autonomy-segmented" role="group" aria-label="自律動作の切り替え">
@@ -1272,6 +1282,7 @@ $effect(() => {
     </div>
   </header>
 
+  {#if !compact}
   <div class="autonomy-rail">
     <h3 class="autonomy-heading">
       目的<span class="autonomy-count">{purposes.length}</span>
@@ -1693,4 +1704,5 @@ $effect(() => {
       </div>
     </form>
   </div>
+  {/if}
 </section>
