@@ -146,7 +146,7 @@ export const POLARITY_TEXT: Record<string, string> = {
 };
 
 export const SOURCE_TEXT: Record<string, string> = {
-  shadow_job: "試行",
+  shadow_job: "試行の記録",
   conversation_proposal: "会話の候補",
   action_receipt: "実行記録",
   task_event: "作業履歴",

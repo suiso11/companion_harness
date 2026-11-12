@@ -34,14 +34,14 @@ async function submit(id: string, apiKey: string): Promise<void> {
 </script>
 
 <svelte:head>
-  <title>設定 · Companion Harness</title>
+  <title>APIキー · Companion Harness</title>
 </svelte:head>
 
 <ChatPage activePath="/settings" chatSurface={false}>
   {#snippet children()}
     <section class="personas" aria-labelledby="settings-title">
       <header>
-        <h2 id="settings-title">設定</h2>
+        <h2 id="settings-title">APIキー</h2>
       </header>
       <p class="hint">APIキーはこのPCのローカルファイル（権限0600）に保存され、再表示されません。</p>
       {#if error}<p class="banner" role="alert">{error}</p>{/if}

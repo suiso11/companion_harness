@@ -930,7 +930,7 @@ $effect(() => {
       <option value="neutral">中立</option>
     </select>
     <select id="learning-evidence-source-kind" bind:value={sourceKind}>
-      <option value="shadow_job">試行</option>
+      <option value="shadow_job">試行の記録</option>
       <option value="conversation_proposal">会話の候補</option>
       <option value="action_receipt">実行記録</option>
       <option value="task_event">作業履歴</option>

@@ -315,7 +315,7 @@ function onKey(event: KeyboardEvent): void {
         {#if loaded && personas.length === 0}
           <p class="hint">ペルソナがありません。<a href="/personas">ペルソナを作成</a></p>
         {:else if loaded && usable.length === 0}
-          <p class="hint">APIキーが設定されたプロバイダのペルソナがありません。</p>
+          <p class="hint">APIキーが設定されたプロバイダのペルソナがありません。{#if personas.some((p) => p.provider !== "local")}<a href="/settings">APIキーを設定</a>{/if}</p>
         {/if}
         {#if loaded && chats.length === 0}
           <p class="hint">会話はまだありません。「新しい会話」で始めましょう。</p>

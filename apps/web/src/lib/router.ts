@@ -42,7 +42,7 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
   },
   {
     path: "/shadow",
-    label: "試行",
+    label: "試行の記録",
     sectionId: "shadow",
   },
   {
@@ -77,7 +77,7 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
   },
   {
     path: "/settings",
-    label: "設定",
+    label: "APIキー",
     sectionId: "settings",
   },
 ];
@@ -117,10 +117,10 @@ export const DEV_NAV_LABEL = "開発・運用";
 
 export const DEV_NAV: readonly NavItem[] = [
   navItem("/trials", "試行の提案"),
-  navItem("/shadow", "試行"),
+  navItem("/shadow", "試行の記録"),
   navItem("/learning", "学び"),
   navItem("/handoff", "引継ぎ"),
-  navItem("/settings", "設定"),
+  navItem("/settings", "APIキー"),
 ];
 
 /** Feature section ids hidden on a page (chat stays visible for context). */

@@ -173,7 +173,7 @@ async function remove(p: Persona): Promise<void> {
                 {/each}
               </select>
             </label>
-            {#if info && !info.available}<p class="hint">{provider === "local" ? "ローカルモデルが未設定です" : "APIキー未設定"}</p>{/if}
+            {#if info && !info.available}<p class="hint">{#if provider === "local"}ローカルモデルが未設定です{:else}APIキー未設定。 <a href="/settings">APIキーを設定</a>{/if}</p>{/if}
             <label
               >モデル
               <input bind:value={model} list="persona-models" maxlength="256" required />

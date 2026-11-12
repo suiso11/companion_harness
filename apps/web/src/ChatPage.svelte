@@ -3975,7 +3975,7 @@ function evidenceForTurn(turn: Turn): {
        its bundle budget; the panel itself hides on a 404 endpoint. A failed
        chunk load surfaces a plain status message instead of blanking the
        page. -->
-  {#if sessionId !== null}
+  {#if sessionId !== null && activePath === "/"}
     {#await import("./AgoraPanel.svelte") then module}
       <svelte:component this={module.default} {sessionId} />
     {:catch}
@@ -3989,7 +3989,7 @@ function evidenceForTurn(turn: Turn): {
        It is a separate lazy chunk so the base chat entry keeps its bundle
        budget, and it hides itself when the server config returns 404. The
        panel never authorizes a plan or resumes the global control. -->
-  {#if sessionId !== null}
+  {#if sessionId !== null && activePath === "/"}
     {#await import("./AutodispatchPanel.svelte") then module}
       <svelte:component this={module.default} {sessionId} />
     {:catch}

@@ -876,7 +876,7 @@ export function renderConversationShell(): HtmlEscapedString {
           jsx(
             "select",
             { id: "learning-evidence-source-kind" },
-            jsx("option", { value: "shadow_job" }, "試行"),
+            jsx("option", { value: "shadow_job" }, "試行の記録"),
             jsx("option", { value: "conversation_proposal" }, "会話の候補"),
             jsx("option", { value: "action_receipt" }, "実行記録"),
             jsx("option", { value: "task_event" }, "作業履歴"),

@@ -12,6 +12,7 @@
 // - expire: keyless state-idempotent POST .../trials/:id/expire;
 //   200 → 取り消しました, else 取り消しに失敗しました.
 // Every string renders via text interpolation only (no {@html}).
+import ChatPage from "./ChatPage.svelte";
 import { fetchJson, postJson, randomUuid } from "./lib/api.js";
 import type { GoalConfirmationFields } from "./lib/goal_confirm.js";
 import { trialHintForParentGoal } from "./lib/goal_confirm.js";
@@ -868,10 +869,13 @@ $effect(() => {
   <title>試行の提案 · Companion Harness</title>
 </svelte:head>
 
+<ChatPage activePath="/trials" chatSurface={false}>
+  {#snippet children()}
 {#await import("./lib/AutonomyPausedBanner.svelte") then banner}
   <svelte:component this={banner.default} />
 {/await}
 
+<div class="trials-page">
 <section id="trials" aria-label="試行の提案" class="feature-panel">
   <h2>試行の提案</h2>
   <p id="trial-status" aria-live="polite">{statusText}</p>
@@ -1161,3 +1165,13 @@ $effect(() => {
     <p id="trial-op-status" aria-live="polite">{opStatus}</p>
   </div>
 </section>
+</div>
+  {/snippet}
+</ChatPage>
+
+<style>
+  /* The shared shell strips feature-panel padding on chat-hidden routes. */
+  .trials-page {
+    padding: 1rem;
+  }
+</style>

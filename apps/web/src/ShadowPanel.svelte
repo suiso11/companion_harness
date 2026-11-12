@@ -494,6 +494,7 @@ $effect(() => {
 <section id="shadow" aria-label="試行の記録" class="feature-panel">
   <h2>試行の記録</h2>
   <p id="shadow-disclaimer">試行のみ・未実行・記録は権限付与ではない</p>
+  <p class="shadow-hint">目的・作業の作成は<a href="/tasks">タスク・目的</a>で行います。</p>
   <form
     id="shadow-request-form"
     onsubmit={(event) => {
@@ -545,3 +546,11 @@ $effect(() => {
     </pre>
   </div>
 </section>
+
+<style>
+  .shadow-hint {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.85rem;
+  }
+</style>
