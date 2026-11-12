@@ -22,15 +22,21 @@ jobs:
       matrix:
         # The full matrix runs on both OSes. Native containment (bwrap) is a
         # Linux-only provision step below; portable tests avoid blanket skips.
-        # Windows is the slow leg (340s for the suite vs 210s on Linux), so it
-        # is split into two shards; Linux runs everything once.
+        # Each OS is split into vitest shards on independent runners:
+        # windows-latest takes 340s for the full suite, so 3 shards.
         include:
           - os: ubuntu-latest
-            shard: 1/1
-          - os: windows-latest
             shard: 1/2
-          - os: windows-latest
+            primary: true
+          - os: ubuntu-latest
             shard: 2/2
+          - os: windows-latest
+            shard: 1/3
+            primary: true
+          - os: windows-latest
+            shard: 2/3
+          - os: windows-latest
+            shard: 3/3
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -94,9 +100,11 @@ jobs:
           npm run build
 
       - name: Lint (Biome)
+        if: matrix.primary
         run: pnpm lint
 
       - name: Typecheck
+        if: matrix.primary
         run: pnpm typecheck
 
       - name: Install Linux native containment runtime
@@ -175,9 +183,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each mode boots its own server, ports and temp DB, so the suites run
-        # as independent jobs instead of ~6 minutes of serial invocations.
-        mode: [smoke, calendar, memory, autodispatch]
+        # Each mode boots its own server, ports and temp DB, so modes run as
+        # independent jobs. Playwright assigns whole spec files to shards, and
+        # the 85-test smoke suite is the only mode long enough to split.
+        include:
+          - { mode: smoke, shard: 1, shards: 3 }
+          - { mode: smoke, shard: 2, shards: 3 }
+          - { mode: smoke, shard: 3, shards: 3 }
+          - { mode: calendar, shard: 1, shards: 1 }
+          - { mode: memory, shard: 1, shards: 1 }
+          - { mode: autodispatch, shard: 1, shards: 1 }
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -323,7 +338,7 @@ jobs:
       - name: Production UI build
         run: pnpm --filter @companion/server build:ui
 
-      - name: Browser E2E (${{ matrix.mode }}, chromium, temp DB only)
+      - name: Browser E2E (${{ matrix.mode }} ${{ matrix.shard }}/${{ matrix.shards }}, chromium, temp DB only)
         run: |
           # Real server/UI/planner/materializer/TrialRunner/sealed bridge,
           # real systemd-user+bwrap confinement, real model relay for the
@@ -331,13 +346,14 @@ jobs:
           # replaced by the repo-contained scripts/pi-orch-bridge/ci-executor.mjs.
           # Never evidence for the installed binaries; local runs keep real-pi.
           timeout --signal=TERM --kill-after=30s 900s \
-            pnpm --filter @companion/server test:e2e
+            pnpm --filter @companion/server exec playwright test \
+              --shard=${{ matrix.shard }}/${{ matrix.shards }}
 
       - name: Upload E2E failure artifacts (no production data)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-failure-artifacts-${{ matrix.mode }}
+          name: e2e-failure-artifacts-${{ matrix.mode }}-${{ matrix.shard }}
           path: |
             apps/server/playwright-report/
             apps/server/test-results/
