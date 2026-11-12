@@ -70,6 +70,8 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   // Derived consolidation + preview-only activation (remind >=795c476).
   "maintain.consolidate",
   "maintain.activation",
+  // Episode index: bounded LLM summarization of raw events (remind P2).
+  "maintain.episodes",
   "topic.set",
   "topic.pending",
   "record.search",
@@ -98,6 +100,7 @@ const WRITE_OPS: ReadonlySet<string> = new Set([
   // Derived consolidation + preview-only activation (remind >=795c476).
   "maintain.consolidate",
   "maintain.activation",
+  "maintain.episodes",
   "topic.set",
   "record.correct",
   "record.retire",

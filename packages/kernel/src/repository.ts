@@ -633,6 +633,7 @@ export const MEMORY_MAINTENANCE_OPS = [
   "maintain.consolidate",
   "maintain.activation",
   "maintain.distill",
+  "maintain.episodes",
 ] as const;
 export type MemoryMaintenanceOp = (typeof MEMORY_MAINTENANCE_OPS)[number];
 
@@ -681,6 +682,7 @@ const MEMORY_MAINTENANCE_COUNT_KEYS: Record<
     "learn_accepted",
   ],
   "maintain.distill": ["applied", "reviewed", "failed", "deferred", "degraded"],
+  "maintain.episodes": ["episodes", "applied", "degraded"],
 };
 
 export const MEMORY_MAINTENANCE_RETENTION_ROWS = 2000;

@@ -1444,6 +1444,16 @@ export function createMemoryService(
   let activationDirty = false;
   let activationUnsupported = false;
   /**
+   * Episode index (remind `maintain.episodes`, P2): session episodes are
+   * summarized from RAW events, so an ACKED raw event re-arms it.
+   * Starts true to index the backlog already in remind on first idle tick.
+   * Consumed per pass and re-armed only while the real response reports
+   * `applied > 0` (its writes then feed association/consolidation on the
+   * next pass). A BAD_REQUEST from an old remind latches it off.
+   */
+  let episodesDirty = true;
+  let episodesUnsupported = false;
+  /**
    * Foreground preemption epoch: `notifyForeground()` bumps it, and an
    * in-flight idle-maintenance pass compares the value it captured at
    * start. A preemption therefore cancels the WHOLE pass (topic loop and
@@ -1949,6 +1959,11 @@ export function createMemoryService(
     if (request.op !== "event.append") {
       return;
     }
+    // The raw event is now ACCEPTED by remind: the next idle pass may
+    // summarize it into a session episode. Arming on the ack (not on the
+    // enqueue) means a backed-off/failed append never burns an empty
+    // episodes pass that would then disarm until another turn.
+    episodesDirty = true;
     const chain = request.chain;
     if (!isRecord(chain)) {
       return;
@@ -2798,6 +2813,22 @@ export function createMemoryService(
     };
   }
 
+  /** Strict parse of `maintain.episodes` data (counts only, no bodies). */
+  function episodesSummary(data: Record<string, unknown> | null): {
+    readonly episodes: number;
+    readonly applied: number;
+    readonly degraded: boolean;
+  } | null {
+    if (data === null || !Array.isArray(data.episodes)) {
+      return null;
+    }
+    const applied = countOf(data.applied);
+    if (applied === null || typeof data.degraded !== "boolean") {
+      return null;
+    }
+    return { episodes: data.episodes.length, applied, degraded: data.degraded };
+  }
+
   /** One bounded numeric-status log event per activation metric. */
   function logActivationSummary(data: Record<string, unknown> | null): void {
     const summary = activationSummary(data);
@@ -2853,6 +2884,13 @@ export function createMemoryService(
    *    config has `activation.apply=false`, so this only scores importance
    *    and reports wouldRetire/wouldReactivate (never status changes, and
    *    Companion never sends `apply: true`).
+   * 5. `maintain.episodes {scope, kind: "session"}` when a raw event was
+   *    ACKED since the last pass (and once at startup for the existing
+   *    backlog). Re-arms only while the real response reports `applied > 0`;
+   *    its new records then re-arm association/consolidation. Episode and
+   *    distill share remind's cultivation lease: a concurrent
+   *    completion/recovery drain makes remind answer CONFLICT, which stays
+   *    armed for the next tick.
    * An old remind answers BAD_REQUEST: latch that surface until restart
    * (silent, no per-tick retry storm).
    */
@@ -3207,6 +3245,83 @@ export function createMemoryService(
             startedAt,
             ok: false,
             errorCode: maintenanceErrorCode(activation.code),
+            counts: {},
+          });
+        }
+      }
+    }
+    if (!passActive()) {
+      return;
+    }
+    if (!episodesUnsupported && episodesDirty) {
+      // `kind: "session"` is the only raw-event stream Companion ingests
+      // (one event pair per turn). No `limit`: remind applies its
+      // `episodes.batchMax`. The op shares the cultivation lease with
+      // `maintain.distill`; a completion/recovery drain can race it, and
+      // remind's CONFLICT then leaves the flag armed for the next tick.
+      const passNonce = randomUUID();
+      const key = stableMemoryJobKey("episodes", scope, passNonce);
+      const startedAt = now();
+      const episodes = await idleMaintenanceCliCall(
+        "maintain.episodes",
+        { scope, kind: "session" },
+        key,
+        distillTimeoutMs,
+      );
+      if (!passActive()) {
+        return;
+      }
+      if (episodes !== null) {
+        if (!episodes.ok && episodes.code === "BAD_REQUEST") {
+          recordMaintenanceRun({
+            op: "maintain.episodes",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(episodes.code),
+            counts: {},
+          });
+          episodesUnsupported = true;
+          episodesDirty = false;
+        } else if (episodes.ok) {
+          const summary = episodesSummary(episodes.data);
+          if (summary === null) {
+            recordMaintenanceRun({
+              op: "maintain.episodes",
+              startedAt,
+              ok: false,
+              errorCode: "invalid_response",
+              counts: {},
+            });
+            log("warn", "memory.idle.episodes.invalid", { status: 1 });
+          } else {
+            recordMaintenanceRun({
+              op: "maintain.episodes",
+              startedAt,
+              ok: true,
+              counts: {
+                episodes: summary.episodes,
+                applied: summary.applied,
+                degraded: summary.degraded ? 1 : 0,
+              },
+            });
+          }
+          // Re-arm only for a real write: an empty/degraded pass waits for
+          // the next raw event instead of polling every tick. Episode
+          // writes are new records, so the next pass must associate and
+          // consolidate them.
+          episodesDirty = summary !== null && summary.applied > 0;
+          if (episodesDirty) {
+            associateDirty = true;
+            consolidateDirty = true;
+            activationDirty = true;
+          }
+        } else {
+          // Transient failure keeps the flag armed for the next tick.
+          recordMaintenanceRun({
+            op: "maintain.episodes",
+            startedAt,
+            ok: false,
+            errorCode: maintenanceErrorCode(episodes.code),
             counts: {},
           });
         }

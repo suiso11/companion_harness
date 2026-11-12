@@ -1636,7 +1636,7 @@ describe("background memory activity routes", () => {
         "last24h",
         "last7d",
       ]);
-      expect(Object.keys(summaryBody.latestByOp)).toHaveLength(5);
+      expect(Object.keys(summaryBody.latestByOp)).toHaveLength(6);
     } finally {
       f.close();
     }

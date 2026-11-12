@@ -44,6 +44,7 @@ function summaryBody() {
           }),
           "topic.backfill": opWindow(1, 1, { assigned: 3 }),
           "maintain.distill": opWindow(0, 0, {}),
+          "maintain.episodes": opWindow(0, 0, {}),
         },
       },
       last7d: {
@@ -59,6 +60,7 @@ function summaryBody() {
           }),
           "topic.backfill": opWindow(1, 1, { assigned: 3 }),
           "maintain.distill": opWindow(0, 0, {}),
+          "maintain.episodes": opWindow(0, 0, {}),
         },
       },
     },
@@ -78,6 +80,7 @@ function summaryBody() {
       },
       "topic.backfill": null,
       "maintain.distill": null,
+      "maintain.episodes": null,
     },
   };
 }
@@ -215,6 +218,13 @@ describe("statusTone + outcomeText", () => {
         counts: { assigned: 5, remaining: 2, failed: 0 },
       }),
     ).toBe("5 件にトピックを付与、残り 2");
+    expect(
+      outcomeText({
+        ...base,
+        op: "maintain.episodes",
+        counts: { episodes: 3, applied: 2, degraded: 0 },
+      }),
+    ).toBe("エピソードを 3 件処理、適用 2");
   });
 
   it("activation includes the weight-learning line", () => {
