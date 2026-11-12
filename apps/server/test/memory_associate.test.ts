@@ -294,7 +294,7 @@ describe("extraction topics feed record.remember tags", () => {
 });
 
 describe("idle topic backfill", () => {
-  it("calls topic.pending -> model -> topic.set with stable keys, bounded to 8", async () => {
+  it("calls topic.pending -> model -> topic.set with per-pass keys, bounded to 8", async () => {
     const f = await openRepo();
     try {
       const pendingCalls: Array<Record<string, unknown>> = [];
@@ -350,8 +350,8 @@ describe("idle topic backfill", () => {
       expect(setCalls).toHaveLength(8);
       for (let index = 0; index < setCalls.length; index += 1) {
         const call = setCalls[index];
-        expect(call?.key).toBe(
-          stableMemoryJobKey("topic", `rec-${index}`, `hash-${index}`),
+        expect(call?.key).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
         );
         expect(call?.params).toMatchObject({
           scope: SCOPE,
@@ -361,6 +361,8 @@ describe("idle topic backfill", () => {
         });
         expect(call?.params).not.toHaveProperty("runId");
       }
+      // Distinct records get distinct keys within the pass.
+      expect(new Set(setCalls.map((call) => call.key)).size).toBe(8);
       // Then exactly one maintain.associate per idle tick with the long
       // distill-grade deadline; remaining=0 means no immediate re-run.
       await waitFor(() => associateCalls.length >= 1, 5000);
@@ -376,6 +378,52 @@ describe("idle topic backfill", () => {
             ?.content,
       );
       expect(systems).toContain(MEMORY_TOPIC_SYSTEM_PROMPT);
+    } finally {
+      f.close();
+    }
+  });
+  it("uses a fresh key on a later pass so re-pending records are rewritten", async () => {
+    const f = await openRepo();
+    try {
+      const keys: Array<string | undefined> = [];
+      const cliCall: CliCall = async (_address, op, _params, key) => {
+        if (op === "topic.pending") {
+          // Stays pending until the second write, as when a retire/prune or a
+          // concurrent associate deleted the external rows after the first.
+          return okEnvelope(
+            keys.length < 2
+              ? {
+                  items: [
+                    {
+                      id: "rec-0",
+                      bodyHash: "hash-0",
+                      body: "memory 0",
+                      truncated: false,
+                    },
+                  ],
+                  remaining: 0,
+                }
+              : { items: [], remaining: 0 },
+          );
+        }
+        if (op === "topic.set") {
+          keys.push(key);
+          return okEnvelope({ topic: {} });
+        }
+        if (op === "maintain.associate") {
+          return okEnvelope({ associate: { remaining: 0 } });
+        }
+        return okEnvelope(null);
+      };
+      // Same classification twice: a stable key would replay the first write
+      // and leave the record pending forever.
+      const { gateway } = gatewayReturning('{"topics":["カメラ"]}');
+      const service = makeService(f.repo, cliCall, { gateway, idleMs: 30 });
+      service.start();
+      await waitFor(() => keys.length === 2, 5000);
+      expect(keys[0]).toBeDefined();
+      expect(keys[1]).toBeDefined();
+      expect(keys[0]).not.toBe(keys[1]);
     } finally {
       f.close();
     }
