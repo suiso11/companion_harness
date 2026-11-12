@@ -663,10 +663,14 @@ connector instance owns **all** configured roots.
   `GET /api/sessions/:sessionId/memory/graph` returns the global graph
   (`includeRetired=false` by default);
   `GET /api/sessions/:sessionId/memory/graph/local?searchId=&handle=&depth=1|2`
-  expands one already-bound handle. Both are strict-query, run-owned,
-  read-only (never heat or grant feedback), and return opaque `mN`
-  handles only. The client lays the graph out in the measured canvas size,
-  greedily declutters labels (selected/hovered and their neighbours first,
+  expands one already-bound handle. Both are strict-query, read-only
+  (never heat or grant feedback), and return opaque `mN` handles only.
+  `runId` is optional: when supplied it must be a Run owned by that
+  session, and when omitted (e.g. a fresh session with no completed Run)
+  the snapshot is minted with no originating Run — still session-scoped
+  and view-only (management mutations always require a Run). The client
+  lays the graph out in the measured canvas size, greedily declutters
+  labels (selected/hovered and their neighbours first,
   then topic hubs, then degree), and offers zoom in/out/全体表示 plus a
   display-only 「自動関連を表示」 toggle for similarity edges. Topic hubs are
   minted only for topics shared by at least two visible memories; a

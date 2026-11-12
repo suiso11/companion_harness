@@ -4,8 +4,8 @@
 
 /**
  * Run binding used by the list browse: the active run wins, else the latest
- * rendered/known run. `null` means "no Run yet" and the browse must not send
- * a request (the memory API requires the originating runId).
+ * rendered/known run. `null` means "no Run yet"; the browse still sends a
+ * run-less read-only request (the graph route's `runId` is optional).
  */
 export function browseRunId(
   activeRunId: string | null,

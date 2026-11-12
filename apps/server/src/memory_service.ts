@@ -538,13 +538,15 @@ export interface MemoryService {
    * Global graph projection (`graph.version` + `graph.page`): bounded
    * paging (≤500 nodes), version-cached raw traversal, edges restricted to
    * returned nodes, and opaque handles minted into one durable graph search
-   * per (session, scope). Read-only: never feedback/heat.
+   * per (session, scope). Read-only: never feedback/heat. `runId` is the
+   * originating run when the session has one; null mints a run-less browse
+   * snapshot (still session-scoped).
    */
   getMemoryGraphGlobal(
     sessionId: string,
     input: {
       includeRetired?: boolean;
-      runId: string;
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphResult>;
@@ -559,7 +561,7 @@ export interface MemoryService {
       searchId: string;
       handle: string;
       depth?: 1 | 2;
-      runId: string;
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphResult>;
@@ -5405,7 +5407,7 @@ export function createMemoryService(
 
   function mintGraphProjection(input: {
     sessionId: string;
-    runId: string;
+    runId: string | null;
     scope: "global" | "local";
     version: string;
     center: string | null;
@@ -5484,7 +5486,7 @@ export function createMemoryService(
     sessionId: string,
     input: {
       includeRetired?: boolean;
-      runId: string;
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphResult> {
@@ -5513,7 +5515,7 @@ export function createMemoryService(
       searchId: string;
       handle: string;
       depth?: 1 | 2;
-      runId: string;
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphResult> {

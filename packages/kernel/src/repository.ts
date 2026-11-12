@@ -5359,7 +5359,7 @@ export function createKernelRepository(
   function getMemorySearch(searchId: string): {
     searchId: string;
     sessionId: string;
-    runId: string;
+    runId: string | null;
     scope: string;
     query: string;
     createdAt: number;
@@ -5372,7 +5372,7 @@ export function createKernelRepository(
       | {
           search_id: string;
           session_id: string;
-          run_id: string;
+          run_id: string | null;
           scope: string;
           query: string;
           created_at: number;
@@ -5454,19 +5454,23 @@ export function createKernelRepository(
    * Return the durable graph search id for one (session, scope) or create
    * it. The row is a NORMAL `memory_searches` row with query='graph' so
    * the existing snapshot/detail/mutation routes work unchanged.
+   *
+   * `runId` is null for a read-only browse from a session with no completed
+   * Run (migration 0050 relaxed the column); when the session already has a
+   * graph search, its original binding is reused untouched.
    */
   function getOrCreateMemoryGraphSearch(
     input: {
       searchId: string;
       sessionId: string;
-      runId: string;
+      runId: string | null;
       scope: string;
     },
     options: TransitionOptions = {},
   ): string {
     const candidate = requireMemoryToken(input.searchId, "searchId");
     const sessionId = requireId(input.sessionId, "sessionId");
-    const runId = requireId(input.runId, "runId");
+    const runId = input.runId === null ? null : requireId(input.runId, "runId");
     const scope = requireMemoryScope(input.scope);
     const now = nowMs(options.now);
     return withImmediate(db, () => {

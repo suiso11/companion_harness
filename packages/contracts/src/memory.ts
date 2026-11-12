@@ -220,10 +220,15 @@ export type MemoryGraphGlobalRequest = z.infer<
   typeof MemoryGraphGlobalRequestSchema
 >;
 
-/** HTTP GET global graph query (raw query-string values). */
+/**
+ * HTTP GET global graph query (raw query-string values). `runId` is the
+ * originating run when the caller has one; a read-only graph/browse from a
+ * session with no completed Run omits it (the snapshot is still
+ * session-scoped, never cross-session).
+ */
 export const MemoryGraphGlobalQuerySchema = z.strictObject({
   includeRetired: z.enum(["true", "false"]).optional(),
-  runId: UuidSchema,
+  runId: UuidSchema.optional(),
 });
 export type MemoryGraphGlobalQuery = z.infer<
   typeof MemoryGraphGlobalQuerySchema
@@ -234,7 +239,7 @@ export const MemoryGraphLocalQuerySchema = z.strictObject({
   searchId: z.string().min(1).max(256),
   handle: MemoryHandleSchema,
   depth: z.enum(["1", "2"]).optional(),
-  runId: UuidSchema,
+  runId: UuidSchema.optional(),
 });
 export type MemoryGraphLocalQuery = z.infer<typeof MemoryGraphLocalQuerySchema>;
 

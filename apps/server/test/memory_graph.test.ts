@@ -537,3 +537,44 @@ describe("local graph: snapshot binding and center mapping", () => {
     }
   });
 });
+
+describe("run-less browse snapshot", () => {
+  it("mints a session-scoped snapshot when the session has no Run", async () => {
+    const f = await openRepo();
+    try {
+      const service = makeService(f.repo, makeCli(state()));
+      // Fresh session: no message, no Run at all.
+      const sessionId = f.repo.createSession({ key: randomUUID(), now: T0 })
+        .body.sessionId;
+
+      const out = await service.getMemoryGraphGlobal(sessionId, {
+        runId: null,
+      });
+      expect(out.nodes.map((node) => node.handle)).toEqual(["m1", "m2"]);
+
+      const header = f.repo.getMemorySearch(out.searchId);
+      expect(header?.sessionId).toBe(sessionId);
+      expect(header?.query).toBe("graph");
+      // The read-only snapshot carries no originating Run.
+      expect(header?.runId).toBeNull();
+
+      // Re-opening reuses the same (session, scope) snapshot untouched.
+      const again = await service.getMemoryGraphGlobal(sessionId, {
+        runId: null,
+      });
+      expect(again.searchId).toBe(out.searchId);
+
+      // The local expansion from that run-less snapshot works read-only.
+      const local = await service.getMemoryGraphLocal(sessionId, {
+        searchId: out.searchId,
+        handle: "m1",
+        depth: 1,
+        runId: null,
+      });
+      expect(local.searchId).toBe(out.searchId);
+      expect(local.scope).toBe("local");
+    } finally {
+      f.close();
+    }
+  });
+});

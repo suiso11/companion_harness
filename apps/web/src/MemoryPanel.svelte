@@ -48,7 +48,8 @@ interface Hit {
 interface Scope {
   readonly sessionId: string;
   readonly searchId: string;
-  readonly runId: string;
+  /** Null for a run-less browse/graph snapshot (read-only). */
+  readonly runId: string | null;
 }
 
 interface Selected {
@@ -136,10 +137,12 @@ function failSearch(statusText: string, message: string): void {
 }
 
 /**
- * Latest owned run for the session. The memory API requires the originating
- * runId; the chat page persists completed runs in history, so the newest
- * chronological turn with a selected run is the exact binding the legacy
- * client used (`activeRunId ?? latestRenderedRunId`).
+ * Latest owned run for the session, or null when the session has no completed
+ * Run. The graph/browse reads take it only as an optional originating binding
+ * (a run-less read is still session-scoped); explicit search requires it. The
+ * chat page persists completed runs in history, so the newest chronological
+ * turn with a selected run is the exact binding the legacy client used
+ * (`activeRunId ?? latestRenderedRunId`).
  */
 async function latestRunId(sessionId: string): Promise<string | null> {
   const res = await fetchJson(
@@ -316,17 +319,13 @@ async function loadBrowse(): Promise<void> {
   const current = (): boolean =>
     seq === browseSeq && getSessionId() === sessionId;
   browseStatus = "読み込み中";
+  // A session with no completed Run may still browse read-only: the graph
+  // snapshot is session-scoped, so omit the originating run.
   const runId = await latestRunId(sessionId);
   if (!current()) return;
-  if (runId === null) {
-    browseStatus = "メッセージを送信して Run を作ってから表示してください";
-    return;
-  }
   // Browse every memory (retired included), not just the graph's default.
-  const params = new URLSearchParams({
-    includeRetired: "true",
-    runId,
-  });
+  const params = new URLSearchParams({ includeRetired: "true" });
+  if (runId !== null) params.set("runId", runId);
   const res = await fetchJson(
     `/api/sessions/${encodeURIComponent(sessionId)}/memory/graph?${params.toString()}`,
   );
@@ -429,12 +428,9 @@ async function loadGraph(kind: "global" | "local"): Promise<void> {
   graphLoading = true;
   graphStatus = "読み込み中";
   try {
+    // Read-only: a run-less session omits runId (no "send a message" gate).
     const runId = await latestRunId(sessionId);
     if (!current()) return;
-    if (runId === null) {
-      graphStatus = "メッセージを送信して Run を作ってから表示してください";
-      return;
-    }
     let handle: string | null = null;
     let localSearchId: string | null = null;
     if (kind === "local") {
@@ -456,14 +452,14 @@ async function loadGraph(kind: "global" | "local"): Promise<void> {
         searchId: localSearchId,
         handle,
         depth: graphDepth === "2" ? "2" : "1",
-        runId,
       });
+      if (runId !== null) params.set("runId", runId);
       path = `${path}/local?${params.toString()}`;
     } else {
       const params = new URLSearchParams({
         includeRetired: graphRetired ? "true" : "false",
-        runId,
       });
+      if (runId !== null) params.set("runId", runId);
       path = `${path}?${params.toString()}`;
     }
     const res = await fetchJson(path);
@@ -717,7 +713,9 @@ async function openDetail(target: string, handle: string): Promise<void> {
     stale,
   });
   opStatus = stale ? "stale: 引用時から状態が変化" : "";
-  actionsDisabled = stale;
+  // A run-less browse snapshot cannot carry a management mutation: the
+  // outbox is bound to an originating Run. Viewing stays available.
+  actionsDisabled = stale || scope?.runId === null;
 }
 
 function currentOp(
@@ -867,6 +865,10 @@ async function postMutation(
 
 async function stageMutation(kind: MutationKind): Promise<void> {
   if (selected === null || scope === null || mutating) return;
+  if (scope.runId === null) {
+    notice = "記憶の更新には会話（Run）が必要です";
+    return;
+  }
   const sessionId = scope.sessionId;
   if (getSessionId() !== sessionId) {
     notice = "セッションが変わりました。再検索してください";
