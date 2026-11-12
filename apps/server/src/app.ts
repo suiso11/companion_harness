@@ -370,7 +370,8 @@ export interface MemoryHttpPort {
     sessionId: string,
     input: {
       includeRetired?: boolean;
-      runId: string;
+      /** Null for a run-less read-only browse (snapshot stays session-scoped). */
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphHttpResult>;
@@ -381,7 +382,7 @@ export interface MemoryHttpPort {
       searchId: string;
       handle: string;
       depth?: 1 | 2;
-      runId: string;
+      runId: string | null;
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphHttpResult>;
@@ -3472,9 +3473,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   });
 
   // Global linked-memory graph (read-only, never heats/feedback). Strict
-  // closed query: `includeRetired` is exactly true|false and `runId` must be
-  // an owned run of this session. Opaque mN handles only; raw ids never
-  // cross the boundary.
+  // closed query: `includeRetired` is exactly true|false; `runId`, when
+  // present, must be an owned run of this session, and when omitted the
+  // snapshot is minted run-less (session-scoped, view-only). Opaque mN
+  // handles only; raw ids never cross the boundary.
   app.get("/api/sessions/:sessionId/memory/graph", async (c) => {
     if (memory === null) {
       return memoryUnavailable(c);
@@ -3491,7 +3493,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!parsed.success) {
       return validationError(c);
     }
-    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    const owned =
+      parsed.data.runId === undefined
+        ? { ok: true as const }
+        : requireOwnedRun(c, session.id, parsed.data.runId);
     if (!owned.ok) {
       return owned.response;
     }
@@ -3503,7 +3508,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     try {
       const out = await memory.getMemoryGraphGlobal(session.id, {
         includeRetired: parsed.data.includeRetired === "true",
-        runId: parsed.data.runId,
+        runId: parsed.data.runId ?? null,
       });
       const body = MemoryGraphResponseSchema.parse({
         searchId: out.searchId,
@@ -3539,7 +3544,10 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     if (!parsed.success) {
       return validationError(c);
     }
-    const owned = requireOwnedRun(c, session.id, parsed.data.runId);
+    const owned =
+      parsed.data.runId === undefined
+        ? { ok: true as const }
+        : requireOwnedRun(c, session.id, parsed.data.runId);
     if (!owned.ok) {
       return owned.response;
     }
@@ -3555,7 +3563,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         ...(parsed.data.depth !== undefined
           ? { depth: parsed.data.depth === "2" ? (2 as const) : (1 as const) }
           : {}),
-        runId: parsed.data.runId,
+        runId: parsed.data.runId ?? null,
       });
       const body = MemoryGraphResponseSchema.parse({
         searchId: out.searchId,

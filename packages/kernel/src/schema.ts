@@ -642,7 +642,8 @@ export const memoryGrants = sqliteTable(
 export const memorySearches = sqliteTable("memory_searches", {
   searchId: text("search_id").primaryKey(),
   sessionId: text("session_id").notNull(),
-  runId: text("run_id").notNull(),
+  // Nullable since 0050: run-less (read-only) graph/browse snapshots.
+  runId: text("run_id"),
   scope: text("scope").notNull(),
   query: text("query").notNull(),
   createdAt: integer("created_at").notNull(),

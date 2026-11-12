@@ -495,7 +495,8 @@ class ConversationApp {
   private memoryGraphScope: {
     readonly sessionId: string;
     readonly searchId: string;
-    readonly runId: string;
+    /** Null for a run-less (read-only) browse snapshot. */
+    readonly runId: string | null;
     readonly scope: "global" | "local";
     readonly center: string | null;
   } | null = null;
@@ -511,7 +512,8 @@ class ConversationApp {
   private memoryBrowseScope: {
     readonly sessionId: string;
     readonly searchId: string;
-    readonly runId: string;
+    /** Null for a run-less (read-only) browse snapshot. */
+    readonly runId: string | null;
   } | null = null;
   private memoryBrowseSeq = 0;
   /**
@@ -531,7 +533,8 @@ class ConversationApp {
   private memoryScope: {
     readonly sessionId: string;
     readonly searchId: string;
-    readonly runId: string;
+    /** Null when bound to a run-less graph/browse snapshot (no mutations). */
+    readonly runId: string | null;
   } | null = null;
   private memorySelected: {
     readonly searchId: string;
@@ -3826,15 +3829,9 @@ class ConversationApp {
       return;
     }
     const sessionId = this.sessionId;
+    // Read-only graph: a session with no completed Run omits runId instead
+    // of refusing (the snapshot stays session-scoped).
     const runId = this.activeRunId ?? this.latestRenderedRunId();
-    if (runId === null) {
-      this.memoryGraphStatus.textContent =
-        "メッセージを送信して Run を作ってから表示してください";
-      this.showNotice(
-        "メッセージを送信して Run を作ってからグラフを表示してください",
-      );
-      return;
-    }
     let handle: string | null = null;
     let localSearchId: string | null = null;
     if (scope === "local") {
@@ -3867,14 +3864,14 @@ class ConversationApp {
         searchId: localSearchId,
         handle,
         depth: this.memoryGraphDepth.value === "2" ? "2" : "1",
-        runId,
       });
+      if (runId !== null) params.set("runId", runId);
       path = `${path}/local?${params.toString()}`;
     } else {
       const params = new URLSearchParams({
         includeRetired: this.memoryGraphRetired.checked ? "true" : "false",
-        runId,
       });
+      if (runId !== null) params.set("runId", runId);
       path = `${path}?${params.toString()}`;
     }
     let res: { status: number; body: unknown };
@@ -4060,22 +4057,15 @@ class ConversationApp {
       return;
     }
     const sessionId = this.sessionId;
+    // Read-only browse: runId is optional for a session with no Run.
     const runId = browseRunId(this.activeRunId, this.latestRenderedRunId());
-    if (runId === null) {
-      this.setBrowseStatus(
-        "メッセージを送信して Run を作ってから表示してください",
-      );
-      return;
-    }
     this.memoryBrowseSeq += 1;
     const seq = this.memoryBrowseSeq;
     const current = (): boolean =>
       this.sessionId === sessionId && seq === this.memoryBrowseSeq;
     this.setBrowseStatus("読み込み中");
-    const params = new URLSearchParams({
-      includeRetired: "true",
-      runId,
-    });
+    const params = new URLSearchParams({ includeRetired: "true" });
+    if (runId !== null) params.set("runId", runId);
     let res: { status: number; body: unknown };
     try {
       res = await fetchJson(
@@ -4440,7 +4430,8 @@ class ConversationApp {
     this.memoryOpStatus.textContent = stale
       ? "stale: 引用時から状態が変化"
       : "";
-    const actionable = !stale;
+    // A run-less browse snapshot is view-only: the outbox is Run-bound.
+    const actionable = !stale && this.memoryScope?.runId !== null;
     this.memoryCorrectButton.disabled = !actionable;
     this.memoryRetireButton.disabled = !actionable;
     this.memoryReactivateButton.disabled = !actionable;
@@ -4477,6 +4468,10 @@ class ConversationApp {
     const { searchId, handle } = this.memorySelected;
     const target = { searchId, handle };
     const runId = this.memoryScope.runId;
+    if (runId === null) {
+      this.showNotice("記憶の更新には会話（Run）が必要です");
+      return;
+    }
     const payload: Record<string, unknown> = {
       kind,
       searchId,

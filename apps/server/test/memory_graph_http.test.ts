@@ -58,13 +58,17 @@ function graphResult(scope: "global" | "local"): MemoryGraphResponse {
 }
 
 interface PortCalls {
-  global: Array<{ sessionId: string; includeRetired?: boolean; runId: string }>;
+  global: Array<{
+    sessionId: string;
+    includeRetired?: boolean;
+    runId: string | null;
+  }>;
   local: Array<{
     sessionId: string;
     searchId: string;
     handle: string;
     depth?: number;
-    runId: string;
+    runId: string | null;
   }>;
 }
 
@@ -249,7 +253,6 @@ describe("memory graph HTTP routes", () => {
         `${basePath(sessionId)}?runId=${runId}&includeRetired=maybe`,
         `${basePath(sessionId)}?runId=${runId}&includeRetired=true&extra=1`,
         `${basePath(sessionId)}?runId=${runId}&runId=${runId}`,
-        `${basePath(sessionId)}?includeRetired=true`,
         `${basePath(sessionId)}?runId=not-a-uuid`,
         `${basePath(sessionId)}/local?searchId=search-1&handle=m1&depth=3&runId=${runId}`,
         `${basePath(sessionId)}/local?searchId=search-1&handle=rec-1&runId=${runId}`,
@@ -264,6 +267,32 @@ describe("memory graph HTTP routes", () => {
       // Nothing reached the service for invalid queries.
       expect(calls.global).toHaveLength(0);
       expect(calls.local).toHaveLength(0);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it("allows a run-less read-only global graph read", async () => {
+    const calls: PortCalls = { global: [], local: [] };
+    const fixture = await makeApp(fakeMemory(calls));
+    try {
+      const { sessionId } = makeSessionRun(fixture.repo);
+      const out = await get(
+        fixture.app,
+        `${basePath(sessionId)}?includeRetired=true`,
+      );
+      expect(out.status).toBe(200);
+      expect(calls.global).toHaveLength(1);
+      // No originating run: the service mints a session-scoped snapshot.
+      expect(calls.global[0]?.runId).toBeNull();
+
+      // The local expansion from that snapshot is run-less too.
+      const local = await get(
+        fixture.app,
+        `${basePath(sessionId)}/local?searchId=search-1&handle=m1`,
+      );
+      expect(local.status).toBe(200);
+      expect(calls.local[0]?.runId).toBeNull();
     } finally {
       fixture.close();
     }
