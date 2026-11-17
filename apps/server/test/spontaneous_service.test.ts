@@ -11,11 +11,11 @@ import {
 import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it, vi } from "vitest";
 import type { SpeechConfig } from "../src/config.js";
+import { createDiaryStore } from "../src/diary_store.js";
 import {
   createSpontaneousService,
   type SpontaneousServiceDeps,
 } from "../src/spontaneous_service.js";
-import { createDiaryStore } from "../src/diary_store.js";
 import { createThoughtStore, type ThoughtStore } from "../src/thought_store.js";
 
 const SCOPE = "personal/default";

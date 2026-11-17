@@ -230,7 +230,8 @@ describe("diary pass", () => {
   });
 
   it("accepts a concise entry the local model actually returns", async () => {
-    const short = "朝から散歩をして、駅前の新しいカフェで本を読んだ。夕方は早めに寝た。";
+    const short =
+      "朝から散歩をして、駅前の新しいカフェで本を読んだ。夕方は早めに寝た。";
     const { handle, diary, service } = await setup({
       gateway: gatewayWith([JSON.stringify({ entry: short })]),
     });
