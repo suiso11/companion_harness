@@ -41,7 +41,7 @@ describe("self loop config", () => {
           taskId: randomUUID(),
         }),
       ),
-    ).toMatchObject({ enabled: true, minEvidence: 3, dailyProposals: 1 });
+    ).toMatchObject({ enabled: true, minEvidence: 1, dailyProposals: 1 });
     expect(() =>
       parseSelfLoopConfig(
         JSON.stringify({
