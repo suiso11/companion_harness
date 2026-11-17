@@ -45,6 +45,7 @@ import {
   type RunViewState,
   runResultToAnswerParts,
 } from "./lib/reducer.js";
+import { routeForPath } from "./lib/router.js";
 import { setSessionId } from "./lib/session.svelte.js";
 import {
   appendThinkingText,
@@ -62,7 +63,6 @@ import {
 // chat entry bundle (build-ui budget) never pays for the audio loop.
 import type { SentenceFeeder } from "./lib/voice_loop.js";
 import type { VoicePlayback, VoiceSession } from "./lib/voice_session.js";
-import { routeForPath } from "./lib/router.js";
 
 // PR-5: the chat shell also hosts the first native feature page. `activePath`
 // keeps the shared nav honest about the current route, and `children` is the
