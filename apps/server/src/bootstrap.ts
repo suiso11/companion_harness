@@ -156,6 +156,7 @@ import {
   parseCreateWriteConnectorHint,
   parseCreateWriteProfileName,
 } from "./createWriteProfile.js";
+import { createDiaryStore } from "./diary_store.js";
 import {
   createLearningService,
   type LearningService,
@@ -1433,6 +1434,9 @@ export async function startServer(
     // Main-conversation persona (append-only instruction block). Reads the
     // row per run, so a /personas edit applies to the next request.
     const mainPersona = createMainPersonaStore({ db: handle.raw });
+    // Companion diary: created unconditionally so GET /api/diary still reads
+    // entries when spontaneous speech is disabled.
+    const diaryStore = createDiaryStore(handle.raw);
 
     // Opt-in private execution records (COMPANION_EXECUTION_RECORDS_JSON).
     // Construction validates/creates the absolute private root fail-closed
@@ -1797,6 +1801,8 @@ export async function startServer(
         spontaneous = createSpontaneousService({
           repo: baseRepo,
           store: createThoughtStore(handle.raw),
+          diary: diaryStore,
+          personaInstructions: () => mainPersona.get()?.instructions ?? null,
           config: config.speech,
           memory: {
             executable: memoryConfig.executable,
@@ -3447,6 +3453,7 @@ export async function startServer(
       // PR-2 ephemeral deltas: multiplexed on run SSE streams only (never
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
+      diary: diaryStore,
       ...(memory !== null ? { memory } : {}),
       sessionPresence,
       ...(learning !== null ? { learningStore: learning.store } : {}),

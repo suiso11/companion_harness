@@ -15,6 +15,7 @@ import {
   createSpontaneousService,
   type SpontaneousServiceDeps,
 } from "../src/spontaneous_service.js";
+import { createDiaryStore } from "../src/diary_store.js";
 import { createThoughtStore, type ThoughtStore } from "../src/thought_store.js";
 
 const SCOPE = "personal/default";
@@ -94,6 +95,7 @@ async function setup(overrides: Partial<SpontaneousServiceDeps> = {}) {
   await migrateKernelDatabase({ db: handle.raw });
   const repo = createKernelRepository(handle.raw);
   const store = createThoughtStore(handle.raw);
+  const diary = createDiaryStore(handle.raw);
   const sessionId = repo.createSession({ key: crypto.randomUUID(), now: T0 })
     .body.sessionId;
   const posted = repo.postMessage(
@@ -105,6 +107,7 @@ async function setup(overrides: Partial<SpontaneousServiceDeps> = {}) {
   const service = createSpontaneousService({
     repo,
     store,
+    diary,
     config: config(),
     memory: {
       executable: "/bin/true",
@@ -127,7 +130,7 @@ async function setup(overrides: Partial<SpontaneousServiceDeps> = {}) {
     ...overrides,
   });
   service.start();
-  return { handle, repo, store, sessionId, service };
+  return { handle, repo, store, diary, sessionId, service };
 }
 
 function close(
@@ -445,15 +448,15 @@ describe("spontaneous scheduling", () => {
       background: { closed: false, tryAcquire: () => null, release: () => {} },
     });
     try {
-      // Boot lead: thought then speech.
+      // Boot lead: thought, speech, then the diary catch-up.
       expect(timers.calls.map((call) => call.delay)).toEqual([
-        300_000, 360_000,
+        300_000, 360_000, 120_000,
       ]);
       clock += 300_000;
       timers.calls[0]?.run();
-      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(4));
       // Blocked before admission: the day is not spent.
-      expect(timers.calls[2]?.delay).toBe(10 * 60 * 1000);
+      expect(timers.calls[3]?.delay).toBe(10 * 60 * 1000);
     } finally {
       close(handle, service);
     }
@@ -483,10 +486,10 @@ describe("spontaneous scheduling", () => {
     try {
       clock += 300_000;
       timers.calls[0]?.run();
-      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(4));
       // Full interval from created_at (+1ms): pacing from the admitted instant
       // would be 60s short and the next guard check would skip.
-      expect(timers.calls[2]?.delay).toBe(24 * HOUR + 1);
+      expect(timers.calls[3]?.delay).toBe(24 * HOUR + 1);
     } finally {
       close(handle, service);
     }
@@ -514,8 +517,8 @@ describe("spontaneous scheduling", () => {
       });
       clock += 300_000;
       timers.calls[1]?.run();
-      await vi.waitFor(() => expect(timers.calls).toHaveLength(3));
-      expect(timers.calls[2]?.delay).toBe(24 * HOUR + 1);
+      await vi.waitFor(() => expect(timers.calls).toHaveLength(4));
+      expect(timers.calls[3]?.delay).toBe(24 * HOUR + 1);
     } finally {
       close(handle, service);
     }

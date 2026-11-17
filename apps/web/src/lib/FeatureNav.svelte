@@ -21,6 +21,7 @@ const ICONS: Record<string, string> = {
   "/chats": "chat",
   "/personas": "sparkles",
   "/memory": "memory",
+  "/diary": "book",
   "/tasks": "target",
   "/proposals": "sparkles",
   "/notifications": "bell",

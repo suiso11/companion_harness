@@ -160,6 +160,7 @@ import {
 } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
+import type { DiaryStore } from "./diary_store.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   createMonitorSampler,
@@ -246,6 +247,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/pet",
   "/chats",
   "/personas",
+  "/diary",
 ]);
 
 /**
@@ -512,6 +514,12 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /**
+   * Companion diary store. Null/absent keeps GET /api/diary at a fixed 404;
+   * bootstrap supplies it unconditionally so reads work even when
+   * spontaneous speech is disabled.
+   */
+  diary?: DiaryStore | null;
   /** In-memory viewed-session registry for spontaneous speech targeting. */
   sessionPresence?: SessionPresence;
   /**
@@ -1571,6 +1579,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const diary = deps.diary ?? null;
   const learningStore = deps.learningStore ?? null;
   const personaChat = deps.personaChat;
   const providerKeys = deps.providerKeys ?? null;
@@ -3341,6 +3350,34 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     return "service_unavailable";
   }
+
+  // Companion diary: exactly one entry per local calendar day, newest day
+  // first. Bounded read only; writes happen in the background service.
+  app.get("/api/diary", (c) => {
+    if (diary === null) {
+      return c.json(
+        {
+          error: { code: "diary_unavailable", message: "diary is disabled" },
+        },
+        404,
+      );
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const rawLimit = query.values.limit;
+    const limit = rawLimit === undefined ? 30 : Number(rawLimit);
+    if (
+      (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit)) ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      return validationError(c);
+    }
+    return c.json({ items: diary.list(limit) }, 200);
+  });
 
   /* ---------------- background memory activity (read-only) ---------- */
   // Browser view of the idle maintenance passes the memory service already

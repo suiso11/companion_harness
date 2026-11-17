@@ -21,6 +21,11 @@ export const FEATURE_ROUTES: readonly FeatureRoute[] = [
     sectionId: "memory",
   },
   {
+    path: "/diary",
+    label: "日記",
+    sectionId: "diary",
+  },
+  {
     path: "/tasks",
     label: "タスク・目的",
     sectionId: "autonomy",
@@ -106,6 +111,7 @@ export const PRIMARY_NAV: readonly NavItem[] = [
   navItem("/chats", "ペルソナ会話"),
   navItem("/personas", "ペルソナ"),
   navItem("/memory", "記憶"),
+  navItem("/diary", "日記"),
   navItem("/tasks", "タスク・目的"),
   navItem("/proposals", "候補"),
   navItem("/notifications", "通知"),

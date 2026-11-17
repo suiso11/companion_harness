@@ -30,6 +30,12 @@ const pet = pathname === "/pet" || pathname === "/pet/";
   {:catch}
     <p>ページを読み込めませんでした</p>
   {/await}
+{:else if feature.path === "/diary"}
+  {#await import("./DiaryPage.svelte") then module}
+    <svelte:component this={module.default} />
+  {:catch}
+    <p>ページを読み込めませんでした</p>
+  {/await}
 {:else if feature.path === "/tasks"}
   {#await import("./AutonomyPage.svelte") then module}
     <svelte:component this={module.default} />
