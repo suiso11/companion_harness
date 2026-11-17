@@ -178,8 +178,9 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
       error?: { code?: unknown };
     };
     if (body.error?.code === "memory_graph_unavailable") {
-      // The CI-pinned remind revision predates graph ops. Keep the skip
-      // explicit; bump the pin after remind#28 merges to run this suite.
+      // The pinned CI remind build (03ecf53) includes graph ops; this
+      // remains for an older local CLI build (bump the pin when remind
+      // gains required ops).
       test.skip(
         true,
         "pinned remind build has no graph ops (bump after remind#28)",
