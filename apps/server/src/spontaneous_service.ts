@@ -25,6 +25,7 @@ import {
   type BackgroundResourceGate,
 } from "./background_resource.js";
 import type { SpeechConfig } from "./config.js";
+import type { DayActivityStore } from "./day_activity.js";
 import type { DiaryEntry, DiaryStore } from "./diary_store.js";
 import type { ServerLogger } from "./logger.js";
 import {
@@ -65,6 +66,8 @@ export interface SpontaneousServiceDeps {
   readonly repo: KernelRepository;
   readonly store: ThoughtStore;
   readonly diary: DiaryStore;
+  /** Read-only per-day companion/task/action activity for the diary. */
+  readonly activity: DayActivityStore;
   readonly config: SpeechConfig;
   readonly memory: MemoryCliAddress;
   readonly scope: string;
@@ -162,15 +165,22 @@ Return ONLY strict JSON:
 {"kind":"survey"|"question"|"hypothesis"|"observation","body":"...","topics":["..."]}
 topics: 0-3 short general-category nouns.`;
 
-const DIARY_SYSTEM = `You write the companion's own private diary entry, in Japanese.
-Write in first person about the supplied day, based ONLY on that day's conversation and memories.
+const DIARY_SYSTEM = `You write the companion's own private diary page for one day, in Japanese.
+Write in first person, based ONLY on the supplied conversation, companion messages, tasks, actions, and memories of that day.
+The entry is Markdown with exactly these three H3 sections, in this order:
+### やったこと
+What the user did that day, 1-3 short lines.
+### コンパニオンの動き
+What the companion itself did that day: messages it sent, actions it ran, task changes.
+### タスク
+The day's tasks organized as done / in progress / next, from the supplied task list and conversation. Write 特になし when there are none.
 Rules:
-- 20-800 characters, 2-4 short sentences.
-- Never write "ユーザーは", IDs, URLs, or analysis jargon.
+- 40-1600 characters in total.
+- Never write IDs, URLs, or analysis jargon.
 - Do not address the user: this is a diary, not a message.
-- Invent nothing that is not present in the conversation or memories.
+- Invent nothing that is not present in the supplied material.
 Return ONLY strict JSON:
-{"entry":"..."}`;
+{"entry":"### やったこと\\n...\\n### コンパニオンの動き\\n...\\n### タスク\\n..."}`;
 
 const SPEECH_SYSTEM = `You are the companion speaking first, in Japanese.
 Using the supplied private note, sources, and recent conversation, either stay silent or write ONE natural message.
@@ -397,12 +407,11 @@ export function createSpontaneousService(
   }
 
   /**
-   * One day's conversation across up to three recent sessions. Returns null
-   * when the day has no user turn at all: there is nothing to diary about.
+   * One day's conversation across up to three recent sessions ("" when the
+   * day has no user turn; other activity may still make the day eligible).
    */
-  function dayConversation(day: string): string | null {
+  function dayConversation(day: string): string {
     const lines: string[] = [];
-    let userTurns = 0;
     try {
       for (const session of repo
         .listSessions({ limit: 50 })
@@ -413,7 +422,6 @@ export function createSpontaneousService(
           if (localDay(item.createdAt) !== day) continue;
           const user = boundedString(item.text, 1, 800);
           if (user === null) continue;
-          userTurns += 1;
           lines.push(`User: ${user}`);
           const result = item.selectedRun?.result;
           if (isRecord(result)) {
@@ -423,9 +431,8 @@ export function createSpontaneousService(
         }
       }
     } catch {
-      return null;
+      return "";
     }
-    if (userTurns === 0) return null;
     const context = lines.join("\n");
     return cpLength(context) > SPONTANEOUS_MAX_CONTEXT_CP
       ? Array.from(context).slice(0, SPONTANEOUS_MAX_CONTEXT_CP).join("")
@@ -742,6 +749,9 @@ export function createSpontaneousService(
     return message;
   }
 
+  const joinOrNone = (items: readonly string[]): string =>
+    items.length === 0 ? "(none)" : items.join("\n");
+
   async function runDiaryPass(): Promise<
     "written" | "skipped" | "busy" | "error"
   > {
@@ -762,8 +772,14 @@ export function createSpontaneousService(
     const controller = newController();
     try {
       const conversation = dayConversation(day);
-      if (conversation === null) {
-        log("info", "diary.skipped_no_conversation");
+      const activity = deps.activity.read(day, localDay);
+      if (
+        conversation.length === 0 &&
+        activity.companionMessages.length === 0 &&
+        activity.tasks.length === 0 &&
+        activity.actions.length === 0
+      ) {
+        log("info", "diary.skipped_no_activity");
         return "skipped";
       }
       let memories: MemoryItem[] = [];
@@ -787,8 +803,8 @@ export function createSpontaneousService(
         .join("\n");
       const parsed = await chatJson(
         system,
-        `Day: ${day}\nMemories:\n${memoryLines || "(none)"}\nConversation:\n${conversation}`,
-        1200,
+        `Day: ${day}\nMemories:\n${memoryLines || "(none)"}\nUser conversation:\n${conversation || "(none)"}\nCompanion messages:\n${joinOrNone(activity.companionMessages)}\nTasks:\n${joinOrNone(activity.tasks)}\nActions:\n${joinOrNone(activity.actions)}`,
+        2600,
         controller,
       );
       if (parsed === null) {
@@ -797,9 +813,7 @@ export function createSpontaneousService(
         log("warn", "diary.failed");
         return "error";
       }
-      // Local models answer concise diaries: accept 20 cp (a short but
-      // complete entry) up to 1200 cp.
-      const entry = boundedString(parsed.entry, 20, 1200);
+      const entry = boundedString(parsed.entry, 40, 1800);
       if (
         entry === null ||
         /https?:\/\//i.test(entry) ||

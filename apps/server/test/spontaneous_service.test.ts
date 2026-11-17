@@ -11,6 +11,7 @@ import {
 import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it, vi } from "vitest";
 import type { SpeechConfig } from "../src/config.js";
+import { createDayActivityStore } from "../src/day_activity.js";
 import { createDiaryStore } from "../src/diary_store.js";
 import {
   createSpontaneousService,
@@ -108,6 +109,7 @@ async function setup(overrides: Partial<SpontaneousServiceDeps> = {}) {
     repo,
     store,
     diary,
+    activity: createDayActivityStore(handle.raw),
     config: config(),
     memory: {
       executable: "/bin/true",

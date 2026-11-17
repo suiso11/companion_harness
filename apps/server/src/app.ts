@@ -164,7 +164,7 @@ import {
 } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
-import type { DiaryStore } from "./diary_store.js";
+import { type DiaryStore, isDiaryDay } from "./diary_store.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   createMonitorSampler,
@@ -261,9 +261,11 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
  * spellings (null when the path is not a feature route).
  */
 function isFeatureUiPath(path: string): boolean {
+  const canonical = path.endsWith("/") ? path.slice(0, -1) : path;
   return (
     FEATURE_UI_PATHS.has(path) ||
-    (path.endsWith("/") && FEATURE_UI_PATHS.has(path.slice(0, -1)))
+    FEATURE_UI_PATHS.has(canonical) ||
+    (canonical.startsWith("/diary/") && isDiaryDay(canonical.slice(7)))
   );
 }
 
@@ -3099,21 +3101,28 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   // matching surface from the route; unknown paths still 404 (no catch-all).
   // Trailing-slash variants (`/memory/`) are registered too: identical
   // handler + auth so refresh/deep-link with a trailing slash works.
+  const featureShellHandler = (c: Context): Response => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    c.header("Content-Security-Policy", STRICT_CSP);
+    c.header("cache-control", "no-store");
+    if (remote !== null && !hasSession(c)) {
+      return c.html(renderRemoteLogin().toString(), 200);
+    }
+    return c.html(renderSvelteShell().toString(), 200);
+  };
   for (const path of FEATURE_UI_PATHS) {
-    const handler = (c: Context): Response => {
-      if (!strictQuery(c, []).ok) {
-        return validationError(c);
-      }
-      c.header("Content-Security-Policy", STRICT_CSP);
-      c.header("cache-control", "no-store");
-      if (remote !== null && !hasSession(c)) {
-        return c.html(renderRemoteLogin().toString(), 200);
-      }
-      return c.html(renderSvelteShell().toString(), 200);
-    };
-    app.get(path, handler);
-    app.get(`${path}/`, handler);
+    app.get(path, featureShellHandler);
+    app.get(`${path}/`, featureShellHandler);
   }
+  // Diary day page: only a real YYYY-MM-DD serves the shell; junk stays 404.
+  const diaryDayShellHandler = (c: Context): Response =>
+    isDiaryDay(c.req.param("day") ?? "")
+      ? featureShellHandler(c)
+      : apiError(c, 404, "not_found", "resource not found");
+  app.get("/diary/:day", diaryDayShellHandler);
+  app.get("/diary/:day/", diaryDayShellHandler);
 
   app.get("/assets/client.js", (c) => {
     if (!strictQuery(c, []).ok) {
@@ -3402,11 +3411,18 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         404,
       );
     }
-    const query = strictQuery(c, ["limit"]);
+    const query = strictQuery(c, ["limit", "month"]);
     if (!query.ok) {
       return validationError(c);
     }
     const rawLimit = query.values.limit;
+    const rawMonth = query.values.month;
+    if (rawMonth !== undefined) {
+      if (rawLimit !== undefined || !/^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth)) {
+        return validationError(c);
+      }
+      return c.json({ items: diary.listMonth(rawMonth) }, 200);
+    }
     const limit = rawLimit === undefined ? 30 : Number(rawLimit);
     if (
       (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit)) ||
@@ -3417,6 +3433,25 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     return c.json({ items: diary.list(limit) }, 200);
+  });
+
+  app.get("/api/diary/:day", (c) => {
+    if (diary === null) {
+      return c.json(
+        {
+          error: { code: "diary_unavailable", message: "diary is disabled" },
+        },
+        404,
+      );
+    }
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    const day = c.req.param("day");
+    if (!isDiaryDay(day)) {
+      return validationError(c);
+    }
+    return c.json({ entry: diary.get(day) }, 200);
   });
 
   /* ---------------- background memory activity (read-only) ---------- */

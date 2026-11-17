@@ -156,6 +156,7 @@ import {
   parseCreateWriteConnectorHint,
   parseCreateWriteProfileName,
 } from "./createWriteProfile.js";
+import { createDayActivityStore } from "./day_activity.js";
 import { createDiaryStore } from "./diary_store.js";
 import {
   createLearningService,
@@ -1802,6 +1803,7 @@ export async function startServer(
           repo: baseRepo,
           store: createThoughtStore(handle.raw),
           diary: diaryStore,
+          activity: createDayActivityStore(handle.raw),
           personaInstructions: () => mainPersona.get()?.instructions ?? null,
           config: config.speech,
           memory: {

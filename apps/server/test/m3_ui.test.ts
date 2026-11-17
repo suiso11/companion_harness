@@ -148,6 +148,25 @@ describe("M3 SSR shell + CSP + assets", () => {
       // A trailing slash on a NON-feature path stays 404 (no catch-all).
       const unknown = await f.app.request("/unknown/", { headers: headers() });
       expect(unknown.status).toBe(404);
+      // Diary day page: a real date serves the shell (slash or not); junk 404s.
+      const dayPage = await f.app.request("/diary/2026-11-16", {
+        headers: headers(),
+      });
+      expect(dayPage.status).toBe(200);
+      expect(dayPage.headers.get("content-security-policy")).toBe(STRICT_CSP);
+      const dayPageSlash = await f.app.request("/diary/2026-11-16/", {
+        headers: headers(),
+      });
+      expect(dayPageSlash.status).toBe(200);
+      expect(await dayPageSlash.text()).toBe(await dayPage.text());
+      for (const junk of [
+        "/diary/foo",
+        "/diary/2026-02-30",
+        "/diary/2026-11-16/x",
+      ]) {
+        const res = await f.app.request(junk, { headers: headers() });
+        expect(res.status).toBe(404);
+      }
     } finally {
       f.close();
     }
