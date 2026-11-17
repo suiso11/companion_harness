@@ -1183,57 +1183,83 @@ $effect(() => {
 });
 </script>
 
-<section id="memory" aria-label="記憶の管理" class="feature-panel">
-  <h2>記憶の管理</h2>
-  <div id="memory-view-toggle" role="group" aria-label="表示切替">
-    <button
-      id="memory-view-list"
-      type="button"
-      aria-pressed={view === "list"}
-      onclick={() => switchView("list")}>一覧</button
-    >
-    <button
-      id="memory-view-graph"
-      type="button"
-      aria-pressed={view === "graph"}
-      onclick={() => switchView("graph")}>グラフ</button
-    >
-    <button
-      id="memory-view-activity"
-      type="button"
-      aria-pressed={view === "activity"}
-      onclick={() => switchView("activity")}>学習の動き</button
-    >
-    <button
-      id="memory-view-episodes"
-      type="button"
-      aria-pressed={view === "episodes"}
-      onclick={() => switchView("episodes")}>エピソード</button
-    >
+<section id="memory" aria-label="記憶の管理" class="feature-panel memory-surface">
+  <div class="memory-orbit" aria-hidden="true">
+    <span class="memory-orbit__ring"></span>
+    <span class="memory-orbit__ring"></span>
+    <span class="memory-orbit__ring"></span>
+    <span class="memory-orbit__dot"></span>
+    <span class="memory-orbit__dot"></span>
+    <span class="memory-orbit__dot"></span>
+    <span class="memory-orbit__dot"></span>
+    <span class="memory-orbit__dot"></span>
+    <span class="memory-orbit__dot"></span>
   </div>
-  {#if view !== "activity" && view !== "episodes"}
-  <form
-    id="memory-search-form"
-    onsubmit={(event) => {
-      event.preventDefault();
-      if (view === "graph") {
-        applyGraphSearch();
-        return;
-      }
-      void search();
-    }}
-  >
-    <input
-      id="memory-search-input"
-      type="text"
-      autocomplete="off"
-      bind:value={query}
-    />
-    <button id="memory-search-button" type="submit" disabled={searching}>
-      記憶を検索
-    </button>
-  </form>
-  {/if}
+  <header class="memory-hero">
+    <p class="memory-eyebrow" aria-hidden="true">
+      <span class="memory-eyebrow__bracket">[</span>
+      <span class="memory-eyebrow__dot"></span>
+      MEMORY
+      <span class="memory-eyebrow__dot"></span>
+      <span class="memory-eyebrow__bracket">]</span>
+    </p>
+    <h2>記憶の管理</h2>
+    <p class="memory-hero__caption">
+      会話から抽出された記憶を、ひとつのカードとして読み返す。
+    </p>
+  </header>
+  <div class="memory-toolbar">
+    <div id="memory-view-toggle" role="group" aria-label="表示切替">
+      <button
+        id="memory-view-list"
+        type="button"
+        aria-pressed={view === "list"}
+        onclick={() => switchView("list")}>一覧</button
+      >
+      <button
+        id="memory-view-graph"
+        type="button"
+        aria-pressed={view === "graph"}
+        onclick={() => switchView("graph")}>グラフ</button
+      >
+      <button
+        id="memory-view-activity"
+        type="button"
+        aria-pressed={view === "activity"}
+        onclick={() => switchView("activity")}>学習の動き</button
+      >
+      <button
+        id="memory-view-episodes"
+        type="button"
+        aria-pressed={view === "episodes"}
+        onclick={() => switchView("episodes")}>エピソード</button
+      >
+    </div>
+    {#if view !== "activity" && view !== "episodes"}
+      <form
+        id="memory-search-form"
+        onsubmit={(event) => {
+          event.preventDefault();
+          if (view === "graph") {
+            applyGraphSearch();
+            return;
+          }
+          void search();
+        }}
+      >
+        <input
+          id="memory-search-input"
+          type="text"
+          autocomplete="off"
+          placeholder="キーワードで探す"
+          bind:value={query}
+        />
+        <button id="memory-search-button" type="submit" disabled={searching}>
+          記憶を検索
+        </button>
+      </form>
+    {/if}
+  </div>
   {#if notice.length > 0}
     <p class="memory-notice" role="status">{notice}</p>
   {/if}
@@ -1493,10 +1519,11 @@ $effect(() => {
     <div class="memory-list-scroll">
       <ul id="memory-list">
         {#if listMode === "browse"}
-          {#each browseRows as row (row.handle)}
-            <li>
+          {#each browseRows as row, index (row.handle)}
+            <li class="memory-card" style="--i:{Math.min(index, 12)}">
               <button
                 type="button"
+                class="memory-card__button"
                 disabled={browseScope === null}
                 onclick={() => {
                   if (browseScope !== null) {
@@ -1504,31 +1531,66 @@ $effect(() => {
                   }
                 }}
               >
-                {row.handle} [{row.status}] {row.label}
-                {#if row.createdAt !== undefined}
-                  {#each [formatRecordedAt(row.createdAt)] as recorded}
-                    {#if recorded !== null}(記録: {recorded}){/if}
-                  {/each}
+                <span class="memory-card__quote">{row.label}</span>
+                <span class="memory-card__meta">
+                  <span
+                    class="memory-card__avatar"
+                    style="--avatar:var(--chart-{index % 5 + 1})"
+                    aria-hidden="true"
+                  ></span>
+                  <span class="memory-card__who"
+                    >{row.handle}
+                    <span class="memory-card__status" data-status={row.status}
+                      >[{row.status}]</span
+                    ></span
+                  >
+                  {#if row.createdAt !== undefined}
+                    {#each [formatRecordedAt(row.createdAt)] as recorded}
+                      {#if recorded !== null}
+                        <span class="memory-card__when">記録: {recorded}</span>
+                      {/if}
+                    {/each}
+                  {/if}
+                </span>
+                {#if row.topics.length > 0}
+                  <span class="memory-card__topics">
+                    {#each row.topics as topic (topic)}
+                      <span class="memory-topic-chip">{topic}</span>
+                    {/each}
+                  </span>
                 {/if}
               </button>
-              {#each row.topics as topic (topic)}
-                <span class="memory-topic-chip">{topic}</span>
-              {/each}
             </li>
           {/each}
         {:else}
-          {#each hits as hit (hit.handle)}
-            <li>
+          {#each hits as hit, index (hit.handle)}
+            <li class="memory-card" style="--i:{Math.min(index, 12)}">
               <button
                 type="button"
+                class="memory-card__button"
                 onclick={() => void openDetail(searchId ?? "", hit.handle)}
               >
-                {hit.handle} [{hit.status}] {hit.snippet}
-                {#if hit.createdAt !== undefined}
-                  {#each [formatRecordedAt(hit.createdAt)] as recorded}
-                    {#if recorded !== null}(記録: {recorded}){/if}
-                  {/each}
-                {/if}
+                <span class="memory-card__quote">{hit.snippet}</span>
+                <span class="memory-card__meta">
+                  <span
+                    class="memory-card__avatar"
+                    style="--avatar:var(--chart-{index % 5 + 1})"
+                    aria-hidden="true"
+                  ></span>
+                  <span class="memory-card__who"
+                    >{hit.handle}
+                    <span class="memory-card__status" data-status={hit.status}
+                      >[{hit.status}]</span
+                    ></span
+                  >
+                  {#if hit.createdAt !== undefined}
+                    {#each [formatRecordedAt(hit.createdAt)] as recorded}
+                      {#if recorded !== null}
+                        <span class="memory-card__when">記録: {recorded}</span>
+                      {/if}
+                    {/each}
+                  {/if}
+                </span>
               </button>
             </li>
           {/each}
