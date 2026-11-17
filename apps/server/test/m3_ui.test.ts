@@ -128,7 +128,13 @@ describe("M3 SSR shell + CSP + assets", () => {
   it("serves trailing-slash feature routes with the same shell + auth", async () => {
     const f = await makeApp();
     try {
-      for (const base of ["/memory", "/tasks", "/shadow", "/proposals"]) {
+      for (const base of [
+        "/memory",
+        "/tasks",
+        "/shadow",
+        "/proposals",
+        "/diary",
+      ]) {
         const canonical = await f.app.request(base, { headers: headers() });
         expect(canonical.status).toBe(200);
         expect(canonical.headers.get("content-type")).toContain("text/html");
