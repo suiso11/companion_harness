@@ -93,6 +93,16 @@ function iconFor(path: string): string {
 </svg>
 
 <nav class="feature-links" aria-label="機能">
+  <div class="nav-brand">
+    <span class="nav-brand-mark" aria-hidden="true"
+      ><svg class="nav-icon"><use href="#nav-sparkles" /></svg></span
+    >
+    <span class="nav-brand-text">
+      <span class="nav-brand-name">Companion</span>
+      <span class="nav-brand-sub">ハーネス</span>
+    </span>
+  </div>
+  <p class="nav-section">ワークスペース</p>
   {#each PRIMARY_NAV as item (item.path)}
     <a
       href={item.path}

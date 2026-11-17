@@ -8,42 +8,58 @@
 :root {
   color-scheme: dark;
 
-  /* llama-webui: `--radius` + radius scale (hand-rolled `@theme inline`). */
-  --radius: 0.625rem;
+  /* ReactBits Pro app-ui language: one radius scale, layered surfaces,
+   * Sorbet accent reserved for primary actions and the active nav pill. */
+  --radius: 0.75rem;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
 
-  /* llama-webui: `.dark` token subset (dark-only app: pinned on `:root`). */
-  --background: oklch(0.16 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.29 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 30%);
-  --input: oklch(1 0 0 / 30%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --code-background: oklch(0.225 0 0);
-  --code-foreground: oklch(0.875 0 0);
-  /* Hairlines use the upstream sidebar-border alpha (10%) so the 30%
-   * `--border` only lands on emphasized controls. */
-  --border-subtle: oklch(1 0 0 / 10%);
+  /* Dark-only surfaces: page < sidebar < card < popover, each a step lighter
+   * with a faint cool cast so stacked cards read as layers, not borders. */
+  --background: oklch(0.145 0.01 285);
+  --foreground: oklch(0.97 0.004 285);
+  --card: oklch(0.185 0.012 285);
+  --card-foreground: oklch(0.97 0.004 285);
+  --popover: oklch(0.205 0.014 285);
+  --popover-foreground: oklch(0.97 0.004 285);
+  --primary: oklch(0.94 0.006 285);
+  --primary-foreground: oklch(0.185 0.012 285);
+  --secondary: oklch(0.235 0.014 285);
+  --secondary-foreground: oklch(0.97 0.004 285);
+  --muted: oklch(0.215 0.012 285);
+  --muted-foreground: oklch(0.72 0.014 285);
+  --accent: oklch(0.265 0.03 300);
+  --accent-foreground: oklch(0.98 0.004 285);
+  --destructive: oklch(0.68 0.19 20);
+  --border: oklch(1 0 0 / 14%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.72 0.15 300);
+  --chart-1: oklch(0.7 0.17 300);
+  --chart-2: oklch(0.72 0.14 190);
+  --chart-3: oklch(0.8 0.14 85);
+  --chart-4: oklch(0.72 0.18 340);
+  --chart-5: oklch(0.7 0.15 150);
+  --code-background: oklch(0.175 0.012 285);
+  --code-foreground: oklch(0.9 0.01 285);
+  /* Hairlines stay at 8% so `--border` (14%) only lands on real controls. */
+  --border-subtle: oklch(1 0 0 / 8%);
+  --sidebar: oklch(0.165 0.013 285);
+  --surface: oklch(0.2 0.014 285);
+  --accent-gradient: linear-gradient(
+    135deg,
+    oklch(0.72 0.16 300),
+    oklch(0.75 0.15 345) 52%,
+    oklch(0.84 0.11 55)
+  );
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 35%);
+  --shadow-md:
+    0 8px 24px -14px oklch(0 0 0 / 70%), 0 1px 2px oklch(0 0 0 / 35%);
+  --shadow-lg:
+    0 20px 45px -24px oklch(0 0 0 / 80%), 0 2px 8px oklch(0 0 0 / 30%);
+  --sidebar-width: 15.5rem;
   /* llama-webui: `--font-mono` stack for code/stats. */
   --font-mono:
     ui-monospace, SFMono-Regular, "SF Mono", Monaco, "Cascadia Code",
@@ -121,9 +137,9 @@ body {
   font-family: var(--font-mono);
 }
 
-/* V2 llama-like full-height column: slim header, scrollable message list,
- * pinned composer. The transcript scrolls inside #conversation (the page
- * itself never scrolls), so the composer is always visible. */
+/* App shell (ReactBits app-ui shape): a fixed navigation rail at >=1024px,
+ * an inline tab strip below that. The rail is fixed rather than a grid child
+ * so banners, panels and the auth form keep their natural flex order. */
 .shell {
   display: flex;
   flex-direction: column;
@@ -131,6 +147,19 @@ body {
   /* biome-ignore lint/suspicious/noDuplicateProperties: dvh fallback for older browsers */
   height: 100dvh;
   min-width: 0;
+  /* Two faint accent blooms: depth without a background image or extra DOM. */
+  background:
+    radial-gradient(
+      70rem 34rem at 88% -12%,
+      oklch(0.72 0.16 300 / 9%),
+      transparent 62%
+    ),
+    radial-gradient(
+      52rem 26rem at 6% 112%,
+      oklch(0.75 0.15 345 / 7%),
+      transparent 66%
+    ),
+    var(--background);
 }
 
 .topbar {
@@ -138,9 +167,10 @@ body {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
+  gap: 0.5rem 0.75rem;
+  padding: 0.55rem 1.25rem;
   border-bottom: 1px solid var(--border-subtle);
+  background: var(--background);
   flex: 0 0 auto;
 }
 
@@ -152,28 +182,43 @@ body {
 }
 
 .topbar h1 {
-  font-size: 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
   margin: 0;
   letter-spacing: 0.01em;
 }
 
-/* PR-5 slim nav: one link per feature page, chat stays the default. */
+/* One nav entry per feature page. Mobile keeps the wrapped/strip form. */
 .feature-links {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.15rem;
   min-width: 0;
-  /* The dev menu anchors here, not to the summary: a wrapped summary can
-     sit at the left edge, where right:0 would push the menu off-screen. */
   position: relative;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.feature-links::-webkit-scrollbar {
+  display: none;
 }
 
 .feature-links a,
 .feature-links-dev summary {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.55rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  text-decoration: none;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  position: relative;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .nav-icon-sprite {
@@ -185,8 +230,8 @@ body {
 
 .nav-icon {
   flex: none;
-  width: 1em;
-  height: 1em;
+  width: 1.05rem;
+  height: 1.05rem;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -194,13 +239,10 @@ body {
   stroke-linejoin: round;
 }
 
-.feature-links a {
-  padding: 0.2rem 0.5rem;
-  border-radius: var(--radius-sm);
-  color: var(--muted-foreground);
-  text-decoration: none;
-  font-size: 0.85rem;
-  white-space: nowrap;
+/* Brand + section labels only exist in the rail. */
+.nav-brand,
+.nav-section {
+  display: none;
 }
 
 .feature-links a:hover {
@@ -210,17 +252,13 @@ body {
 
 .feature-links a.active {
   background: var(--secondary);
-  color: var(--secondary-foreground);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
 /* `開発・運用` disclosure: native <details> keeps keyboard support + CSP. */
 .feature-links-dev summary {
-  padding: 0.2rem 0.5rem;
-  border-radius: var(--radius-sm);
-  color: var(--muted-foreground);
   cursor: pointer;
-  font-size: 0.85rem;
-  white-space: nowrap;
   list-style: none;
 }
 
@@ -237,7 +275,8 @@ body {
 /* Active page matches a primary link, not the hover/open accent. */
 .feature-links-dev.active summary {
   background: var(--secondary);
-  color: var(--secondary-foreground);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
 .feature-links-dev-menu {
@@ -246,18 +285,129 @@ body {
   top: calc(100% + 0.25rem);
   z-index: 30;
   display: flex;
-  min-width: 10rem;
+  min-width: 11rem;
   flex-direction: column;
-  padding: 0.25rem;
+  padding: 0.3rem;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-lg);
   background: var(--popover);
   color: var(--popover-foreground);
-  box-shadow: 0 8px 24px oklch(0 0 0 / 35%);
+  box-shadow: var(--shadow-lg);
 }
 
 .feature-links-dev-menu a {
-  padding: 0.3rem 0.5rem;
+  padding: 0.4rem 0.55rem;
+}
+
+@media (max-width: 1023px) {
+  /* Below the rail breakpoint the nav is its own scrollable strip. */
+  .feature-links {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 0 0.75rem 0.15rem;
+    box-sizing: border-box;
+  }
+}
+
+@media (min-width: 1024px) {
+  .shell {
+    padding-left: var(--sidebar-width);
+  }
+
+  .feature-links {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: var(--sidebar-width);
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 0.1rem;
+    padding: 0.9rem 0.7rem calc(0.9rem + env(safe-area-inset-bottom));
+    background: var(--sidebar);
+    border-right: 1px solid var(--border-subtle);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+  }
+
+  .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0.5rem 0.85rem;
+    margin-bottom: 0.35rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .nav-brand-mark {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    flex: none;
+    border-radius: 0.7rem;
+    background: var(--accent-gradient);
+    color: oklch(0.99 0 0);
+    box-shadow: 0 6px 18px -8px oklch(0.72 0.16 300 / 80%);
+  }
+
+  .nav-brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    min-width: 0;
+  }
+
+  .nav-brand-name {
+    font-size: 0.9rem;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+  }
+
+  .nav-brand-sub {
+    font-size: 0.7rem;
+    color: var(--muted-foreground);
+  }
+
+  .nav-section {
+    display: block;
+    margin: 0.55rem 0.55rem 0.25rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    opacity: 0.75;
+  }
+
+  /* Active rail item carries the accent as a 3px pill instead of a border. */
+  .feature-links a.active::before,
+  .feature-links-dev.active summary::before {
+    content: "";
+    position: absolute;
+    left: -0.35rem;
+    top: 50%;
+    translate: 0 -50%;
+    width: 3px;
+    height: 1.15rem;
+    border-radius: 999px;
+    background: var(--accent-gradient);
+    box-shadow: 0 0 12px oklch(0.72 0.16 300 / 70%);
+  }
+
+  /* Submenu expands inline: the rail scrolls, nothing overlays the content. */
+  .feature-links-dev-menu {
+    position: static;
+    min-width: 0;
+    margin: 0.1rem 0 0.35rem;
+    padding: 0.1rem 0 0.1rem 0.55rem;
+    border: 0;
+    border-left: 1px solid var(--border-subtle);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
 }
 
 .sessions {
@@ -274,6 +424,32 @@ body {
   align-items: center;
   gap: 0.4rem;
   min-height: 44px;
+  padding: 0.25rem 0.75rem;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 0.8rem;
+}
+
+#session-toggle:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+#session-new {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+  border-radius: 999px;
+  padding: 0.25rem 0.95rem;
+  font-weight: 600;
+}
+
+#session-new:hover:not(:disabled) {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  filter: brightness(0.92);
 }
 
 .session-count {
@@ -298,27 +474,59 @@ body {
 .messages {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 1.1rem;
   width: 100%;
-  max-width: 48rem;
+  max-width: 52rem;
   margin: 0 auto;
-  padding: 1rem 1rem 0.5rem;
+  padding: 1.5rem 1.25rem 0.75rem;
   min-height: 100%;
   min-width: 0;
   box-sizing: border-box;
 }
 
-/* Empty-state hint (llama.cpp welcome): centered in the list. */
+/* New turns fade in; reduced-motion users get the final state immediately. */
+.messages > section {
+  animation: turn-in 0.18s ease-out both;
+}
+
+@keyframes turn-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .messages > section {
+    animation: none;
+  }
+}
+
+/* Empty-state hint: accent orb over the one-line prompt. */
 #conversation-empty {
   margin: auto;
+  display: grid;
+  justify-items: center;
+  gap: 0.9rem;
   text-align: center;
   color: var(--muted-foreground);
   padding: 2rem 1rem;
 }
 
+#conversation-empty::before {
+  content: "";
+  width: 3rem;
+  height: 3rem;
+  border-radius: 1rem;
+  background: var(--accent-gradient);
+  box-shadow: 0 14px 44px -14px oklch(0.72 0.16 300 / 75%);
+}
+
 #conversation-empty p {
   margin: 0;
   font-size: 1rem;
+  font-weight: 600;
+  color: var(--foreground);
 }
 
 /* Transcript rows (task ui-separate-turn-bubbles): each turn is an outer
@@ -336,10 +544,12 @@ body {
    * expand to the cap below and wrap. */
   width: fit-content;
   max-width: min(85%, 36rem);
-  background: var(--muted);
+  background: var(--secondary);
   color: var(--foreground);
-  border-radius: var(--radius-xl);
-  padding: 0.25rem 0.875rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 1.15rem 1.15rem 0.35rem 1.15rem;
+  padding: 0.45rem 0.95rem;
+  box-shadow: var(--shadow-sm);
   min-width: 0;
   box-sizing: border-box;
 }
@@ -407,6 +617,7 @@ body {
   border-radius: var(--radius-lg);
   background: var(--card);
   padding: 0.625rem 0.875rem;
+  box-shadow: var(--shadow-sm);
 }
 
 .thinking-toggle {
@@ -468,40 +679,51 @@ body {
  * notice + composer in a centered column, with iOS safe-area inset. */
 .composer-bar {
   flex: 0 0 auto;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--background);
-  padding: 0.5rem 1rem calc(0.5rem + env(safe-area-inset-bottom));
+  padding: 0.5rem 1.25rem calc(0.9rem + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--background) 72%, transparent);
 }
 
 .composer-column {
   width: 100%;
-  max-width: 48rem;
+  max-width: 52rem;
   margin: 0 auto;
   min-width: 0;
 }
 
 #composer {
   display: flex;
-  gap: 0.5rem;
-  background: var(--background);
-  padding: 0;
-  border-top: none;
+  align-items: flex-end;
+  gap: 0.4rem;
+  background: var(--card);
+  border: 1px solid var(--input);
+  border-radius: var(--radius-2xl);
+  padding: 0.45rem 0.45rem 0.45rem 0.7rem;
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-/* V4 composer input (upstream ChatFormInputBasic): auto-growing textarea,
- * max ~10 lines then scroll, 16px (no iOS auto-zoom), safe-area handled by
- * .composer-bar. Enter sends / Shift+Enter newline (App.svelte); IME
- * composition never sends. */
+#composer:focus-within {
+  border-color: var(--ring);
+  box-shadow:
+    0 0 0 3px oklch(0.72 0.15 300 / 18%),
+    var(--shadow-md);
+}
+
+/* V4 composer input: auto-growing textarea, max ~10 lines then scroll,
+ * 16px (no iOS auto-zoom). Enter sends / Shift+Enter newline (App.svelte);
+ * IME composition never sends. */
 #composer-input {
   flex: 1;
   min-width: 0;
   font-size: 16px;
   line-height: 1.5;
-  padding: 0.6rem 0.9rem;
-  background: var(--secondary);
+  padding: 0.5rem 0.35rem;
+  background: transparent;
   color: var(--foreground);
-  border: 1px solid var(--input);
-  border-radius: var(--radius-xl);
+  border: 0;
+  border-radius: var(--radius-lg);
   resize: none;
   overflow-y: hidden;
   max-height: 15rem;
@@ -514,8 +736,7 @@ body {
 }
 
 #composer-input:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
+  outline: none;
 }
 
 #login-expired {
@@ -626,44 +847,67 @@ button:disabled {
   opacity: 1;
 }
 
-/* Citation chips stay quiet until hovered. */
+/* Citation chips: quiet pill surfaces that lift on hover. */
 button[data-action-citation="true"],
 button[data-action-evidence="before"] {
   font-family: var(--font-mono);
-  font-size: 0.8rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--border-subtle);
+  color: var(--muted-foreground);
 }
 
-/* Primary send: near-white llama.cpp primary with dark text. */
+button[data-action-citation="true"]:hover:not(:disabled),
+button[data-action-evidence="before"]:hover:not(:disabled) {
+  border-color: var(--ring);
+  color: var(--foreground);
+}
+
+/* Primary send: the one place the Sorbet accent gradient appears in the
+ * composer; dark text keeps AA contrast across the whole ramp. */
 #composer-send {
-  background: var(--primary);
-  color: var(--primary-foreground);
+  background: var(--accent-gradient);
+  color: oklch(0.17 0.012 285);
   border-color: transparent;
   border-radius: var(--radius-xl);
-  font-weight: 600;
+  font-weight: 650;
+  box-shadow: 0 8px 22px -12px oklch(0.72 0.16 300 / 85%);
 }
 
 #composer-send:hover:not(:disabled) {
-  background: var(--primary);
-  color: var(--primary-foreground);
-  filter: brightness(0.92);
+  background: var(--accent-gradient);
+  color: oklch(0.17 0.012 285);
+  filter: brightness(1.08);
 }
 
-/* Voice toggle: same shape as send; accent while listening, ring while speaking. */
+#composer-send:active:not(:disabled) {
+  translate: 0 1px;
+}
+
+/* Voice toggle: ghost button that goes accent while listening. */
 #composer-mic {
   border-radius: var(--radius-xl);
   font-weight: 600;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--muted-foreground);
+}
+
+#composer-mic:hover:not(:disabled) {
+  background: var(--secondary);
+  color: var(--foreground);
 }
 
 #composer-mic[data-voice-mode="on"] {
-  border-color: var(--primary);
-  background: var(--primary);
-  color: var(--primary-foreground);
+  border-color: var(--ring);
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
 #composer-mic[data-speaking="true"] {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
@@ -688,11 +932,13 @@ button[data-action-evidence="before"] {
 }
 
 #conversation section[data-action-card="true"] {
-  border: 1px solid var(--border);
-  background: var(--card);
+  border: 1px solid var(--border-subtle);
+  background:
+    linear-gradient(180deg, oklch(1 0 0 / 3%), transparent 40%), var(--card);
   color: var(--card-foreground);
-  padding: 0.75rem;
+  padding: 0.9rem 1rem;
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
 }
 
 #conversation section[data-action-card="true"][data-action-state="expired"] {
@@ -761,17 +1007,14 @@ button[data-action-evidence="before"] {
   }
 
   #composer {
-    flex-wrap: wrap;
-  }
-
-  #composer-input {
-    flex: 1 1 100%;
+    gap: 0.3rem;
+    padding: 0.4rem 0.4rem 0.4rem 0.55rem;
   }
 
   #composer-send,
   #composer-mic,
   #composer-stop {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
   }
 
   #conversation .msg-user-row {
@@ -1067,27 +1310,32 @@ button[data-action-evidence="before"] {
   color: var(--destructive, #f87171);
 }
 
-/* PR-5 native memory panel (route `/memory`) inside the chat shell slot. */
+/* Feature panels: one card column, same surface language as chat cards. */
 .feature-panel-slot {
   flex: 0 0 auto;
   min-height: 0;
 }
 .feature-panel {
-  margin: 0.75rem 1rem 1rem;
-  padding: 0.75rem 1rem;
+  margin: 1rem auto;
+  max-width: 72rem;
+  padding: 1.25rem 1.25rem 1.5rem;
   border: 1px solid var(--border-subtle);
-  border-radius: 0.5rem;
+  border-radius: var(--radius-xl);
+  background: color-mix(in oklab, var(--card) 72%, transparent);
+  box-shadow: var(--shadow-sm);
 }
 .feature-panel h2 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
 }
 
-/* Persona pages replace the chat surface: the shell keeps the header, nav and
- * auth relogin, while the agent transcript, composer and session panels are
- * hidden and the feature slot takes the remaining height. */
-.shell.chat-hidden .topbar-start,
-.shell.chat-hidden .sessions,
+/* Persona pages replace the chat surface: the shell keeps the nav and auth
+ * relogin, while the agent transcript, composer and session panels are
+ * hidden and the feature slot takes the remaining height. The header holds
+ * only chat controls, so it goes away with them. */
+.shell.chat-hidden .topbar,
 .shell.chat-hidden #conversation,
 .shell.chat-hidden .composer-bar,
 .shell.chat-hidden .agora-panel,
