@@ -1096,7 +1096,10 @@ export function parseSelfLoopConfig(
   if (typeof taskId !== "string" || !SELF_LOOP_UUID.test(taskId)) {
     throw configError("self loop taskId must be a UUID");
   }
-  const minEvidence = record.minEvidence ?? 3;
+  // Automatic reflection records ONE run evidence per hypothesis and only a
+  // human can attach more, so any default above 1 leaves a fresh setup with
+  // no proposal ever. Operators raise it to require human corroboration.
+  const minEvidence = record.minEvidence ?? 1;
   if (
     typeof minEvidence !== "number" ||
     !Number.isInteger(minEvidence) ||

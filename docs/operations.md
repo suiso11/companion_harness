@@ -6333,16 +6333,17 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 `COMPANION_SELFLOOP_JSON` を設定したときだけ、日次で **読み取り専用の試行提案** を1件作ります。
 
 ```json
-{"enabled": true, "sessionId": "<uuid>", "taskId": "<uuid>", "minEvidence": 3, "dailyProposals": 1, "oversightPaths": ["scripts/deploy", "packages/kernel/migrations"]}
+{"enabled": true, "sessionId": "<uuid>", "taskId": "<uuid>", "minEvidence": 1, "dailyProposals": 1, "oversightPaths": ["scripts/deploy", "packages/kernel/migrations"]}
 ```
 
 `oversightPaths` は repo 相対の literal prefix のみ（絶対パス・`..`・空セグメントは起動時に拒否）。採用（adopt）時に候補がこれらの配下またはテストファイルを変更していれば、`http.trials.adopt_oversight` を warn し、自発チャットの本文に「チェック/テストを変更しています N 件。別途レビューが必要」を付ける。ブロックはしない（人間の判断を残す）。
 
 - `taskId` は**人間が作った standing task**（明示 goal の子）。ループは task を作りません
-- 対象は「staged hypothesis で、distinct な `run` evidence が `minEvidence` 件以上、まだ trial proposal が無いもの」
+- 対象は**全セッション**の staged hypothesis のうち、distinct な `run` evidence が `minEvidence` 件以上で、まだ trial proposal が無いもの。提案は `sessionId` 側に作られます
+- P2 の自動観測は 1 失敗 = 1 hypothesis + 1 run evidence なので、`minEvidence` を 2 以上にすると人間が evidence を足すまで提案は永遠に出ません（`loop` の evidence attach は人間 HTTP のみ）。`1` なら未提案 hypothesis を毎日 1 件ずつ消化します
 - 提案は `operation="investigate"`, `readOnlyMode=true`, `literalPatchPaths=[]`（pathless read）で、objective は `仮説の検証: <statement>`
 - 期限は 3 時間、caps/checks は凍結 profile から
-- 冪等キーは hypothesis id（再実行しても重複しない）
+- 冪等キーは hypothesis id。`trial_proposals.hypothesis_id` に提案元を記録し、同じ hypothesis は再度提案しません
 - `paused` / `learning_frozen` の間は作らない。日次 1 回（UTC）
 - 承認は従来どおり `/trials` の人間クリック。grant はループから発行しません
 

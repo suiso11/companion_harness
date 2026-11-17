@@ -326,7 +326,6 @@ export function createReflectService(
     const day = utcDayStart(now());
     if (day === planDay) return;
     const eligible = repo.listEligibleLoopHypotheses(
-      cfg.sessionId,
       cfg.minEvidence,
       cfg.dailyProposals,
     );
@@ -353,7 +352,13 @@ export function createReflectService(
             },
             requiredChecks: [...profile.mandatoryChecks],
           },
-          { key: hypothesis.id, profile, workspaceAlias: alias, now: now() },
+          {
+            key: hypothesis.id,
+            profile,
+            workspaceAlias: alias,
+            hypothesisId: hypothesis.id,
+            now: now(),
+          },
         );
         log("reflect.proposed_trial", { hypothesisId: hypothesis.id });
       } catch {

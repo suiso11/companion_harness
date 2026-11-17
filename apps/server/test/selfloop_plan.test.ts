@@ -41,7 +41,7 @@ describe("self loop config", () => {
           taskId: randomUUID(),
         }),
       ),
-    ).toMatchObject({ enabled: true, minEvidence: 3, dailyProposals: 1 });
+    ).toMatchObject({ enabled: true, minEvidence: 1, dailyProposals: 1 });
     expect(() =>
       parseSelfLoopConfig(
         JSON.stringify({
@@ -110,11 +110,9 @@ describe("oversight touches", () => {
   });
 });
 
-async function seed(repo: KernelRepository): Promise<{
-  sessionId: string;
-  taskId: string;
-  hypothesisId: string;
-}> {
+async function seedLoopSession(
+  repo: KernelRepository,
+): Promise<{ sessionId: string; taskId: string }> {
   const control = repo.getAutonomyControlState();
   repo.setAutonomyControlState(
     { paused: false, expectedVersion: control.version },
@@ -144,6 +142,48 @@ async function seed(repo: KernelRepository): Promise<{
     },
     { key: randomUUID(), now: T0 + 2 },
   );
+  return { sessionId, taskId: task.body.id };
+}
+
+/** One failed run in its own session plus a staged hypothesis + run evidence. */
+async function seedFailedHypothesis(
+  repo: KernelRepository,
+  statement: string,
+  at: number,
+): Promise<{ sessionId: string; hypothesisId: string }> {
+  const sessionId = repo.createSession({ key: randomUUID(), now: at }).body
+    .sessionId as string;
+  const posted = repo.postMessage(
+    sessionId,
+    { text: "もっと短く答えて" },
+    { key: randomUUID(), now: at + 1 },
+  );
+  // postMessage's response union loses the run member; a user_text post always
+  // starts a run.
+  const postedBody = posted.body as { run: { id: string } };
+  const runId = postedBody.run.id;
+  repo.startRun(runId, { now: at + 2 });
+  repo.failRun(runId, "execution_failed", { now: at + 3 });
+  const hypothesis = repo.proposeLearningHypothesisFromModel(
+    runId,
+    { scope: "default", kind: "hypothesis", statement },
+    { key: randomUUID(), now: at + 4 },
+  );
+  repo.attachLearningEvidence(
+    sessionId,
+    hypothesis.body.id,
+    { polarity: "supports", sourceKind: "run", sourceId: runId },
+    { key: randomUUID(), now: at + 5 },
+  );
+  return { sessionId, hypothesisId: hypothesis.body.id };
+}
+
+async function seed(repo: KernelRepository): Promise<{
+  sessionId: string;
+  taskId: string;
+  hypothesisId: string;
+}> {
+  const { sessionId, taskId } = await seedLoopSession(repo);
   // Three settled failed runs, then one staged hypothesis anchored to each.
   let lastRunId = "";
   for (let i = 0; i < 3; i += 1) {
@@ -171,7 +211,7 @@ async function seed(repo: KernelRepository): Promise<{
       { key: randomUUID(), now: T0 + 101 },
     );
   }
-  return { sessionId, taskId: task.body.id, hypothesisId: hypothesis.body.id };
+  return { sessionId, taskId, hypothesisId: hypothesis.body.id };
 }
 
 describe("daily plan", () => {
@@ -214,6 +254,52 @@ describe("daily plan", () => {
       expect(repo.listTrials(sessionId).items).toHaveLength(1);
       expect(hypothesisId).toBeTruthy();
       await service.stop();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("investigates hypotheses from other sessions, one per day", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    try {
+      const repo = createKernelRepository(handle.raw);
+      const { sessionId, taskId } = await seedLoopSession(repo);
+      // Failed runs land in their own sessions; the loop stages elsewhere.
+      await seedFailedHypothesis(repo, "first behaviour", T0 + 20);
+      await seedFailedHypothesis(repo, "second behaviour", T0 + 40);
+      const make = (at: number) =>
+        createReflectService({
+          repo,
+          gateway: null,
+          model: "test",
+          now: () => at,
+          selfLoop: {
+            enabled: true,
+            sessionId,
+            taskId,
+            minEvidence: 1,
+            dailyProposals: 1,
+            oversightPaths: [],
+          },
+          trialProfile: PROFILE,
+          workspaceAlias: "ws",
+        });
+      const dayOne = make(T0 + 200);
+      await dayOne.plan();
+      expect(repo.listTrials(sessionId).items).toMatchObject([
+        { objective: expect.stringContaining("first behaviour") },
+      ]);
+      await dayOne.stop();
+
+      // The linked hypothesis is never proposed again: day two takes the next.
+      const dayTwo = make(T0 + 86_400_000 + 200);
+      await dayTwo.plan();
+      expect(repo.listTrials(sessionId).items).toMatchObject([
+        { objective: expect.stringContaining("second behaviour") },
+        { objective: expect.stringContaining("first behaviour") },
+      ]);
+      await dayTwo.stop();
     } finally {
       closeKernelDatabase(handle);
     }
