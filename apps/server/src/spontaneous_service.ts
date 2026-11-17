@@ -25,6 +25,7 @@ import {
   type BackgroundResourceGate,
 } from "./background_resource.js";
 import type { SpeechConfig } from "./config.js";
+import type { DiaryEntry, DiaryStore } from "./diary_store.js";
 import type { ServerLogger } from "./logger.js";
 import {
   callMemoryCli,
@@ -53,12 +54,17 @@ export const SPONTANEOUS_MAX_CONTEXT_CP = 3000;
 const SPEECH_FEEDBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Retry cadence while a pass is blocked BEFORE it spends its interval. */
 const SPONTANEOUS_RETRY_MS = 10 * 60_000;
+/** Boot catch-up: the day may have rolled over while the server was down. */
+const DIARY_BOOT_DELAY_MS = 120_000;
+/** The diary is written at 00:05 local, once per finished day. */
+const DIARY_TARGET_MINUTE = 5;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface SpontaneousServiceDeps {
   readonly repo: KernelRepository;
   readonly store: ThoughtStore;
+  readonly diary: DiaryStore;
   readonly config: SpeechConfig;
   readonly memory: MemoryCliAddress;
   readonly scope: string;
@@ -70,6 +76,8 @@ export interface SpontaneousServiceDeps {
     "tryAcquire" | "release" | "closed"
   > | null;
   readonly timeZone: string;
+  /** Main-conversation persona instructions (null when unset). */
+  readonly personaInstructions?: () => string | null;
   readonly logger?: ServerLogger;
   /** Most recently viewed chat session (in-memory presence), when available. */
   readonly presence?: { active(at?: number): string | null };
@@ -91,6 +99,8 @@ export interface SpontaneousService {
   runThoughtPass(): Promise<"created" | "skipped" | "error">;
   /** One bounded speech pass (also used by tests). */
   runSpeechPass(): Promise<"spoken" | "dry-run" | "skipped" | "error">;
+  /** One bounded diary pass (also used by tests). */
+  runDiaryPass(): Promise<"written" | "skipped" | "busy" | "error">;
 }
 
 interface MemoryItem {
@@ -152,6 +162,16 @@ Return ONLY strict JSON:
 {"kind":"survey"|"question"|"hypothesis"|"observation","body":"...","topics":["..."]}
 topics: 0-3 short general-category nouns.`;
 
+const DIARY_SYSTEM = `You write the companion's own private diary entry, in Japanese.
+Write in first person about the supplied day, based ONLY on that day's conversation and memories.
+Rules:
+- 20-800 characters, 2-4 short sentences.
+- Never write "ユーザーは", IDs, URLs, or analysis jargon.
+- Do not address the user: this is a diary, not a message.
+- Invent nothing that is not present in the conversation or memories.
+Return ONLY strict JSON:
+{"entry":"..."}`;
+
 const SPEECH_SYSTEM = `You are the companion speaking first, in Japanese.
 Using the supplied private note, sources, and recent conversation, either stay silent or write ONE natural message.
 The message must contain a concrete observation and exactly ONE open question that deepens the user's own experience.
@@ -170,6 +190,7 @@ export function createSpontaneousService(
   const {
     repo,
     store,
+    diary,
     config,
     memory,
     scope,
@@ -193,6 +214,7 @@ export function createSpontaneousService(
   let stopped = false;
   let thoughtTimer: ReturnType<typeof setTimeout> | undefined;
   let speechTimer: ReturnType<typeof setTimeout> | undefined;
+  let diaryTimer: ReturnType<typeof setTimeout> | undefined;
   // Last wall time of a pass that actually acquired the shared gate. A pass
   // blocked before admission must not spend the whole interval: the loops
   // retry it on the short tick instead of losing a day.
@@ -233,22 +255,43 @@ export function createSpontaneousService(
     controllers.delete(controller);
   }
 
+  function minutesOfDayAt(at: number): number {
+    if (deps.minutesOfDay) return deps.minutesOfDay(at);
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(at));
+    const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+    const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+    return h * 60 + m;
+  }
+
+  /** Local calendar day (YYYY-MM-DD) in the configured time zone. */
+  function localDay(at: number): string {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(at));
+    const part = (type: string): string =>
+      parts.find((p) => p.type === type)?.value ?? "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+  }
+
+  /** Previous calendar day via UTC date arithmetic (not now - 24h). */
+  function previousDay(day: string): string {
+    const [year, month, date] = day.split("-").map(Number);
+    const utc = Date.UTC(year ?? 0, (month ?? 1) - 1, date ?? 1);
+    return new Date(utc - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+
   function inQuietHours(at: number): boolean {
     const hours = config.quietHours;
     if (hours === null) return false;
-    const minute = deps.minutesOfDay
-      ? deps.minutesOfDay(at)
-      : (() => {
-          const parts = new Intl.DateTimeFormat("en-GB", {
-            timeZone,
-            hour: "2-digit",
-            minute: "2-digit",
-            hourCycle: "h23",
-          }).formatToParts(new Date(at));
-          const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-          const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
-          return h * 60 + m;
-        })();
+    const minute = minutesOfDayAt(at);
     const [sh, sm] = hours.start.split(":").map(Number);
     const [eh, em] = hours.end.split(":").map(Number);
     const start = (sh ?? 0) * 60 + (sm ?? 0);
@@ -351,6 +394,42 @@ export function createSpontaneousService(
       until = lastCreatedAt;
     }
     return out;
+  }
+
+  /**
+   * One day's conversation across up to three recent sessions. Returns null
+   * when the day has no user turn at all: there is nothing to diary about.
+   */
+  function dayConversation(day: string): string | null {
+    const lines: string[] = [];
+    let userTurns = 0;
+    try {
+      for (const session of repo
+        .listSessions({ limit: 50 })
+        .sessions.slice(0, 3)) {
+        const history = repo.getHistory(session.id, { limit: 50 });
+        for (const item of history.items) {
+          if (item.kind !== "user_text") continue;
+          if (localDay(item.createdAt) !== day) continue;
+          const user = boundedString(item.text, 1, 800);
+          if (user === null) continue;
+          userTurns += 1;
+          lines.push(`User: ${user}`);
+          const result = item.selectedRun?.result;
+          if (isRecord(result)) {
+            const answer = boundedString(result.text, 1, 800);
+            if (answer !== null) lines.push(`Assistant: ${answer}`);
+          }
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (userTurns === 0) return null;
+    const context = lines.join("\n");
+    return cpLength(context) > SPONTANEOUS_MAX_CONTEXT_CP
+      ? Array.from(context).slice(0, SPONTANEOUS_MAX_CONTEXT_CP).join("")
+      : context;
   }
 
   function recentContext(sessionId: string): string {
@@ -663,6 +742,89 @@ export function createSpontaneousService(
     return message;
   }
 
+  async function runDiaryPass(): Promise<
+    "written" | "skipped" | "busy" | "error"
+  > {
+    if (!started || stopped || !config.enabled) return "skipped";
+    const at = now();
+    const day = previousDay(localDay(at));
+    let existing: DiaryEntry | null;
+    try {
+      existing = diary.get(day);
+    } catch {
+      log("warn", "diary.failed");
+      return "error";
+    }
+    if (existing !== null) return "skipped";
+    if (background?.closed) return "skipped";
+    const lease = background?.tryAcquire(BACKGROUND_OWNER_SPONTANEOUS) ?? null;
+    if (background !== null && lease === null) return "busy";
+    const controller = newController();
+    try {
+      const conversation = dayConversation(day);
+      if (conversation === null) {
+        log("info", "diary.skipped_no_conversation");
+        return "skipped";
+      }
+      let memories: MemoryItem[] = [];
+      try {
+        memories = (await memoryItems()).slice(0, 10);
+      } catch {
+        // Memories are optional context; the day's conversation is enough.
+      }
+      const personaRaw = deps.personaInstructions?.() ?? null;
+      const persona =
+        personaRaw === null
+          ? ""
+          : Array.from(personaRaw).slice(0, 2000).join("").trim();
+      const system =
+        persona.length === 0
+          ? DIARY_SYSTEM
+          : `${DIARY_SYSTEM}\n\nあなたの人物設定:\n${persona}`;
+      const memoryLines = memories
+        .map((memory, index) => `m${index} [${memory.kind}] ${memory.snippet}`)
+        .join("\n");
+      const parsed = await chatJson(
+        system,
+        `Day: ${day}\nMemories:\n${memoryLines || "(none)"}\nConversation:\n${conversation}`,
+        1200,
+        controller,
+      );
+      if (parsed === null) {
+        // Transport failure and unparseable model output cannot produce an
+        // entry; retry on the short tick like any other failed pass.
+        log("warn", "diary.failed");
+        return "error";
+      }
+      // Local models answer concise diaries: accept 20 cp (a short but
+      // complete entry) up to 1200 cp.
+      const entry = boundedString(parsed.entry, 20, 1200);
+      if (
+        entry === null ||
+        /https?:\/\//i.test(entry) ||
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(
+          entry,
+        )
+      ) {
+        log("info", "diary.skipped_invalid");
+        return "skipped";
+      }
+      if (config.mode === "dry-run") {
+        log("info", "diary.dry_run", { chars: cpLength(entry) });
+        return "written";
+      }
+      if (diary.insert(day, entry, now()) === null) return "skipped";
+      log("info", "diary.written", { chars: cpLength(entry) });
+      return "written";
+    } catch {
+      log("warn", "diary.failed");
+      return "error";
+    } finally {
+      releaseController(controller);
+      if (lease !== null) background?.release(lease);
+    }
+  }
+
   async function runSpeechPass(): Promise<
     "spoken" | "dry-run" | "skipped" | "error"
   > {
@@ -766,6 +928,32 @@ export function createSpontaneousService(
     thoughtTimer.unref?.();
   }
 
+  /** Delay to the next 00:05 local; an exact 00:05 hit waits a full day. */
+  function nextDiaryDelay(at: number): number {
+    const until =
+      (DIARY_TARGET_MINUTE - (minutesOfDayAt(at) % 1440) + 1440) % 1440;
+    return (until === 0 ? 1440 : until) * 60_000;
+  }
+
+  function scheduleDiary(delay: number): void {
+    diaryTimer = setTimeoutFn(() => {
+      diaryTimer = undefined;
+      void (async () => {
+        let next = SPONTANEOUS_RETRY_MS;
+        try {
+          const result = await runDiaryPass();
+          if (result !== "busy" && result !== "error") {
+            next = nextDiaryDelay(now());
+          }
+        } catch {
+          // Retry on the short tick: the pass never rejects on its own.
+        }
+        if (started && !stopped) scheduleDiary(next);
+      })();
+    }, delay);
+    diaryTimer.unref?.();
+  }
+
   function scheduleSpeech(delay: number): void {
     speechTimer = setTimeoutFn(() => {
       speechTimer = undefined;
@@ -787,6 +975,8 @@ export function createSpontaneousService(
       const lead = Math.min(300_000, config.thoughtIntervalMs);
       scheduleThought(lead);
       scheduleSpeech(lead + 60_000);
+      // Boot catch-up: a rollover during downtime must not lose the entry.
+      scheduleDiary(DIARY_BOOT_DELAY_MS);
     },
     async stop() {
       stopped = true;
@@ -799,9 +989,14 @@ export function createSpontaneousService(
         clearTimeoutFn(speechTimer);
         speechTimer = undefined;
       }
+      if (diaryTimer !== undefined) {
+        clearTimeoutFn(diaryTimer);
+        diaryTimer = undefined;
+      }
       abortAll();
     },
     runThoughtPass,
     runSpeechPass,
+    runDiaryPass,
   };
 }

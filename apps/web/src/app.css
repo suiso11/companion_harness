@@ -1406,6 +1406,35 @@ button[data-action-evidence="before"] {
   font-size: 0.7rem;
   color: var(--muted-foreground);
 }
+/* Episodic reference view: one expandable row per episode. */
+#memory-episodes {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.5rem;
+}
+#memory-episodes li {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+#memory-episodes .memory-episode-summary {
+  display: block;
+  color: var(--muted-foreground);
+}
+.memory-episode-windows {
+  padding-left: 1rem;
+}
+.memory-episode-windows ul {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.15rem;
+}
+#memory-episodes-more,
+#memory-episode-windows-more {
+  margin: 0.5rem 0;
+}
 #memory-list-all {
   display: block;
   margin: 0.25rem auto 0.5rem;

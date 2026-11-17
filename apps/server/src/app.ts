@@ -45,6 +45,10 @@ import {
   LearningHypothesisTransitionRequestSchema,
   MAX_TRANSCRIBE_AUDIO_BYTES,
   MemoryDetailResponseSchema,
+  MemoryEpisodesQuerySchema,
+  MemoryEpisodesResponseSchema,
+  MemoryEpisodeWindowsQuerySchema,
+  MemoryEpisodeWindowsResponseSchema,
   MemoryGraphGlobalQuerySchema,
   MemoryGraphLocalQuerySchema,
   MemoryGraphResponseSchema,
@@ -160,6 +164,7 @@ import {
 } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
+import type { DiaryStore } from "./diary_store.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
   createMonitorSampler,
@@ -246,6 +251,7 @@ const FEATURE_UI_PATHS: ReadonlySet<string> = new Set([
   "/pet",
   "/chats",
   "/personas",
+  "/diary",
 ]);
 
 /**
@@ -285,11 +291,6 @@ export interface MemoryGraphHttpResult {
     readonly kind: string;
     readonly topics?: readonly string[] | undefined;
     readonly createdAt?: string | undefined;
-    readonly episode: {
-      readonly kind: "session" | "doc" | "day";
-      readonly episodeKey: string;
-      readonly level: "window" | "episode";
-    } | null;
   }>;
   readonly edges: ReadonlyArray<{
     readonly from: string;
@@ -387,6 +388,33 @@ export interface MemoryHttpPort {
       signal?: AbortSignal;
     },
   ): Promise<MemoryGraphHttpResult>;
+  /** Read-only session episode summaries (no raw record/event ids). */
+  getMemoryEpisodes(input: { limit?: number; cursor?: string }): Promise<{
+    items: ReadonlyArray<{
+      episodeKey: string;
+      startAt: string;
+      endAt: string;
+      eventCount: number;
+      summarySnippet: string;
+      summaryTruncated: boolean;
+      stale: boolean;
+    }>;
+    nextCursor: string | null;
+  }>;
+  /** Read-only bounded window summaries for one session episode. */
+  getMemoryEpisodeWindows(input: {
+    episodeKey: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{
+    items: ReadonlyArray<{
+      spanStart: number;
+      spanEnd: number;
+      snippet: string;
+      truncated: boolean;
+    }>;
+    nextCursor: string | null;
+  }>;
   stageMemoryMutation(input: {
     sessionId: string;
     runId: string;
@@ -512,6 +540,12 @@ export interface CreateAppDeps {
    * `/memory/*` route answers 404 without touching the repository.
    */
   memory?: MemoryHttpPort;
+  /**
+   * Companion diary store. Null/absent keeps GET /api/diary at a fixed 404;
+   * bootstrap supplies it unconditionally so reads work even when
+   * spontaneous speech is disabled.
+   */
+  diary?: DiaryStore | null;
   /** In-memory viewed-session registry for spontaneous speech targeting. */
   sessionPresence?: SessionPresence;
   /**
@@ -1571,6 +1605,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const actionsEnabled = deps.actionsEnabled === true;
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
+  const diary = deps.diary ?? null;
   const learningStore = deps.learningStore ?? null;
   const personaChat = deps.personaChat;
   const providerKeys = deps.providerKeys ?? null;
@@ -3312,6 +3347,20 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     return /^m[1-9][0-9]*$/.test(value);
   }
 
+  /** Manual episode page limit: default when omitted, null when 1..50 fails. */
+  function episodeLimit(
+    raw: string | undefined,
+    fallback: number,
+  ): number | null {
+    if (raw === undefined) {
+      return fallback;
+    }
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 1 && value <= 50
+      ? value
+      : null;
+  }
+
   /** Fixed graph failure mapping (never raw errors). */
   function memoryGraphErrorCode(
     error: unknown,
@@ -3341,6 +3390,34 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
     return "service_unavailable";
   }
+
+  // Companion diary: exactly one entry per local calendar day, newest day
+  // first. Bounded read only; writes happen in the background service.
+  app.get("/api/diary", (c) => {
+    if (diary === null) {
+      return c.json(
+        {
+          error: { code: "diary_unavailable", message: "diary is disabled" },
+        },
+        404,
+      );
+    }
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const rawLimit = query.values.limit;
+    const limit = rawLimit === undefined ? 30 : Number(rawLimit);
+    if (
+      (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit)) ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      return validationError(c);
+    }
+    return c.json({ items: diary.list(limit) }, 200);
+  });
 
   /* ---------------- background memory activity (read-only) ---------- */
   // Browser view of the idle maintenance passes the memory service already
@@ -3574,6 +3651,96 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
         nodes: out.nodes.map((node) => ({ ...node })),
         edges: out.edges.map((edge) => ({ ...edge })),
         truncated: out.truncated,
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return memoryRouteError(c, memoryGraphErrorCode(error));
+    }
+  });
+
+  // Session episode list (read-only reference layer): bounded summaries
+  // from remind `episode.list`. Raw record/event ids never cross; the
+  // opaque episode key is the only identifier. Strict query only.
+  app.get("/api/sessions/:sessionId/memory/episodes", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["limit", "cursor"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = MemoryEpisodesQuerySchema.safeParse(query.values);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    const limit = episodeLimit(parsed.data.limit, 20);
+    if (limit === null) {
+      return validationError(c);
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    try {
+      const out = await memory.getMemoryEpisodes({
+        limit,
+        ...(parsed.data.cursor !== undefined
+          ? { cursor: parsed.data.cursor }
+          : {}),
+      });
+      const body = MemoryEpisodesResponseSchema.parse({
+        items: out.items.map((item) => ({ ...item })),
+        nextCursor: out.nextCursor,
+      });
+      return c.json(body, 200);
+    } catch (error) {
+      return memoryRouteError(c, memoryGraphErrorCode(error));
+    }
+  });
+
+  // One episode's bounded window summaries (read-only): span ranges and
+  // snippets only, never the underlying record/event ids. Strict query.
+  app.get("/api/sessions/:sessionId/memory/episodes/windows", async (c) => {
+    if (memory === null) {
+      return memoryUnavailable(c);
+    }
+    const session = requireUuid(c, c.req.param("sessionId"), "sessionId");
+    if ("response" in session) {
+      return session.response;
+    }
+    const query = strictQuery(c, ["episodeKey", "limit", "cursor"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = MemoryEpisodeWindowsQuerySchema.safeParse(query.values);
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    const limit = episodeLimit(parsed.data.limit, 50);
+    if (limit === null) {
+      return validationError(c);
+    }
+    try {
+      repo.getSession(session.id);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+    try {
+      const out = await memory.getMemoryEpisodeWindows({
+        episodeKey: parsed.data.episodeKey,
+        limit,
+        ...(parsed.data.cursor !== undefined
+          ? { cursor: parsed.data.cursor }
+          : {}),
+      });
+      const body = MemoryEpisodeWindowsResponseSchema.parse({
+        items: out.items.map((item) => ({ ...item })),
+        nextCursor: out.nextCursor,
       });
       return c.json(body, 200);
     } catch (error) {

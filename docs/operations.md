@@ -6492,6 +6492,39 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - No UI panel for the journal yet; it is internal. Raw conversation originals
   stay in remind (per-speaker chunks); thoughts never write remind memory.
 
+## Companion diary (2026-11-17, one entry per local day)
+
+- The companion writes exactly ONE first-person diary entry per local
+  calendar day (`COMPANION_TIME_ZONE`, default anchor Asia/Tokyo in the
+  production launcher). Entries live in the private `companion_diary` table
+  (migration 0052, schema version 52; `day` is the primary key, so a second
+  write for the same day is a no-op). This is NOT user memory: it never
+  enters remind, and the model never writes it directly.
+- Runs as a third loop in `SpontaneousService`, so it needs
+  `COMPANION_SPEECH_JSON.enabled` (and the memory config that service already
+  requires). `mode: "dry-run"` logs `diary.dry_run` with the character count
+  and stores nothing; `live` inserts.
+- Target day is always the PREVIOUS completed local day. The loop first
+  fires 120s after start (boot catch-up: a rollover during downtime must not
+  lose the entry) and afterwards at 00:05 local. A pass blocked by the shared
+  background gate (`busy`) or a gateway/store failure (`error`) retries on
+  the 10-minute tick; any other outcome re-arms at the next 00:05. Days the
+  server was down are never backfilled.
+- Context is bounded: the target day's `user_text` turns plus their selected
+  assistant answers from at most 3 recent visible sessions (50 turns per
+  session, 3000 cp total) and up to 10 active `normal`-sensitivity memories.
+  The main-persona instructions (when set) are appended to the diary system
+  prompt. A day with no user turn skips with `diary.skipped_no_conversation`
+  and no model call.
+- Output validation: strict JSON `{"entry":"..."}`, 20..1200 code points, no
+  URLs and no UUIDs; failures log `diary.skipped_invalid` and spend the day
+  (the same paced-skip rule as the thought pass). Success logs
+  `diary.written` with the character count.
+- Read surface: `GET /api/diary?limit=1..100` (default 30) returns
+  `{items:[{day, body, createdAt}]}` newest day first; `/diary` renders the
+  same list (Markdown body, one fetch on mount, no polling). The API answers
+  a fixed 404 `diary_unavailable` only when no store is wired.
+
 ## Session clarity and spontaneous-speech targeting (2026-10-31)
 
 - `GET /api/sessions?limit=1..50` returns bounded, derived summaries:

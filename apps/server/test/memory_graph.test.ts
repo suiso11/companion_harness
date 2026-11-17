@@ -44,11 +44,6 @@ interface RawNode {
   label: string;
   status: "active" | "retired";
   kind: string;
-  episode: {
-    kind: "session" | "doc" | "day";
-    episodeKey: string;
-    level: "window" | "episode";
-  } | null;
   /** Real graph.page adjacency shape (`danglingOut` counts omitted refs). */
   out?: Array<{ to: string; kind: "related" | "consolidation" }>;
   danglingOut?: number;
@@ -88,10 +83,6 @@ function node(
     label: `label-${id.replace("rec-", "")}`,
     status,
     kind: "user_fact",
-    episode:
-      id === "rec-b"
-        ? { kind: "day", episodeKey: "2026-10-21", level: "window" }
-        : null,
     ...(out !== undefined ? { out, danglingOut: 0 } : {}),
   };
 }
@@ -244,11 +235,6 @@ describe("global graph: stable opaque handles", () => {
       expect(first.nodes.map((n) => n.handle)).toEqual(["m1", "m2"]);
       expect(first.edges).toEqual([{ from: "m1", to: "m2", kind: "related" }]);
       expect(first.truncated).toBe(false);
-      expect(first.nodes[1]?.episode).toEqual({
-        kind: "day",
-        episodeKey: "2026-10-21",
-        level: "window",
-      });
       expect(first.version).toBe("o1:r2.2:a3:e0.0.");
       expect(JSON.stringify(first)).not.toContain("rec-a");
       expect(JSON.stringify(first)).not.toContain("rec-b");
@@ -356,17 +342,15 @@ describe("global graph: stable opaque handles", () => {
           label: "bad",
           status: "active",
           kind: "user_fact",
-          episode: null,
         },
         {
           id: "rec-c",
           label: "bad",
           status: "archived",
           kind: "user_fact",
-          episode: null,
         },
-        { id: "rec-d", status: "active", kind: "user_fact", episode: null },
-        { id: "rec-e", label: "bad", status: "active", kind: 7, episode: null },
+        { id: "rec-d", status: "active", kind: "user_fact" },
+        { id: "rec-e", label: "bad", status: "active", kind: 7 },
       ] as unknown as RawNode[];
       const service = makeService(f.repo, makeCli(graph));
       const { sessionId, runId } = completeRun(f.repo);
