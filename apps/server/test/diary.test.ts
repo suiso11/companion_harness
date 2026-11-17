@@ -12,6 +12,7 @@ import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { SpeechConfig } from "../src/config.js";
+import { createDayActivityStore } from "../src/day_activity.js";
 import { createDiaryStore } from "../src/diary_store.js";
 import {
   createSpontaneousService,
@@ -96,6 +97,7 @@ async function setup(
     repo,
     store,
     diary,
+    activity: createDayActivityStore(handle.raw),
     config: config(),
     memory: {
       executable: "/bin/true",
@@ -210,6 +212,45 @@ describe("diary store", () => {
   });
 });
 
+describe("diary listMonth", () => {
+  it("returns one month ascending and rejects malformed months", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    const store = createDiaryStore(handle.raw);
+    try {
+      for (const day of [
+        "2026-11-30",
+        "2026-12-01",
+        "2026-12-31",
+        "2027-01-01",
+        "2026-12-15",
+      ]) {
+        store.insert(day, `entry ${day}`, NOW);
+      }
+      expect(store.listMonth("2026-12").map((entry) => entry.day)).toEqual([
+        "2026-12-01",
+        "2026-12-15",
+        "2026-12-31",
+      ]);
+      expect(store.listMonth("2026-11").map((entry) => entry.day)).toEqual([
+        "2026-11-30",
+      ]);
+      expect(store.listMonth("2026-10")).toEqual([]);
+      for (const bad of [
+        "2026-13",
+        "2026-00",
+        "2026-1",
+        "26-12",
+        "2026-12-01",
+      ]) {
+        expect(() => store.listMonth(bad)).toThrow();
+      }
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+});
+
 describe("diary pass", () => {
   it("writes exactly one entry for the previous local day", async () => {
     const { handle, diary, service } = await setup({
@@ -231,7 +272,7 @@ describe("diary pass", () => {
 
   it("accepts a concise entry the local model actually returns", async () => {
     const short =
-      "朝から散歩をして、駅前の新しいカフェで本を読んだ。夕方は早めに寝た。";
+      "### やったこと\n朝から散歩をして、駅前のカフェで本を読んだ。\n### コンパニオンの動き\n特になし\n### タスク\n特になし";
     const { handle, diary, service } = await setup({
       gateway: gatewayWith([JSON.stringify({ entry: short })]),
     });
@@ -239,6 +280,79 @@ describe("diary pass", () => {
       service.start();
       expect(await service.runDiaryPass()).toBe("written");
       expect(diary.get(TARGET_DAY)?.body).toBe(short);
+    } finally {
+      close(handle, service);
+    }
+  });
+
+  it("puts the three headings and the day's activity in the prompt", async () => {
+    const requests: Array<{
+      messages: Array<{ role: string; content: string }>;
+      maxOutputTokens?: number;
+    }> = [];
+    const gateway: ModelGateway = {
+      ...gatewayWith([ENTRY]),
+      chat: (async (request: (typeof requests)[number]) => {
+        requests.push(request);
+        return { text: ENTRY, toolCalls: [], stopReason: "stop" as const };
+      }) as unknown as ModelGateway["chat"],
+    };
+    const { handle, repo, service } = await setup({ gateway });
+    try {
+      const [session] = repo.listSessions({ limit: 1 }).sessions;
+      const sessionId = session?.id ?? "";
+      repo.postCompanionMessage(sessionId, "お散歩どうだった？", {
+        now: Date.parse(`${TARGET_DAY}T13:00:00Z`),
+      });
+      handle.raw
+        .prepare(
+          `INSERT INTO autonomy_tasks (id, session_id, scope, title, kind, speaker,
+             status, version, created_at, updated_at)
+           VALUES (?, ?, ?, '牛乳を買う', 'task', 'user', 'open', 1, ?, ?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          sessionId,
+          SCOPE,
+          Date.parse(`${TARGET_DAY}T14:00:00Z`),
+          Date.parse(`${TARGET_DAY}T14:00:00Z`),
+        );
+      service.start();
+      expect(await service.runDiaryPass()).toBe("written");
+      const request = requests[0];
+      expect(request?.maxOutputTokens).toBe(2600);
+      const system = request?.messages[0]?.content ?? "";
+      const headings = [
+        "### やったこと",
+        "### コンパニオンの動き",
+        "### タスク",
+      ];
+      const positions = headings.map((heading) => system.indexOf(heading));
+      expect(positions.every((p) => p >= 0)).toBe(true);
+      expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+      const user = request?.messages[1]?.content ?? "";
+      expect(user).toContain("User conversation:\nUser: 今日は散歩に出かけた");
+      expect(user).toContain("Companion messages:\nお散歩どうだった？");
+      expect(user).toContain("Tasks:\n- [open] task: 牛乳を買う");
+      expect(user).toContain("Actions:\n(none)");
+    } finally {
+      close(handle, service);
+    }
+  });
+
+  it("writes an entry for a day where only the companion acted", async () => {
+    const { handle, repo, diary, service } = await setup(
+      { gateway: gatewayWith([ENTRY]) },
+      Date.parse("2026-09-22T08:00:00Z"),
+    );
+    try {
+      const [session] = repo.listSessions({ limit: 1 }).sessions;
+      repo.postCompanionMessage(session?.id ?? "", "ひとりごと", {
+        now: Date.parse(`${TARGET_DAY}T10:00:00Z`),
+      });
+      service.start();
+      expect(await service.runDiaryPass()).toBe("written");
+      expect(diary.get(TARGET_DAY)).not.toBeNull();
     } finally {
       close(handle, service);
     }
@@ -461,6 +575,65 @@ describe("GET /api/diary", () => {
     }
   });
 
+  it("lists one month ascending and validates month/limit", async () => {
+    const f = await appFixture(true);
+    try {
+      f.diary?.insert("2026-09-21", "b", NOW);
+      f.diary?.insert("2026-09-02", "a", NOW);
+      f.diary?.insert("2026-10-01", "c", NOW);
+      const month = await f.app.request("/api/diary?month=2026-09", {
+        headers: headers(),
+      });
+      expect(month.status).toBe(200);
+      expect(await month.json()).toEqual({
+        items: [
+          { day: "2026-09-02", body: "a", createdAt: NOW },
+          { day: "2026-09-21", body: "b", createdAt: NOW },
+        ],
+      });
+      for (const bad of [
+        "month=2026-13",
+        "month=2026-9",
+        "month=",
+        "month=2026-09&limit=5",
+      ]) {
+        const res = await f.app.request(`/api/diary?${bad}`, {
+          headers: headers(),
+        });
+        expect(res.status).toBe(400);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  it("reads one day or null and rejects malformed days", async () => {
+    const f = await appFixture(true);
+    try {
+      f.diary?.insert("2026-09-21", "b", NOW);
+      const hit = await f.app.request("/api/diary/2026-09-21", {
+        headers: headers(),
+      });
+      expect(hit.status).toBe(200);
+      expect(await hit.json()).toEqual({
+        entry: { day: "2026-09-21", body: "b", createdAt: NOW },
+      });
+      const miss = await f.app.request("/api/diary/2026-09-22", {
+        headers: headers(),
+      });
+      expect(miss.status).toBe(200);
+      expect(await miss.json()).toEqual({ entry: null });
+      for (const bad of ["foo", "2026-02-30", "2026-9-1"]) {
+        const res = await f.app.request(`/api/diary/${bad}`, {
+          headers: headers(),
+        });
+        expect(res.status).toBe(400);
+      }
+    } finally {
+      f.close();
+    }
+  });
+
   it("answers a fixed 404 when the store is absent", async () => {
     const f = await appFixture(false);
     try {
@@ -479,11 +652,18 @@ describe("GET /api/diary", () => {
   it("serves the /diary shell with a trailing slash", async () => {
     const f = await appFixture(true);
     try {
-      for (const path of ["/diary", "/diary/"]) {
+      for (const path of [
+        "/diary",
+        "/diary/",
+        "/diary/2026-11-16",
+        "/diary/2026-11-16/",
+      ]) {
         const response = await f.app.request(path, { headers: headers() });
         expect(response.status).toBe(200);
         expect(response.headers.get("content-type")).toContain("text/html");
       }
+      const junk = await f.app.request("/diary/foo", { headers: headers() });
+      expect(junk.status).toBe(404);
     } finally {
       f.close();
     }

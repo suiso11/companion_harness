@@ -6,11 +6,15 @@
 // The nav is intentionally slim (one link per surface) and Japanese- only
 // (Q7). Chat stays the default route `/`.
 
+import { isRealDay } from "./day_key.js";
+
 export interface FeatureRoute {
   readonly path: string;
   readonly label: string;
   /** Legacy section id mounted by the feature page. */
   readonly sectionId: string;
+  /** `/diary/<YYYY-MM-DD>` only: the requested calendar day. */
+  readonly day?: string;
 }
 
 /** Nav order mirrors the legacy shell order (memory → autonomy → …). */
@@ -92,6 +96,8 @@ export interface NavItem {
   readonly label: string;
 }
 
+const DIARY_DAY_PATH = /^\/diary\/(\d{4}-\d{2}-\d{2})$/;
+
 const ROUTE_BY_PATH = new Map(
   FEATURE_ROUTES.map((route) => [route.path, route] as const),
 );
@@ -136,13 +142,21 @@ export function hiddenSectionIds(active: FeatureRoute): string[] {
   );
 }
 
-/** Normalizes the trailing slash so `/memory/` and `/memory` match. */
+/**
+ * Normalizes the trailing slash so `/memory/` and `/memory` match.
+ * `/diary/<YYYY-MM-DD>` resolves to a copy of the diary route with `day` set.
+ */
 export function routeForPath(pathname: string): FeatureRoute | null {
   const normalized =
     pathname.length > 1 && pathname.endsWith("/")
       ? pathname.slice(0, -1)
       : pathname;
-  return FEATURE_ROUTES.find((route) => route.path === normalized) ?? null;
+  const day = DIARY_DAY_PATH.exec(normalized)?.[1];
+  if (day !== undefined) {
+    const diary = ROUTE_BY_PATH.get("/diary");
+    return diary !== undefined && isRealDay(day) ? { ...diary, day } : null;
+  }
+  return ROUTE_BY_PATH.get(normalized) ?? null;
 }
 
 /**

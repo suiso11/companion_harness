@@ -6513,18 +6513,33 @@ master or a changed guest never leaves a stale digest (trials fail closed).
   server was down are never backfilled.
 - Context is bounded: the target day's `user_text` turns plus their selected
   assistant answers from at most 3 recent visible sessions (50 turns per
-  session, 3000 cp total) and up to 10 active `normal`-sensitivity memories.
-  The main-persona instructions (when set) are appended to the diary system
-  prompt. A day with no user turn skips with `diary.skipped_no_conversation`
-  and no model call.
-- Output validation: strict JSON `{"entry":"..."}`, 20..1200 code points, no
-  URLs and no UUIDs; failures log `diary.skipped_invalid` and spend the day
-  (the same paced-skip rule as the thought pass). Success logs
+  session, 3000 cp total), the day's `companion_text` messages (<=8, 300 cp
+  each), autonomy tasks touched that day plus their task events (<=16 lines,
+  160 cp each), executed-action status counts (<=6 lines), and up to 10
+  active `normal`-sensitivity memories. Activity is read by a server-owned
+  read-only store over a ±2-day UTC window and re-filtered by the configured
+  local day; hidden sessions are excluded. The main-persona instructions
+  (when set) are appended to the diary system prompt.
+- Eligibility: a day is written when ANY of conversation, companion
+  messages, task activity, or actions is non-empty. Only an entirely quiet
+  day logs `diary.skipped_no_activity` with no model call.
+- Output: Markdown with exactly three H3 sections — `### やったこと`
+  (what the user did), `### コンパニオンの動き` (messages it sent, actions it
+  ran, task changes), `### タスク` (done / in progress / next; `特になし`
+  when empty). Validation: strict JSON `{"entry":"..."}`, 40..1800 code
+  points, no URLs and no UUIDs; failures log `diary.skipped_invalid` and
+  spend the day (the same paced-skip rule as the thought pass). Success logs
   `diary.written` with the character count.
-- Read surface: `GET /api/diary?limit=1..100` (default 30) returns
-  `{items:[{day, body, createdAt}]}` newest day first; `/diary` renders the
-  same list (Markdown body, one fetch on mount, no polling). The API answers
-  a fixed 404 `diary_unavailable` only when no store is wired.
+- Read surface: `/diary` is a Sunday-first month calendar (前月/次月, one-line
+  snippet per written day); every day links to `/diary/<YYYY-MM-DD>`, which
+  serves the shell server-side and renders the entry as Markdown. Junk
+  `/diary/<non-date>` stays 404.
+- API: `GET /api/diary?month=YYYY-MM` returns `{items:[{day, body,
+  createdAt}]}` day ascending (<=31 rows); `GET /api/diary?limit=1..100`
+  (default 30) stays newest-first; both together is a 400.
+  `GET /api/diary/<YYYY-MM-DD>` returns `{entry: {...} | null}` and 400 for a
+  malformed day. The API answers a fixed 404 `diary_unavailable` only when no
+  store is wired.
 
 ## Session clarity and spontaneous-speech targeting (2026-10-31)
 
