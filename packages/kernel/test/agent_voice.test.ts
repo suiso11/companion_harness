@@ -359,7 +359,7 @@ describe("agent voice wiring", () => {
       expect(system).toContain("『春琴』");
       expect(system).toContain("京ことば");
       expect(system).toContain("内容は変わらない");
-      expect(system).toContain("あなた自身もその話し方で答え");
+      expect(system).toContain("自然で正しい日本語で答えればよく");
     } finally {
       closeKernelDatabase(handle);
     }
