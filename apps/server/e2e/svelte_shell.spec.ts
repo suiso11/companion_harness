@@ -47,16 +47,17 @@ test("new Svelte shell at / is dark-only", async ({ page }) => {
   const html = await page.content();
   expect(html).toContain('src="/assets/svelte-app.js"');
   expect(html).not.toContain('src="/assets/client.js"');
-  // Computed body background is dark: every channel stays well below
-  // mid-grey (#101418 -> rgb(16, 20, 24)).
-  const bg = await page.evaluate(
-    () => getComputedStyle(document.body).backgroundColor,
-  );
-  const channels = bg.match(/\d+(\.\d+)?/g)?.map(Number) ?? [];
-  expect(channels.length).toBeGreaterThanOrEqual(3);
-  for (const channel of channels.slice(0, 3)) {
-    expect(channel).toBeLessThan(64);
-  }
+  // Computed body background is dark. Chromium serializes an oklch() token
+  // as-is, so read its L (0..1) instead of digits: the hue/chroma digits are
+  // not channels. rgb()/rgba() fall back to max-channel / 255.
+  const lightness = await page.evaluate(() => {
+    const css = getComputedStyle(document.body).backgroundColor;
+    const oklch = css.match(/^oklch\(\s*([\d.]+)/);
+    if (oklch) return Number(oklch[1]);
+    const channels = css.match(/\d+(\.\d+)?/g)?.map(Number) ?? [];
+    return channels.length >= 3 ? Math.max(...channels.slice(0, 3)) / 255 : 1;
+  });
+  expect(lightness).toBeLessThan(0.3);
   await expect(page.locator("#composer-send")).toBeVisible();
 });
 

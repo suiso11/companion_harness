@@ -62,6 +62,7 @@ import {
 // chat entry bundle (build-ui budget) never pays for the audio loop.
 import type { SentenceFeeder } from "./lib/voice_loop.js";
 import type { VoicePlayback, VoiceSession } from "./lib/voice_session.js";
+import { routeForPath } from "./lib/router.js";
 
 // PR-5: the chat shell also hosts the first native feature page. `activePath`
 // keeps the shared nav honest about the current route, and `children` is the
@@ -76,6 +77,11 @@ let {
   /** False for pages that replace the chat surface (persona chat). */
   chatSurface?: boolean;
 } = $props();
+
+// Header shows the mounted surface, not always "会話".
+const pageLabel = $derived(
+  activePath === "/" ? "会話" : (routeForPath(activePath)?.label ?? "会話"),
+);
 
 // PR-1 Svelte chat page (Q1/Q4/Q7/Q8/Q10, PR-1 scope): dark-only, Japanese,
 // same APIs/SSE events + JSON fallback polling as the vanilla client.
@@ -3455,6 +3461,7 @@ function evidenceForTurn(turn: Turn): {
 <div class="shell" class:chat-hidden={!chatSurface}>
   <header class="topbar">
     <div class="topbar-start">
+      <h1>{pageLabel}</h1>
       <button
         id="session-toggle"
         type="button"
@@ -3469,9 +3476,7 @@ function evidenceForTurn(turn: Turn): {
         会話一覧
         <span class="session-count">{sessions.length}</span>
       </button>
-      <h1>会話</h1>
     </div>
-    <FeatureNav {activePath} />
     <div class="sessions">
       <button
         id="session-new"
@@ -3483,6 +3488,8 @@ function evidenceForTurn(turn: Turn): {
       </button>
     </div>
   </header>
+
+  <FeatureNav {activePath} />
 
   {#if sidebarLoaded}
     {#await import("./SessionSidebar.svelte") then module}
@@ -4026,6 +4033,7 @@ function evidenceForTurn(turn: Turn): {
     <textarea
       id="composer-input"
       rows={1}
+      placeholder="メッセージを入力…"
       autocomplete="off"
       bind:value={input}
       bind:this={composerEl}
