@@ -287,12 +287,12 @@ describe("classifyStep (§15.4)", () => {
 });
 
 describe("prompt projection and answer rendering", () => {
-  it("always appends nihongo Lite, and a variant only adds to it", () => {
+  it("puts nihongo Lite last, after any variant", () => {
     expect(composeAgentSystemPrompt()).toBe(
       `${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}`,
     );
     expect(composeAgentSystemPrompt("EXTRA")).toBe(
-      `${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}\n\nEXTRA`,
+      `${AGENT_SYSTEM_PROMPT}\n\nEXTRA\n\n${NIHONGO_LITE}`,
     );
   });
   it("builds a deterministic prompt with fixed system prompt and repair hint", () => {
