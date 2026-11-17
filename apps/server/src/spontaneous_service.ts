@@ -18,7 +18,7 @@
 
 import { searchSearx, type WebSnippet } from "@companion/connector-web";
 import type { WebSearchConfig } from "@companion/contracts";
-import type { KernelRepository } from "@companion/kernel";
+import { type KernelRepository, NIHONGO_LITE } from "@companion/kernel";
 import type { ChatResult, ModelGateway } from "@companion/model-local";
 import {
   BACKGROUND_OWNER_SPONTANEOUS,
@@ -724,7 +724,7 @@ export function createSpontaneousService(
       .map((source) => `${source.title ?? "(no title)"}: ${source.url}`)
       .join("\n");
     const parsed = await chatJson(
-      SPEECH_SYSTEM,
+      `${SPEECH_SYSTEM}\n\n${NIHONGO_LITE}\n\nこの発話は相手への返事ではない。nihongo の規則4（返事の長さ・質問を足さない）は当てず、上の英語の指示（発話に質問をちょうど1つ含める、文字数、JSON形式）を優先する。`,
       `Private note: ${thought.body}\nTopics: ${thought.topics.join(", ") || "(none)"}\nSources:\n${
         sources || "(none)"
       }\nRecent conversation:\n${context || "(none)"}\nMax characters: ${config.maxChars}`,
@@ -777,10 +777,11 @@ export function createSpontaneousService(
         personaRaw === null
           ? ""
           : Array.from(personaRaw).slice(0, 2000).join("").trim();
+      const diarySystem = `${DIARY_SYSTEM}\n\n${NIHONGO_LITE}\n\n上の英語の指示（一人称で書く、20〜800字、宛先を書かない、JSON形式で返す）を nihongo の規則より優先する。`;
       const system =
         persona.length === 0
-          ? DIARY_SYSTEM
-          : `${DIARY_SYSTEM}\n\nあなたの人物設定:\n${persona}`;
+          ? diarySystem
+          : `${diarySystem}\n\nあなたの人物設定:\n${persona}`;
       const memoryLines = memories
         .map((memory, index) => `m${index} [${memory.kind}] ${memory.snippet}`)
         .join("\n");

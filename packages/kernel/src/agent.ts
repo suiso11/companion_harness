@@ -86,6 +86,7 @@ import {
   type ExecutionRecorder,
   redactRawResponseBody,
 } from "./execution_records.js";
+import { NIHONGO_LITE } from "./nihongo.js";
 import type { KernelRepository } from "./repository.js";
 import { type RunStrategy, StrategyError } from "./strategy.js";
 import {
@@ -422,12 +423,14 @@ export function isProjectableHistoryItem(item: {
  * win up to AGENT_MAX_HISTORY_ITEMS) and carries no stored text.
  */
 export function composeAgentSystemPrompt(variant?: string | null): string {
-  // The immutable safety instructions are ALWAYS present. An experimental
-  // prompt variant may add instructions, never replace the base contract.
+  // The immutable safety instructions and the always-on Japanese writing
+  // rules are ALWAYS present. An experimental prompt variant may add
+  // instructions, never replace the base contract.
+  const base = `${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}`;
   if (variant === undefined || variant === null || variant.length === 0) {
-    return AGENT_SYSTEM_PROMPT;
+    return base;
   }
-  return `${AGENT_SYSTEM_PROMPT}\n\n${variant}`;
+  return `${base}\n\n${variant}`;
 }
 
 /** Stable private fingerprint of the prompt/model/tool harness. */
