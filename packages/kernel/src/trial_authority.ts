@@ -561,6 +561,8 @@ export interface StageInput {
   maxOutputBytes: number;
   requiredChecks: string[];
   workspaceAlias: string;
+  /** Host-only loop link: the hypothesis this proposal tests (never HTTP). */
+  hypothesisId?: string;
 }
 export interface ClaimDeps {
   profile: TrialProfileSnapshot;
@@ -810,8 +812,12 @@ export function stageTrialProposal(
       profile.mandatoryChecks,
     );
     const id = generateId();
+    const hypothesisId =
+      input.hypothesisId === undefined
+        ? null
+        : requireId(input.hypothesisId, "hypothesisId");
     db.prepare(
-      "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, status, created_at, workspace_alias, profile_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?, ?)",
+      "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, status, created_at, workspace_alias, profile_json, hypothesis_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?, ?, ?)",
     ).run(
       id,
       session,
@@ -834,6 +840,7 @@ export function stageTrialProposal(
       now,
       input.workspaceAlias,
       JSON.stringify(profile),
+      hypothesisId,
     );
     const body = parseOr(
       () =>

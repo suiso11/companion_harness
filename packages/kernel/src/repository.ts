@@ -6806,9 +6806,12 @@ export function createKernelRepository(
   /**
    * Staged hypotheses with enough DISTINCT host-anchored runs and no trial
    * proposal yet. The loop's only source of "what to investigate".
+   *
+   * Hypotheses are staged in the session whose run failed, while the loop
+   * files its proposal under the operator's configured session, so this
+   * deliberately scans every session.
    */
   function listEligibleLoopHypotheses(
-    sessionId: string,
     minEvidence: number,
     limit = 1,
   ): Array<{ id: string; statement: string; evidenceCount: number }> {
@@ -6820,7 +6823,7 @@ export function createKernelRepository(
          FROM learning_hypotheses h
          JOIN learning_evidence e
            ON e.hypothesis_id = h.id AND e.source_kind = 'run'
-         WHERE h.session_id = ? AND h.staged = 1 AND h.status = 'open'
+         WHERE h.staged = 1 AND h.status = 'open'
            AND NOT EXISTS (
              SELECT 1 FROM trial_proposals p WHERE p.hypothesis_id = h.id
            )
@@ -6829,7 +6832,7 @@ export function createKernelRepository(
          ORDER BY evidenceCount DESC, h.created_at ASC
          LIMIT ?`,
       )
-      .all(sessionId, capped, Math.max(1, Math.min(10, limit))) as Array<{
+      .all(capped, Math.max(1, Math.min(10, limit))) as Array<{
       id: string;
       statement: string;
       evidenceCount: number;
@@ -7886,6 +7889,8 @@ export function createKernelRepository(
     options: AutonomyKeyOptions & {
       profile: TrialProfileSnapshot;
       workspaceAlias: string;
+      /** Host-only: links a loop proposal to the hypothesis it tests. */
+      hypothesisId?: string;
     },
   ): { status: number; body: TrialProposalView; replayed: boolean } {
     const parsed = parseOrValidation(
@@ -7912,6 +7917,9 @@ export function createKernelRepository(
         maxOutputBytes: parsed.objectiveResourceCaps.maxOutputBytes,
         requiredChecks: [...parsed.requiredChecks],
         workspaceAlias: options.workspaceAlias,
+        ...(options.hypothesisId !== undefined
+          ? { hypothesisId: options.hypothesisId }
+          : {}),
       },
       {
         key: options.key,
