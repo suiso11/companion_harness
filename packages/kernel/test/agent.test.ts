@@ -29,6 +29,7 @@ import {
   BUNDLED_SCHEMA_VERSION,
   buildAgentToolDefinitions,
   classifyStep,
+  composeAgentSystemPrompt,
   createAgentStrategy,
   createKernelRepository,
   createToolBroker,
@@ -37,6 +38,7 @@ import {
   type KernelRepository,
   type ModelCallRow,
   migrateKernelDatabase,
+  NIHONGO_LITE,
   openKernelDatabase,
   projectPrompt,
   type RunStrategyContext,
@@ -285,6 +287,14 @@ describe("classifyStep (§15.4)", () => {
 });
 
 describe("prompt projection and answer rendering", () => {
+  it("always appends nihongo Lite, and a variant only adds to it", () => {
+    expect(composeAgentSystemPrompt()).toBe(
+      `${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}`,
+    );
+    expect(composeAgentSystemPrompt("EXTRA")).toBe(
+      `${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}\n\nEXTRA`,
+    );
+  });
   it("builds a deterministic prompt with fixed system prompt and repair hint", () => {
     const tools = buildAgentToolDefinitions([]);
     expect(tools.map((t) => t.name)).toEqual(["answer.submit"]);

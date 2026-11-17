@@ -21,6 +21,7 @@ import {
   type KernelRepository,
   loadBundledVoiceProfile,
   migrateKernelDatabase,
+  NIHONGO_LITE,
   openKernelDatabase,
   type RunStrategyContext,
   voiceProfileFingerprint,
@@ -387,7 +388,7 @@ describe("agent voice wiring", () => {
       const system = calls[0]?.messages.find(
         (message) => message.role === "system",
       )?.content;
-      expect(system).toBe(AGENT_SYSTEM_PROMPT);
+      expect(system).toBe(`${AGENT_SYSTEM_PROMPT}\n\n${NIHONGO_LITE}`);
     } finally {
       closeKernelDatabase(handle);
     }

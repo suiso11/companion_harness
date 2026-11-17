@@ -138,6 +138,7 @@ export {
   classifyStep,
   collectCitedMemoryOrdinals,
   collectStructuralUuids,
+  composeAgentSystemPrompt,
   createAgentStrategy,
   EMPTY_MEMORY_CITATIONS,
   extractGrantCandidates,
@@ -623,6 +624,7 @@ export {
   migrateKernelDatabase,
   setSchemaVersion,
 } from "./migrate.js";
+export { NIHONGO_LITE } from "./nihongo.js";
 export type {
   AckNotificationOptions,
   BuildDeadlineScheduleOptions,
