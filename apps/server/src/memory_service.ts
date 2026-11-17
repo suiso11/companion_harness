@@ -568,6 +568,19 @@ export interface MemoryService {
     },
   ): Promise<MemoryGraphResult>;
   /**
+   * Episodic reference layer (read-only, summaries only): bounded session
+   * episode list and one episode's bounded window summaries. Never heats.
+   */
+  getMemoryEpisodes(input: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<MemoryEpisodesResult>;
+  getMemoryEpisodeWindows(input: {
+    episodeKey: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<MemoryEpisodeWindowsResult>;
+  /**
    * Stage one management mutation through the durable outbox (queued, never
    * applied here). Corrections chain a NEW raw source `event.append`
    * carrying the user's actual replacement, then a real `record.correct`
@@ -640,12 +653,6 @@ export interface MemorySearchResult {
   readonly hits: readonly MemorySearchHit[];
 }
 
-export interface MemoryGraphEpisode {
-  readonly kind: "session" | "doc" | "day";
-  readonly episodeKey: string;
-  readonly level: "window" | "episode";
-}
-
 /** One graph node with an opaque session-scoped handle (never a raw id). */
 export interface MemoryGraphNodeResult {
   readonly handle: string;
@@ -656,7 +663,6 @@ export interface MemoryGraphNodeResult {
   readonly topics?: readonly string[];
   /** Remind record creation instant (canonical ISO), when present. */
   readonly createdAt?: string;
-  readonly episode: MemoryGraphEpisode | null;
 }
 
 export interface MemoryGraphEdgeResult {
@@ -674,7 +680,6 @@ interface RawGraphNode {
   /** Canonical topics; empty when remind omits/returns nothing valid. */
   topics: string[];
   createdAt?: string;
-  episode: MemoryGraphEpisode | null;
 }
 
 interface RawGraphEdge {
@@ -697,6 +702,35 @@ export interface MemoryGraphResult {
   readonly nodes: readonly MemoryGraphNodeResult[];
   readonly edges: readonly MemoryGraphEdgeResult[];
   readonly truncated: boolean;
+}
+
+/** One session episode summary (opaque key + snippet only; no raw ids). */
+export interface MemoryEpisodeItemResult {
+  readonly episodeKey: string;
+  readonly startAt: string;
+  readonly endAt: string;
+  readonly eventCount: number;
+  readonly summarySnippet: string;
+  readonly summaryTruncated: boolean;
+  readonly stale: boolean;
+}
+
+/** One bounded episode window summary (code-point span, no record/event id). */
+export interface MemoryEpisodeWindowResult {
+  readonly spanStart: number;
+  readonly spanEnd: number;
+  readonly snippet: string;
+  readonly truncated: boolean;
+}
+
+export interface MemoryEpisodesResult {
+  readonly items: readonly MemoryEpisodeItemResult[];
+  readonly nextCursor: string | null;
+}
+
+export interface MemoryEpisodeWindowsResult {
+  readonly items: readonly MemoryEpisodeWindowResult[];
+  readonly nextCursor: string | null;
 }
 
 /** Immutable cited snapshot kept distinct from the live current record. */
@@ -5029,33 +5063,6 @@ export function createMemoryService(
     return version;
   }
 
-  function parseGraphEpisode(value: unknown): MemoryGraphEpisode | null {
-    if (value === undefined || value === null) {
-      return null;
-    }
-    if (!isRecord(value)) {
-      return null;
-    }
-    const { kind, episodeKey, level } = value as {
-      kind?: unknown;
-      episodeKey?: unknown;
-      level?: unknown;
-    };
-    if (
-      (kind !== "session" && kind !== "doc" && kind !== "day") ||
-      typeof episodeKey !== "string" ||
-      episodeKey.length < 1 ||
-      episodeKey.length > 256 ||
-      hasControlCode(episodeKey) ||
-      (level !== "window" && level !== "episode")
-    ) {
-      // Episode provenance is optional metadata: an unknown shape is
-      // dropped (never guessed), leaving the rest of the valid node intact.
-      return null;
-    }
-    return { kind, episodeKey, level };
-  }
-
   function parseRawGraphNode(value: unknown): RawGraphNode | null {
     if (!isRecord(value)) {
       return null;
@@ -5095,7 +5102,6 @@ export function createMemoryService(
       ...(isCanonicalIsoInstant((value as { createdAt?: unknown }).createdAt)
         ? { createdAt: (value as { createdAt: string }).createdAt }
         : {}),
-      episode: parseGraphEpisode(value.episode),
     };
   }
 
@@ -5460,7 +5466,6 @@ export function createMemoryService(
         kind: node.kind,
         ...(node.topics.length > 0 ? { topics: node.topics } : {}),
         ...(node.createdAt !== undefined ? { createdAt: node.createdAt } : {}),
-        episode: node.episode,
       };
     });
     const edges: MemoryGraphEdgeResult[] = [];
@@ -5570,6 +5575,207 @@ export function createMemoryService(
           parsed.truncated || bounded.truncated || boundedEdges.truncated,
       });
     });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Episodic reference pages (read-only summaries)                   */
+  /* ---------------------------------------------------------------- */
+
+  async function callEpisodeCli(
+    op: "episode.list" | "episode.windows",
+    params: Record<string, unknown>,
+  ): Promise<MemoryCliEnvelope> {
+    try {
+      return await cliCall(address, op, params, undefined);
+    } catch {
+      throw new MemoryManageError("service_unavailable");
+    }
+  }
+
+  function clampEpisodeLimit(
+    value: number | undefined,
+    fallback: number,
+  ): number {
+    if (value === undefined || !Number.isFinite(value)) {
+      return fallback;
+    }
+    return Math.min(Math.max(Math.trunc(value), 1), 50);
+  }
+
+  function parseEpisodeCursor(
+    value: unknown,
+  ):
+    | { readonly ok: true; readonly value: string | null }
+    | { readonly ok: false } {
+    if (value === undefined || value === null) {
+      return { ok: true, value: null };
+    }
+    if (
+      typeof value !== "string" ||
+      value.length < 1 ||
+      value.length > 512 ||
+      hasControlCode(value)
+    ) {
+      return { ok: false };
+    }
+    return { ok: true, value };
+  }
+
+  function parseEpisodeItem(value: unknown): MemoryEpisodeItemResult | null {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const {
+      episodeKey,
+      startAt,
+      endAt,
+      eventCount,
+      summarySnippet,
+      summaryTruncated,
+      stale,
+    } = value;
+    if (
+      typeof episodeKey !== "string" ||
+      episodeKey.length < 1 ||
+      episodeKey.length > 256 ||
+      hasControlCode(episodeKey) ||
+      !isCanonicalIsoInstant(startAt) ||
+      !isCanonicalIsoInstant(endAt) ||
+      typeof eventCount !== "number" ||
+      !Number.isSafeInteger(eventCount) ||
+      eventCount < 0 ||
+      typeof summarySnippet !== "string" ||
+      typeof summaryTruncated !== "boolean" ||
+      typeof stale !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      episodeKey,
+      startAt,
+      endAt,
+      eventCount,
+      summarySnippet,
+      summaryTruncated,
+      stale,
+    };
+  }
+
+  function parseEpisodeWindow(
+    value: unknown,
+  ): MemoryEpisodeWindowResult | null {
+    if (!isRecord(value) || !isRecord(value.span)) {
+      return null;
+    }
+    const { start, end } = value.span;
+    if (
+      typeof start !== "number" ||
+      !Number.isSafeInteger(start) ||
+      start < 0 ||
+      typeof end !== "number" ||
+      !Number.isSafeInteger(end) ||
+      end < 0 ||
+      typeof value.snippet !== "string" ||
+      typeof value.truncated !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      spanStart: start,
+      spanEnd: end,
+      snippet: value.snippet,
+      truncated: value.truncated,
+    };
+  }
+
+  function parseEpisodeListPage(
+    data: Record<string, unknown> | null,
+  ): MemoryEpisodesResult | null {
+    if (data === null || !Array.isArray(data.items)) {
+      return null;
+    }
+    const cursor = parseEpisodeCursor(data.nextCursor);
+    if (!cursor.ok) {
+      return null;
+    }
+    const items: MemoryEpisodeItemResult[] = [];
+    for (const value of data.items) {
+      const item = parseEpisodeItem(value);
+      if (item === null) {
+        return null;
+      }
+      items.push(item);
+    }
+    return { items, nextCursor: cursor.value };
+  }
+
+  function parseEpisodeWindowsPage(
+    data: Record<string, unknown> | null,
+  ): MemoryEpisodeWindowsResult | null {
+    if (data === null || !Array.isArray(data.items)) {
+      return null;
+    }
+    const cursor = parseEpisodeCursor(data.nextCursor);
+    if (!cursor.ok) {
+      return null;
+    }
+    const items: MemoryEpisodeWindowResult[] = [];
+    for (const value of data.items) {
+      const item = parseEpisodeWindow(value);
+      if (item === null) {
+        return null;
+      }
+      items.push(item);
+    }
+    return { items, nextCursor: cursor.value };
+  }
+
+  async function getMemoryEpisodes(input: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<MemoryEpisodesResult> {
+    const params: Record<string, unknown> = {
+      scope,
+      kind: "session",
+      limit: clampEpisodeLimit(input.limit, 20),
+    };
+    if (input.cursor !== undefined) {
+      params.cursor = input.cursor;
+    }
+    const envelope = await callEpisodeCli("episode.list", params);
+    if (!envelope.ok) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    const page = parseEpisodeListPage(envelope.data);
+    if (page === null) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    return page;
+  }
+
+  async function getMemoryEpisodeWindows(input: {
+    episodeKey: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<MemoryEpisodeWindowsResult> {
+    const params: Record<string, unknown> = {
+      scope,
+      kind: "session",
+      episodeKey: input.episodeKey,
+      limit: clampEpisodeLimit(input.limit, 50),
+    };
+    if (input.cursor !== undefined) {
+      params.cursor = input.cursor;
+    }
+    const envelope = await callEpisodeCli("episode.windows", params);
+    if (!envelope.ok) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    const page = parseEpisodeWindowsPage(envelope.data);
+    if (page === null) {
+      throw new MemoryManageError("service_unavailable");
+    }
+    return page;
   }
 
   /**
@@ -6201,6 +6407,8 @@ export function createMemoryService(
     getMemoryDetail,
     getMemoryGraphGlobal,
     getMemoryGraphLocal,
+    getMemoryEpisodes,
+    getMemoryEpisodeWindows,
     stageMemoryMutation,
     getMemoryOperation,
     getMemoryRecallExposure,

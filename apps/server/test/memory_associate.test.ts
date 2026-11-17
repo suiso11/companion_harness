@@ -762,11 +762,6 @@ interface RawGraphNode {
   label: string;
   status: "active" | "retired";
   kind: string;
-  episode: {
-    kind: "session" | "doc" | "day";
-    episodeKey: string;
-    level: "window" | "episode";
-  } | null;
   topics?: string[];
   out?: Array<{ to: string; kind: "related" | "consolidation" | "similar" }>;
   danglingOut?: number;
@@ -798,7 +793,6 @@ function graphNode(
     status: "active",
     kind: "user_fact",
     ...(topics !== undefined ? { topics } : {}),
-    episode: null,
     ...(out !== undefined ? { out, danglingOut: 0 } : {}),
   };
 }

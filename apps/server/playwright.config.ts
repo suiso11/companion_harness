@@ -46,6 +46,7 @@ export default defineConfig({
       ? [
           "memory/memory_graph.spec.ts",
           "memory/memory_associate.spec.ts",
+          "memory/memory_episodes.spec.ts",
           "memory/memory_manage.spec.ts",
         ]
       : AGORA_MODE

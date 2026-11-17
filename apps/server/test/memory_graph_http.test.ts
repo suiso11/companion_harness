@@ -38,18 +38,12 @@ function graphResult(scope: "global" | "local"): MemoryGraphResponse {
         label: "alpha",
         status: "active",
         kind: "user_fact",
-        episode: {
-          kind: "day",
-          episodeKey: "2026-10-21",
-          level: "window",
-        },
       },
       {
         handle: "m2",
         label: "beta",
         status: "retired",
         kind: "summary",
-        episode: null,
       },
     ],
     edges: [{ from: "m1", to: "m2", kind: "related" }],
@@ -100,6 +94,12 @@ function fakeMemory(
     },
     getMemoryStats: async () => {
       throw new Error("stats not used by graph routes");
+    },
+    getMemoryEpisodes: async () => {
+      throw new Error("episodes not used by graph routes");
+    },
+    getMemoryEpisodeWindows: async () => {
+      throw new Error("episodes not used by graph routes");
     },
     getMemoryDetail: async () => {
       throw new Error("detail not used by graph routes");
@@ -226,11 +226,6 @@ describe("memory graph HTTP routes", () => {
       expect(body.center).toBeNull();
       expect(body.version).toBe("o12:r3.2:a40:e0.0.");
       expect(body.nodes.map((node) => node.handle)).toEqual(["m1", "m2"]);
-      expect(body.nodes[0]?.episode).toEqual({
-        kind: "day",
-        episodeKey: "2026-10-21",
-        level: "window",
-      });
       expect(body.edges).toEqual([{ from: "m1", to: "m2", kind: "related" }]);
       // Raw canonical record ids must never cross the boundary.
       expect(JSON.stringify(body)).not.toContain("rec-");

@@ -23,6 +23,13 @@ import { formatMemoryDetailText } from "../../server/src/ui/memory_detail.js";
 import { returnToBrowseGenerations } from "../../server/src/ui/memory_list_actions.js";
 import { errorCode, fetchJson, postJson, randomUuid } from "./lib/api.js";
 import {
+  formatEpisodePeriod,
+  type MemoryEpisode,
+  type MemoryEpisodeWindow,
+  parseEpisodePage,
+  parseEpisodeWindowsPage,
+} from "./lib/memory_episodes.js";
+import {
   graphShowAction,
   invalidateAfterMutation,
   retainLoadedGraph,
@@ -80,7 +87,7 @@ type GraphScope = Scope & {
   readonly scope: "global" | "local";
   readonly center: string | null;
 };
-type MemoryView = "list" | "graph" | "activity";
+type MemoryView = "list" | "graph" | "activity" | "episodes";
 let view = $state<MemoryView>("list");
 let graphStatus = $state("");
 let graphRetired = $state(false);
@@ -112,6 +119,23 @@ let browseRows = $state<MemoryListRow[]>([]);
 let browseScope = $state<Scope | null>(null);
 let browseStatus = $state("");
 
+// Episodic reference view: a paged chronological list plus lazily loaded,
+// per-episode window pages (each entry is its own cache slot).
+interface EpisodeWindowsState {
+  items: MemoryEpisodeWindow[];
+  nextCursor: string | null;
+  loading: boolean;
+  loaded: boolean;
+  error: string;
+}
+let episodes = $state<MemoryEpisode[]>([]);
+let episodesCursor = $state<string | null>(null);
+let episodesStatus = $state("");
+let episodesLoading = $state(false);
+let episodesLoaded = $state(false);
+let expandedEpisode = $state<string | null>(null);
+let episodeWindows = $state<Record<string, EpisodeWindowsState>>({});
+
 // Non-reactive generation state: awaited responses apply only while their
 // own generation/session/target is still current (no stale overwrite).
 let scope: Scope | null = null;
@@ -120,6 +144,7 @@ let searchSeq = 0;
 let detailSeq = 0;
 let opSeq = 0;
 let browseSeq = 0;
+let episodeSeq = 0;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -362,6 +387,164 @@ async function loadBrowse(): Promise<void> {
 }
 
 /**
+ * Load one episode page (`cursor === null` starts from the oldest: remind
+ * orders by `startAt ASC`). Later pages are appended; a stale response is
+ * dropped by its own generation and session guard.
+ */
+async function loadEpisodes(cursor: string | null): Promise<void> {
+  if (episodesLoading) return;
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  if (memoryDisabled) {
+    episodesStatus = "記憶は無効です";
+    return;
+  }
+  episodeSeq += 1;
+  const seq = episodeSeq;
+  const current = (): boolean =>
+    seq === episodeSeq && getSessionId() === sessionId;
+  episodesLoading = true;
+  episodesStatus = cursor === null ? "読み込み中" : "追加読み込み中";
+  try {
+    const params = new URLSearchParams({ limit: "20" });
+    if (cursor !== null) params.set("cursor", cursor);
+    const res = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/memory/episodes?${params.toString()}`,
+    );
+    if (!current()) return;
+    const code = errorCode(res.body);
+    if (res.status === 404 && code === "memory_unavailable") {
+      memoryDisabled = true;
+      episodes = [];
+      episodesCursor = null;
+      episodesStatus = "記憶は無効です";
+      return;
+    }
+    if (res.status !== 200) {
+      episodesStatus = "error: 一覧の取得に失敗しました";
+      return;
+    }
+    const page = parseEpisodePage(res.body);
+    if (page === null) {
+      episodesStatus = "error: 一覧の取得に失敗しました";
+      return;
+    }
+    episodes = cursor === null ? page.items : [...episodes, ...page.items];
+    episodesCursor = page.nextCursor;
+    episodesLoaded = true;
+    episodesStatus = episodes.length === 0 ? "エピソードがありません" : "";
+  } finally {
+    if (current()) episodesLoading = false;
+  }
+}
+
+/**
+ * Toggle one episode row. Windows load lazily on first expansion and stay
+ * cached per episodeKey; collapsing never drops the cache.
+ */
+function toggleEpisode(episodeKey: string): void {
+  if (expandedEpisode === episodeKey) {
+    expandedEpisode = null;
+    return;
+  }
+  expandedEpisode = episodeKey;
+  const entry = episodeWindows[episodeKey];
+  if (entry === undefined) {
+    void loadEpisodeWindows(episodeKey, null);
+    return;
+  }
+  // A failed page leaves an error entry; re-opening retries from the first
+  // page instead of pinning the failure for the rest of the session.
+  if (entry.error !== "" && !entry.loading) {
+    episodeWindows = {
+      ...episodeWindows,
+      [episodeKey]: {
+        ...entry,
+        items: [],
+        nextCursor: null,
+        loaded: false,
+        error: "",
+      },
+    };
+    void loadEpisodeWindows(episodeKey, null);
+  }
+}
+
+/** Load or append one window page for an already expanded episode row. */
+async function loadEpisodeWindows(
+  episodeKey: string,
+  cursor: string | null,
+): Promise<void> {
+  const sessionId = getSessionId();
+  if (sessionId === null) return;
+  const existing = episodeWindows[episodeKey] ?? {
+    items: [],
+    nextCursor: null,
+    loading: false,
+    loaded: false,
+    error: "",
+  };
+  if (existing.loading) return;
+  const update = (next: Partial<EpisodeWindowsState>): void => {
+    episodeWindows = {
+      ...episodeWindows,
+      [episodeKey]: { ...existing, ...next },
+    };
+  };
+  update({ loading: true, error: "" });
+  try {
+    const params = new URLSearchParams({ episodeKey, limit: "50" });
+    if (cursor !== null) params.set("cursor", cursor);
+    const res = await fetchJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/memory/episodes/windows?${params.toString()}`,
+    );
+    if (getSessionId() !== sessionId) return;
+    const code = errorCode(res.body);
+    if (res.status === 404 && code === "memory_unavailable") {
+      memoryDisabled = true;
+      update({ loading: false, error: "記憶は無効です" });
+      return;
+    }
+    if (res.status !== 200) {
+      update({
+        loading: false,
+        error: "error: ウィンドウの取得に失敗しました",
+      });
+      return;
+    }
+    const page = parseEpisodeWindowsPage(res.body);
+    if (page === null) {
+      update({
+        loading: false,
+        error: "error: ウィンドウの取得に失敗しました",
+      });
+      return;
+    }
+    episodeWindows = {
+      ...episodeWindows,
+      [episodeKey]: {
+        items:
+          cursor === null ? page.items : [...existing.items, ...page.items],
+        nextCursor: page.nextCursor,
+        loading: false,
+        loaded: true,
+        error: "",
+      },
+    };
+  } finally {
+    if (getSessionId() === sessionId) {
+      const entry = episodeWindows[episodeKey];
+      if (entry?.loading) {
+        episodeWindows = {
+          ...episodeWindows,
+          [episodeKey]: { ...entry, loading: false },
+        };
+      }
+    }
+  }
+}
+
+/**
  * The retained payload plus optional client-side topic hubs and the
  * automatic-similarity edge filter (both are display-only toggles).
  */
@@ -382,7 +565,7 @@ function paintGraph(): void {
   canvas.setGraph(displayGraph(graphData), { selected: graphSelected, query });
 }
 
-/** Switch between the result list, the read-only graph, and activity. */
+/** Switch between the result list, the read-only graph, activity, and episodes. */
 function switchView(next: MemoryView): void {
   view = next;
   if (next === "graph") {
@@ -398,12 +581,14 @@ function switchView(next: MemoryView): void {
     } else {
       void loadGraph(graphScope?.scope ?? "global");
     }
-  } else {
-    canvas?.setSearchQuery("");
-    if (next === "list") {
-      // Opening the list view always starts from the full browse projection.
-      showAllMemories();
-    }
+    return;
+  }
+  canvas?.setSearchQuery("");
+  if (next === "list") {
+    // Opening the list view always starts from the full browse projection.
+    showAllMemories();
+  } else if (next === "episodes" && !episodesLoaded) {
+    void loadEpisodes(null);
   }
 }
 
@@ -941,12 +1126,20 @@ $effect(() => {
   opSeq += 1;
   graphSeq += 1;
   browseSeq += 1;
+  episodeSeq += 1;
   selected = null;
   scope = null;
   listScope = null;
   browseRows = [];
   browseScope = null;
   browseStatus = "";
+  episodes = [];
+  episodesCursor = null;
+  episodesStatus = "";
+  episodesLoading = false;
+  episodesLoaded = false;
+  expandedEpisode = null;
+  episodeWindows = {};
   listMode = "browse";
   graphScope = null;
   graphSelected = null;
@@ -985,6 +1178,7 @@ $effect(() => {
   // that flag must not re-run this session-reset effect and loop requests.
   untrack(() => {
     void loadBrowse();
+    if (view === "episodes") void loadEpisodes(null);
   });
 });
 </script>
@@ -1010,8 +1204,14 @@ $effect(() => {
       aria-pressed={view === "activity"}
       onclick={() => switchView("activity")}>学習の動き</button
     >
+    <button
+      id="memory-view-episodes"
+      type="button"
+      aria-pressed={view === "episodes"}
+      onclick={() => switchView("episodes")}>エピソード</button
+    >
   </div>
-  {#if view !== "activity"}
+  {#if view !== "activity" && view !== "episodes"}
   <form
     id="memory-search-form"
     onsubmit={(event) => {
@@ -1200,6 +1400,87 @@ $effect(() => {
     {#await import("./MemoryActivityPanel.svelte") then module}
       <svelte:component this={module.default} />
     {/await}
+  {:else if view === "episodes"}
+    <p id="memory-episodes-status" class="memory-notice" aria-live="polite">
+      {episodesStatus}
+    </p>
+    <div class="memory-list-scroll">
+      <ul id="memory-episodes">
+        {#each episodes as episode (episode.episodeKey)}
+          <li>
+            <button
+              type="button"
+              data-testid="memory-episode-item"
+              aria-expanded={expandedEpisode === episode.episodeKey}
+              onclick={() => toggleEpisode(episode.episodeKey)}
+            >
+              {formatEpisodePeriod(episode.startAt, episode.endAt)} ·
+              {episode.eventCount} 件
+              {#if episode.stale}
+                <span class="memory-topic-chip">未要約</span>
+              {/if}
+              <span class="memory-episode-summary">
+                {episode.summarySnippet.length > 0
+                  ? episode.summarySnippet
+                  : "(要約なし)"}
+              </span>
+            </button>
+            {#if expandedEpisode === episode.episodeKey}
+              {@const windows = episodeWindows[episode.episodeKey]}
+              <div
+                class="memory-episode-windows"
+                data-testid="memory-episode-windows"
+              >
+                {#if windows === undefined ||
+                  (windows.loading && windows.items.length === 0)}
+                  <p class="memory-notice" role="status">読み込み中</p>
+                {:else if windows.error.length > 0}
+                  <p class="memory-notice" role="status">{windows.error}</p>
+                {:else}
+                  {@const windowCursor = windows.nextCursor}
+                  {#if windows.items.length === 0}
+                    <p class="memory-notice">ウィンドウがありません</p>
+                  {:else}
+                    <ul>
+                      {#each windows.items as window, index (index)}
+                        <li>
+                          {window.spanStart}–{window.spanEnd}: {window.snippet}{#if window.truncated}…{/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                  {#if windowCursor !== null}
+                    <button
+                      id="memory-episode-windows-more"
+                      type="button"
+                      disabled={windows.loading}
+                      onclick={() => {
+                        if (windowCursor !== null) {
+                          void loadEpisodeWindows(
+                            episode.episodeKey,
+                            windowCursor,
+                          );
+                        }
+                      }}>さらに読み込む</button
+                    >
+                  {/if}
+                {/if}
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      {#if episodesCursor !== null}
+        <button
+          id="memory-episodes-more"
+          type="button"
+          disabled={episodesLoading}
+          onclick={() => {
+            if (episodesCursor !== null) void loadEpisodes(episodesCursor);
+          }}>さらに読み込む</button
+        >
+      {/if}
+    </div>
   {:else}
     {#if listMode === "browse" && browseStatus.length > 0}
       <p class="memory-notice" role="status">{browseStatus}</p>

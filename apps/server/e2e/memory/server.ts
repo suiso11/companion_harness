@@ -292,10 +292,10 @@ function syntheticGateway(): ModelGateway {
 }
 
 /**
- * Test-only CLI wrapper: with the marker present it answers the graph ops
- * exactly like an older remind build (BAD_REQUEST); every other op is
- * delegated byte-for-byte to the REAL CLI. This lets one harness exercise
- * the "old remind" unavailable status without a second server process.
+ * Test-only CLI wrapper. With the marker present it answers the graph ops
+ * exactly like an older remind build (BAD_REQUEST); the episode read ops
+ * always answer deterministic fixtures (the real `maintain.episodes` pass
+ * needs an LLM). Every other op is delegated byte-for-byte to the REAL CLI.
  */
 function legacyWrapperSource(realEntry: string, markerPath: string): string {
   return `import { spawn } from "node:child_process";
@@ -304,12 +304,73 @@ import { existsSync } from "node:fs";
 const REAL_ENTRY = ${JSON.stringify(realEntry)};
 const MARKER = ${JSON.stringify(markerPath)};
 const GRAPH_OPS = new Set(["graph.local", "graph.page", "graph.version"]);
+const EPISODE_FIXTURES = {
+  "episode.list": {
+    items: [
+      {
+        kind: "session",
+        episodeKey: "episode-bravo",
+        startAt: "2026-11-15T09:00:00.000Z",
+        endAt: "2026-11-15T09:10:00.000Z",
+        eventCount: 2,
+        totalCp: 120,
+        summaryRecordIds: [],
+        summarySnippet: "",
+        summaryTruncated: false,
+        stale: true,
+      },
+      {
+        kind: "session",
+        episodeKey: "episode-alpha",
+        startAt: "2026-11-16T01:00:00.000Z",
+        endAt: "2026-11-16T01:30:00.000Z",
+        eventCount: 6,
+        totalCp: 900,
+        summaryRecordIds: ["rec-episode-alpha"],
+        summarySnippet: "朝の会話: 予定と天気の確認",
+        summaryTruncated: false,
+        stale: false,
+      },
+    ],
+    nextCursor: null,
+  },
+  "episode.windows": {
+    items: [
+      {
+        recordId: "rec-window-1",
+        eventId: "ev-window-1",
+        span: { start: 0, end: 400 },
+        snippet: "窓1: 朝の予定を確認した",
+        truncated: false,
+      },
+      {
+        recordId: "rec-window-2",
+        eventId: "ev-window-2",
+        span: { start: 400, end: 900 },
+        snippet: "窓2: 天気と持ち物の話",
+        truncated: false,
+      },
+    ],
+    nextCursor: null,
+  },
+};
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   let op = null;
   try { op = JSON.parse(input.trim()).op ?? null; } catch { op = null; }
+  if (typeof op === "string" && EPISODE_FIXTURES[op] !== undefined) {
+    process.stdout.write(JSON.stringify({
+      v: 1,
+      ok: true,
+      code: "OK",
+      message: "ok",
+      data: EPISODE_FIXTURES[op],
+      deduplicated: false,
+    }) + "\\n");
+    return;
+  }
   if (typeof op === "string" && GRAPH_OPS.has(op) && existsSync(MARKER)) {
     process.stdout.write(JSON.stringify({
       v: 1,

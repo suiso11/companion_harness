@@ -61,7 +61,6 @@ export interface GraphNodeData {
   readonly topicHub?: boolean;
   /** Remind record creation instant (canonical ISO), when provided. */
   readonly createdAt?: string;
-  readonly episode: unknown;
 }
 
 export interface GraphEdgeData {
@@ -140,7 +139,6 @@ export function parseGraphData(value: unknown): GraphData | null {
       kind?: unknown;
       topics?: unknown;
       createdAt?: unknown;
-      episode?: unknown;
     };
     if (
       typeof node.handle !== "string" ||
@@ -163,7 +161,6 @@ export function parseGraphData(value: unknown): GraphData | null {
         node.createdAt.length <= 30
           ? { createdAt: node.createdAt }
           : {}),
-        episode: node.episode ?? null,
       },
     ];
   });
@@ -269,7 +266,6 @@ export function withTopicHubs(
       status: "active",
       kind: "topic",
       topicHub: true,
-      episode: null,
     });
   }
   // Second pass: link every member of an existing hub. Topics that did not
