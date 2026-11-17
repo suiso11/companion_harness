@@ -88,6 +88,9 @@ const ALLOWED_OPS: ReadonlySet<string> = new Set([
   "graph.local",
   "graph.page",
   "graph.version",
+  // Read-only episodic reference pages (summaries only, never raw ids).
+  "episode.list",
+  "episode.windows",
 ]);
 
 /** Write ops require a caller-supplied stable idempotency key. */

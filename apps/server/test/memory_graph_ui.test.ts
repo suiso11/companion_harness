@@ -57,21 +57,18 @@ const NODES: GraphNodeData[] = [
     label: "Alpha memory",
     status: "active",
     kind: "user_fact",
-    episode: null,
   },
   {
     handle: "m2",
     label: "Beta summary",
     status: "retired",
     kind: "summary",
-    episode: null,
   },
   {
     handle: "m3",
     label: "Gamma inference",
     status: "active",
     kind: "model_inference",
-    episode: null,
   },
 ];
 
@@ -121,7 +118,6 @@ describe("memory graph layout", () => {
         label: `memory ${index}`,
         status: "active" as const,
         kind: "user_fact" as const,
-        episode: null,
       }));
     const span = (count: number): number => {
       const layout = runLayout(createLayout(graph(count), [], 390, 590));
@@ -143,7 +139,6 @@ describe("memory graph layout", () => {
       label: `memory ${index + 1}`,
       status: "active" as const,
       kind: "user_fact",
-      episode: null,
     }));
     const edges: GraphEdgeData[] = [];
     for (let index = 1; index < nodes.length; index += 1) {
@@ -312,7 +307,6 @@ describe("memory graph fit-to-view and labels", () => {
         label: `${prefix} ${index}`,
         status: "active" as const,
         kind: "user_fact",
-        episode: null,
       }));
     const chain = (prefix: string): GraphEdgeData[] =>
       Array.from({ length: 5 }, (_, index) => ({
@@ -576,7 +570,6 @@ describe("withTopicHubs", () => {
       status: "active",
       kind: "user_fact",
       topics: ["仕事", "健康"],
-      episode: null,
     },
     {
       handle: "m2",
@@ -584,7 +577,6 @@ describe("withTopicHubs", () => {
       status: "active",
       kind: "summary",
       topics: ["仕事"],
-      episode: null,
     },
     {
       handle: "m3",
@@ -592,7 +584,6 @@ describe("withTopicHubs", () => {
       status: "active",
       kind: "model_inference",
       topics: ["m1"],
-      episode: null,
     },
     {
       handle: "topic:仕事",
@@ -600,7 +591,6 @@ describe("withTopicHubs", () => {
       status: "active",
       kind: "user_fact",
       topics: ["健康"],
-      episode: null,
     },
   ];
   const topicEdges: GraphEdgeData[] = [
@@ -616,7 +606,6 @@ describe("withTopicHubs", () => {
         status: "active",
         kind: "user_fact",
         topics: ["Work", "健康"],
-        episode: null,
       },
       {
         handle: "m2",
@@ -624,7 +613,6 @@ describe("withTopicHubs", () => {
         status: "active",
         kind: "summary",
         topics: ["work"],
-        episode: null,
       },
       {
         handle: "m3",
@@ -632,7 +620,6 @@ describe("withTopicHubs", () => {
         status: "active",
         kind: "model_inference",
         topics: ["健康"],
-        episode: null,
       },
     ];
     const display = withTopicHubs(caseNodes, []);
@@ -649,7 +636,6 @@ describe("withTopicHubs", () => {
         status: "active",
         kind: "user_fact",
         topics: ["solo", "shared"],
-        episode: null,
       },
       {
         handle: "m2",
@@ -657,7 +643,6 @@ describe("withTopicHubs", () => {
         status: "active",
         kind: "summary",
         topics: ["SHARED"],
-        episode: null,
       },
     ];
     expect(TOPIC_HUB_MIN_MEMBERS).toBe(2);
@@ -828,7 +813,6 @@ describe("graph record dates", () => {
           status: "active",
           kind: "user_fact",
           createdAt: "2026-10-22T18:30:00.000Z",
-          episode: null,
         },
       ],
     });

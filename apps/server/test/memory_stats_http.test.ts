@@ -30,6 +30,12 @@ function fakeMemory(
       throw new Error("search not used by stats route");
     },
     getMemoryStats,
+    getMemoryEpisodes: async () => {
+      throw new Error("episodes not used by stats route");
+    },
+    getMemoryEpisodeWindows: async () => {
+      throw new Error("episodes not used by stats route");
+    },
     getMemoryDetail: async () => {
       throw new Error("detail not used by stats route");
     },

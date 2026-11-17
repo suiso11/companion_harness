@@ -153,13 +153,6 @@ export type MemoryRecallExposureResponse = z.infer<
 export const MemoryGraphScopeSchema = z.enum(["global", "local"]);
 export type MemoryGraphScope = z.infer<typeof MemoryGraphScopeSchema>;
 
-export const MemoryGraphEpisodeSchema = z.strictObject({
-  kind: z.enum(["session", "doc", "day"]),
-  episodeKey: z.string().min(1).max(256),
-  level: z.enum(["window", "episode"]),
-});
-export type MemoryGraphEpisode = z.infer<typeof MemoryGraphEpisodeSchema>;
-
 /**
  * Derived general-category topics on one node (remind PR #29): at most
  * three short nouns, each 1..12 code points. Additive/optional: old remind
@@ -181,7 +174,6 @@ export const MemoryGraphNodeSchema = z.strictObject({
   topics: z.array(MemoryGraphTopicSchema).max(3).optional(),
   /** Remind record creation instant (canonical ISO-8601), when provided. */
   createdAt: z.string().min(20).max(30).optional(),
-  episode: MemoryGraphEpisodeSchema.nullable(),
 });
 export type MemoryGraphNode = z.infer<typeof MemoryGraphNodeSchema>;
 
@@ -253,6 +245,96 @@ export const MemoryGraphVersionResponseSchema = z.strictObject({
 });
 export type MemoryGraphVersionResponse = z.infer<
   typeof MemoryGraphVersionResponseSchema
+>;
+
+/**
+ * Episodic memory is a separate chronological REFERENCE layer, not part of
+ * the semantic graph: remind keeps episode summaries out of `graph.page` and
+ * `graph.local`. These read-only pages are the wiki-like browse surface for
+ * one scope: session episodes from remind `episode.list` plus their bounded
+ * window summaries from `episode.windows`. Item fields carry no raw
+ * record/event ids; paging cursors are opaque remind tokens that clients
+ * never interpret and that cannot resolve a record.
+ */
+export const MemoryEpisodeItemSchema = z.strictObject({
+  /** Remind session episode key (the session that produced the raw events). */
+  episodeKey: z.string().min(1).max(256),
+  /** First/last raw event observation instants (canonical ISO-8601). */
+  startAt: z.string().min(20).max(40),
+  endAt: z.string().min(20).max(40),
+  eventCount: z.number().int().min(0),
+  /** Bounded plain-text episode summary; empty when none is active yet. */
+  summarySnippet: z.string(),
+  summaryTruncated: z.boolean(),
+  /** True when raw events or windows are not yet folded into the summary. */
+  stale: z.boolean(),
+});
+export type MemoryEpisodeItem = z.infer<typeof MemoryEpisodeItemSchema>;
+
+export const MemoryEpisodeWindowSchema = z.strictObject({
+  /** Code-point span of the source raw events this window summarizes. */
+  spanStart: z.number().int().min(0),
+  spanEnd: z.number().int().min(0),
+  snippet: z.string(),
+  truncated: z.boolean(),
+});
+export type MemoryEpisodeWindow = z.infer<typeof MemoryEpisodeWindowSchema>;
+
+export const MemoryEpisodesResponseSchema = z.strictObject({
+  items: z.array(MemoryEpisodeItemSchema).max(100),
+  nextCursor: z.string().min(1).max(512).nullable(),
+});
+export type MemoryEpisodesResponse = z.infer<
+  typeof MemoryEpisodesResponseSchema
+>;
+
+export const MemoryEpisodeWindowsResponseSchema = z.strictObject({
+  items: z.array(MemoryEpisodeWindowSchema).max(100),
+  nextCursor: z.string().min(1).max(512).nullable(),
+});
+export type MemoryEpisodeWindowsResponse = z.infer<
+  typeof MemoryEpisodeWindowsResponseSchema
+>;
+
+/** HTTP GET episode list query (raw query-string values). */
+export const MemoryEpisodesQuerySchema = z.strictObject({
+  limit: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .optional(),
+  /** Opaque remind base64url cursor (never interpreted by Companion). */
+  cursor: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
+});
+export type MemoryEpisodesQuery = z.infer<typeof MemoryEpisodesQuerySchema>;
+
+/** HTTP GET episode windows query (raw query-string values). */
+export const MemoryEpisodeWindowsQuerySchema = z.strictObject({
+  episodeKey: z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((v) => !/\p{Cc}/u.test(v), {
+      message: "control characters",
+    }),
+  limit: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .optional(),
+  /** Opaque remind base64url cursor (never interpreted by Companion). */
+  cursor: z
+    .string()
+    .min(1)
+    .max(512)
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
+});
+export type MemoryEpisodeWindowsQuery = z.infer<
+  typeof MemoryEpisodeWindowsQuerySchema
 >;
 
 /**
