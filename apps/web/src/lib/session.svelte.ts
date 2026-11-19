@@ -20,6 +20,17 @@ function readStoredSession(): string | null {
   }
 }
 
+/** History-probe one session id; null means the transport failed. */
+async function probeSession(id: string): Promise<number | null> {
+  try {
+    return (
+      await fetchJson(`/api/sessions/${encodeURIComponent(id)}/history?limit=1`)
+    ).status;
+  } catch {
+    return null;
+  }
+}
+
 let sessionId: string | null = $state(readStoredSession());
 
 /** Reactive read: track this inside any `$effect` that needs rebinding. */
@@ -50,22 +61,20 @@ export function setSessionId(id: string | null): void {
  * null when the transport failed.
  */
 export async function ensureSession(): Promise<string | null> {
-  // An explicit `?session=` link wins over the last chat session.
-  const stored =
-    sessionFromSearch(window.location.search) ??
-    getSessionId() ??
-    readStoredSession();
-  if (stored !== null && stored.length > 0) {
-    let probeStatus: number | null = null;
-    try {
-      probeStatus = (
-        await fetchJson(
-          `/api/sessions/${encodeURIComponent(stored)}/history?limit=1`,
-        )
-      ).status;
-    } catch {
-      probeStatus = null;
+  // An explicit `?session=` link is page-load only: it must not overwrite
+  // the durable chat session the user returns to at `/`.
+  const fromUrl = sessionFromSearch(window.location.search);
+  if (fromUrl !== null) {
+    if (getSessionId() === fromUrl) return fromUrl;
+    const status = await probeSession(fromUrl);
+    if (status !== 404 && status !== 410) {
+      sessionId = fromUrl;
+      return fromUrl;
     }
+  }
+  const stored = getSessionId() ?? readStoredSession();
+  if (stored !== null && stored.length > 0) {
+    const probeStatus = await probeSession(stored);
     if (probeStatus === 200 || probeStatus === null) {
       setSessionId(stored);
       return stored;
