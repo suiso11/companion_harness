@@ -386,6 +386,7 @@ import {
   listClaimedTrialWorkers,
   listQueuedTrialGrants,
   listTrialProposals,
+  profileBindingKey,
   type QueuedTrialGrantCursor,
   readLaunchPermit,
   readQueuedTrialGrantHorizon,
@@ -6804,8 +6805,12 @@ export function createKernelRepository(
   }
 
   /**
-   * Staged hypotheses with enough DISTINCT host-anchored runs and no trial
-   * proposal yet. The loop's only source of "what to investigate".
+   * Staged hypotheses with enough DISTINCT host-anchored runs and no
+   * APPROVABLE trial proposal. A proposal that can no longer be approved
+   * (expired, or staged under a different frozen profile/alias) does not
+   * consume its hypothesis: the next daily pass re-stages it under the
+   * current profile, because a deploy changes the profile binding and
+   * approval would otherwise reject every older proposal as drift.
    *
    * Hypotheses are staged in the session whose run failed, while the loop
    * files its proposal under the operator's configured session, so this
@@ -6813,9 +6818,11 @@ export function createKernelRepository(
    */
   function listEligibleLoopHypotheses(
     minEvidence: number,
-    limit = 1,
+    limit: number,
+    current: { now: number; alias: string; profile: TrialProfileSnapshot },
   ): Array<{ id: string; statement: string; evidenceCount: number }> {
     const capped = Math.max(1, Math.min(20, Math.trunc(minEvidence)));
+    const want = Math.max(1, Math.min(10, limit));
     const rows = db
       .prepare(
         `SELECT h.id AS id, h.statement AS statement,
@@ -6824,24 +6831,69 @@ export function createKernelRepository(
          JOIN learning_evidence e
            ON e.hypothesis_id = h.id AND e.source_kind = 'run'
          WHERE h.staged = 1 AND h.status = 'open'
-           AND NOT EXISTS (
-             SELECT 1 FROM trial_proposals p WHERE p.hypothesis_id = h.id
-           )
          GROUP BY h.id
          HAVING COUNT(DISTINCT e.source_id) >= ?
-         ORDER BY evidenceCount DESC, h.created_at ASC
-         LIMIT ?`,
+         ORDER BY evidenceCount DESC, h.created_at ASC`,
       )
-      .all(capped, Math.max(1, Math.min(10, limit))) as Array<{
+      .all(capped) as Array<{
       id: string;
       statement: string;
       evidenceCount: number;
     }>;
-    return rows.map((row) => ({
-      id: row.id,
-      statement: row.statement,
-      evidenceCount: row.evidenceCount,
-    }));
+    const binding = profileBindingKey(current.profile);
+    return rows
+      .filter((row) => !loopHypothesisIsHeld(row.id, current, binding))
+      .slice(0, want);
+  }
+
+  /** True when an existing proposal still blocks (or already used) a hypothesis. */
+  function loopHypothesisIsHeld(
+    hypothesisId: string,
+    current: { now: number; alias: string; profile: TrialProfileSnapshot },
+    binding: string,
+  ): boolean {
+    const proposals = db
+      .prepare(
+        `SELECT status, expiry, workspace_alias, profile_json
+         FROM trial_proposals WHERE hypothesis_id = ?`,
+      )
+      .all(hypothesisId) as Array<{
+      status: string;
+      expiry: string;
+      workspace_alias: string | null;
+      profile_json: string | null;
+    }>;
+    return proposals.some((row) => {
+      if (row.status === "granted") return true;
+      if (row.status !== "staged") return false;
+      if (!(Date.parse(row.expiry) > current.now)) return false;
+      if (row.workspace_alias !== current.alias) return false;
+      if (row.profile_json === null) return false;
+      try {
+        const staged = TrialProfileSnapshotSchema.safeParse(
+          JSON.parse(row.profile_json),
+        );
+        return staged.success && profileBindingKey(staged.data) === binding;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * True when the loop already staged a proposal at/after `sinceMs`.
+   * The in-memory daily guard dies with the process, so a restart must ask
+   * the durable ledger instead of burning another hypothesis that day.
+   */
+  function loopProposalExistsSince(sinceMs: number): boolean {
+    const row = db
+      .prepare(
+        `SELECT 1 AS found FROM trial_proposals
+         WHERE hypothesis_id IS NOT NULL AND created_at >= ?
+         LIMIT 1`,
+      )
+      .get(Math.trunc(sinceMs));
+    return row !== undefined;
   }
 
   /** (stated confidence, host outcome) pairs for trial calibration. */
@@ -8878,6 +8930,7 @@ export function createKernelRepository(
     readLoopRunFacts,
     readCalibrationPairs,
     listEligibleLoopHypotheses,
+    loopProposalExistsSince,
     listAutonomyActivityLog,
     applyAutonomyRestartFenceNow,
     stageConversationProposalFromModel,

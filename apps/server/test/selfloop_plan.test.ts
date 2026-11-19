@@ -30,6 +30,12 @@ const PROFILE: TrialProfileSnapshot = {
   modelRoute: "local",
 };
 
+/** Same shape, different frozen profile binding (as a deploy produces). */
+const PROFILE_DRIFTED: TrialProfileSnapshot = {
+  ...PROFILE,
+  configFingerprint: "c".repeat(64),
+};
+
 describe("self loop config", () => {
   it("is disabled when unset and strict when present", () => {
     expect(parseSelfLoopConfig(undefined)).toBeNull();
@@ -290,6 +296,11 @@ describe("daily plan", () => {
       expect(repo.listTrials(sessionId).items).toMatchObject([
         { objective: expect.stringContaining("first behaviour") },
       ]);
+      // A proposal waits for a human: no three-hour expiry.
+      const [staged] = repo.listTrials(sessionId).items;
+      expect(Date.parse(staged?.expiry ?? "")).toBeGreaterThan(
+        T0 + 300 * 86_400_000,
+      );
       await dayOne.stop();
 
       // The linked hypothesis is never proposed again: day two takes the next.
@@ -300,6 +311,72 @@ describe("daily plan", () => {
         { objective: expect.stringContaining("first behaviour") },
       ]);
       await dayTwo.stop();
+    } finally {
+      closeKernelDatabase(handle);
+    }
+  });
+
+  it("holds one proposal per UTC day and re-stages after profile drift", async () => {
+    const handle = openKernelDatabase(":memory:");
+    await migrateKernelDatabase({ db: handle.raw });
+    try {
+      const repo = createKernelRepository(handle.raw);
+      const { sessionId, taskId } = await seedLoopSession(repo);
+      await seedFailedHypothesis(repo, "drift behaviour", T0 + 20);
+      const make = (at: number, profile: TrialProfileSnapshot) =>
+        createReflectService({
+          repo,
+          gateway: null,
+          model: "test",
+          now: () => at,
+          selfLoop: {
+            enabled: true,
+            sessionId,
+            taskId,
+            minEvidence: 1,
+            dailyProposals: 1,
+            oversightPaths: [],
+          },
+          trialProfile: profile,
+          workspaceAlias: "ws",
+          timeZone: "Asia/Tokyo",
+        });
+      const dayOne = make(T0 + 200, PROFILE);
+      await dayOne.plan();
+      expect(repo.listTrials(sessionId).items).toHaveLength(1);
+      await dayOne.stop();
+
+      // Same UTC day, new process, drifted profile: the durable ledger guard
+      // still spends only one proposal for the day.
+      const restart = make(T0 + 300, PROFILE_DRIFTED);
+      await restart.plan();
+      expect(repo.listTrials(sessionId).items).toHaveLength(1);
+      await restart.stop();
+
+      // Next day the staged profile can no longer be approved (drift), so
+      // the hypothesis is staged again under the current profile.
+      const dayTwo = make(T0 + 86_400_000 + 200, PROFILE_DRIFTED);
+      await dayTwo.plan();
+      const items = repo.listTrials(sessionId).items;
+      expect(items).toHaveLength(2);
+      expect(items[0]).toMatchObject({
+        objective: expect.stringContaining("drift behaviour"),
+      });
+      await dayTwo.stop();
+
+      // An approvable proposal now holds the hypothesis: no third stage.
+      const dayThree = make(T0 + 2 * 86_400_000 + 200, PROFILE_DRIFTED);
+      await dayThree.plan();
+      expect(repo.listTrials(sessionId).items).toHaveLength(2);
+      await dayThree.stop();
+
+      // Every staging is announced in the user's chat.
+      const notices = handle.raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM turns WHERE json_extract(input_json, '$.kind') = 'companion_text'",
+        )
+        .get() as { n: number };
+      expect(notices.n).toBe(2);
     } finally {
       closeKernelDatabase(handle);
     }

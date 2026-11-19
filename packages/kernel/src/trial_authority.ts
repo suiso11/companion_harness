@@ -636,7 +636,7 @@ function normalizeWireConstraints(value: unknown): string[] {
   return out;
 }
 
-function profileBindingKey(p: TrialProfileSnapshot): string {
+export function profileBindingKey(p: TrialProfileSnapshot): string {
   return canonicalJsonString({
     available: p.available,
     enabled: p.enabled,
