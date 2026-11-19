@@ -592,10 +592,10 @@ export function buildAutonomyGraphLayout(
     const pNode = purposeNodeById.get(parentId);
     if (pNode === undefined) continue;
     const x1 = pNode.x + pNode.width;
-    const y1 = pNode.y + pNode.height / 2;
+    const y1 = Math.round(pNode.y + pNode.height / 2);
     const x2 = tNode.x;
-    const y2 = tNode.y + tNode.height / 2;
-    const midX = (x1 + x2) / 2;
+    const y2 = Math.round(tNode.y + tNode.height / 2);
+    const midX = Math.round((x1 + x2) / 2);
     const highlighted =
       pNode.selected ||
       tNode.selected ||
@@ -605,7 +605,7 @@ export function buildAutonomyGraphLayout(
       id: `${pNode.id}->${tNode.id}`,
       fromPurposeId: pNode.id,
       toTaskId: tNode.id,
-      path: `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`,
+      path: `M ${x1} ${y1} H ${midX} V ${y2} H ${x2}`,
       tone: tNode.tone,
       highlighted,
     });
@@ -618,8 +618,8 @@ export function buildAutonomyGraphLayout(
     const nodeA = purposeNodeById.get(pair.purposeAId);
     const nodeB = purposeNodeById.get(pair.purposeBId);
     if (nodeA === undefined || nodeB === undefined) continue;
-    const y1 = nodeA.y + nodeA.height / 2;
-    const y2 = nodeB.y + nodeB.height / 2;
+    const y1 = Math.round(nodeA.y + nodeA.height / 2);
+    const y2 = Math.round(nodeB.y + nodeB.height / 2);
     const x = PURPOSE_X;
     const bow = Math.max(12, PURPOSE_X - 26 - (i % 3) * 12);
     const highlighted = nodeA.selected || nodeB.selected;
@@ -627,8 +627,8 @@ export function buildAutonomyGraphLayout(
       id: pair.id,
       purposeAId: pair.purposeAId,
       purposeBId: pair.purposeBId,
-      path: `M ${x} ${y1} C ${bow} ${y1}, ${bow} ${y2}, ${x} ${y2}`,
-      badgeX: Math.round((x + bow) / 2),
+      path: `M ${x} ${y1} H ${bow} V ${y2} H ${x}`,
+      badgeX: bow,
       badgeY: Math.round((y1 + y2) / 2),
       highlighted,
     });

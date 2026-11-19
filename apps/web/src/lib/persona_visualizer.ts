@@ -262,13 +262,12 @@ export function buildPersonaConstellation(opts: {
       selectedChatId !== null &&
       group.chats.some((c) => c.id === selectedChatId);
 
-    // Slight curve towards the center of the canvas so chords remain distinct.
-    const mx = (nA.x + nB.x) / 2;
-    const my = (nA.y + nB.y) / 2;
-    const ctrlX = Math.round(mx + (cx - mx) * 0.28);
-    const ctrlY = Math.round(my + (cy - my) * 0.28);
-    const labelX = Math.round(0.25 * nA.x + 0.5 * ctrlX + 0.25 * nB.x);
-    const labelY = Math.round(0.25 * nA.y + 0.5 * ctrlY + 0.25 * nB.y);
+    // Stepped orthogonal pixel routing between constellation nodes.
+    const mx = Math.round((nA.x + nB.x) / 2);
+    const my = Math.round((nA.y + nB.y) / 2);
+    const ctrlY = Math.round(my + (cy - my) * 0.25);
+    const labelX = mx;
+    const labelY = ctrlY;
     const strokeWidth = Math.min(
       6,
       2 + Math.floor(Math.log2(Math.max(1, messageCount) + 1)),
@@ -284,7 +283,7 @@ export function buildPersonaConstellation(opts: {
       messageCount,
       autotalk,
       active,
-      path: `M ${nA.x} ${nA.y} Q ${ctrlX} ${ctrlY} ${nB.x} ${nB.y}`,
+      path: `M ${nA.x} ${nA.y} V ${ctrlY} H ${nB.x} V ${nB.y}`,
       labelX,
       labelY,
       strokeWidth,

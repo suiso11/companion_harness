@@ -8,57 +8,52 @@
 :root {
   color-scheme: dark;
 
-  /* ReactBits Pro app-ui language: one radius scale, layered surfaces,
-   * Sorbet accent reserved for primary actions and the active nav pill. */
-  --radius: 0.75rem;
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 10px);
+  /* 16-bit pixel-art / retro RPG console theme: zero border-radius, crisp
+   * pixel frames, stepped hard drop shadows, and high-contrast arcade tokens. */
+  --radius: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
 
-  /* Dark-only surfaces: page < sidebar < card < popover, each a step lighter
-   * with a faint cool cast so stacked cards read as layers, not borders. */
-  --background: oklch(0.145 0.01 285);
-  --foreground: oklch(0.97 0.004 285);
-  --card: oklch(0.185 0.012 285);
-  --card-foreground: oklch(0.97 0.004 285);
-  --popover: oklch(0.205 0.014 285);
-  --popover-foreground: oklch(0.97 0.004 285);
-  --primary: oklch(0.94 0.006 285);
-  --primary-foreground: oklch(0.185 0.012 285);
-  --secondary: oklch(0.235 0.014 285);
-  --secondary-foreground: oklch(0.97 0.004 285);
-  --muted: oklch(0.215 0.012 285);
-  --muted-foreground: oklch(0.72 0.014 285);
-  --accent: oklch(0.265 0.03 300);
-  --accent-foreground: oklch(0.98 0.004 285);
-  --destructive: oklch(0.68 0.19 20);
-  --border: oklch(1 0 0 / 14%);
-  --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.72 0.15 300);
-  --chart-1: oklch(0.7 0.17 300);
-  --chart-2: oklch(0.72 0.14 190);
-  --chart-3: oklch(0.8 0.14 85);
-  --chart-4: oklch(0.72 0.18 340);
-  --chart-5: oklch(0.7 0.15 150);
-  --code-background: oklch(0.175 0.012 285);
-  --code-foreground: oklch(0.9 0.01 285);
-  /* Hairlines stay at 8% so `--border` (14%) only lands on real controls. */
-  --border-subtle: oklch(1 0 0 / 8%);
-  --sidebar: oklch(0.165 0.013 285);
-  --surface: oklch(0.2 0.014 285);
+  /* Dark-only surfaces: page < sidebar < card < popover (L < 0.3 floor). */
+  --background: oklch(0.145 0.025 268);
+  --foreground: oklch(0.97 0.008 268);
+  --card: oklch(0.19 0.03 268);
+  --card-foreground: oklch(0.97 0.008 268);
+  --popover: oklch(0.21 0.032 268);
+  --popover-foreground: oklch(0.97 0.008 268);
+  --primary: oklch(0.94 0.01 268);
+  --primary-foreground: oklch(0.185 0.025 268);
+  --secondary: oklch(0.24 0.035 268);
+  --secondary-foreground: oklch(0.97 0.008 268);
+  --muted: oklch(0.215 0.028 268);
+  --muted-foreground: oklch(0.75 0.025 268);
+  --accent: oklch(0.28 0.06 285);
+  --accent-foreground: oklch(0.98 0.006 268);
+  --destructive: oklch(0.68 0.2 22);
+  --border: oklch(0.76 0.09 255 / 45%);
+  --input: oklch(0.76 0.09 255 / 38%);
+  --ring: oklch(0.78 0.16 290);
+  --chart-1: oklch(0.74 0.19 295);
+  --chart-2: oklch(0.78 0.17 155);
+  --chart-3: oklch(0.84 0.16 85);
+  --chart-4: oklch(0.74 0.2 345);
+  --chart-5: oklch(0.78 0.15 205);
+  --code-background: oklch(0.165 0.025 268);
+  --code-foreground: oklch(0.92 0.015 268);
+  --border-subtle: oklch(0.74 0.07 255 / 26%);
+  --sidebar: oklch(0.165 0.028 268);
+  --surface: oklch(0.205 0.03 268);
   --accent-gradient: linear-gradient(
-    135deg,
-    oklch(0.72 0.16 300),
-    oklch(0.75 0.15 345) 52%,
-    oklch(0.84 0.11 55)
+    90deg,
+    oklch(0.74 0.18 295) 0 50%,
+    oklch(0.82 0.16 85) 50% 100%
   );
-  --shadow-sm: 0 1px 2px oklch(0 0 0 / 35%);
-  --shadow-md:
-    0 8px 24px -14px oklch(0 0 0 / 70%), 0 1px 2px oklch(0 0 0 / 35%);
-  --shadow-lg:
-    0 20px 45px -24px oklch(0 0 0 / 80%), 0 2px 8px oklch(0 0 0 / 30%);
+  --shadow-sm: 2px 2px 0 oklch(0 0 0 / 85%);
+  --shadow-md: 4px 4px 0 oklch(0 0 0 / 90%), inset 1px 1px 0 oklch(1 0 0 / 12%);
+  --shadow-lg: 6px 6px 0 oklch(0 0 0 / 92%), inset 2px 2px 0 oklch(1 0 0 / 15%);
   --sidebar-width: 15.5rem;
   /* llama-webui: `--font-mono` stack for code/stats. */
   --font-mono:
@@ -88,14 +83,14 @@ html {
 
 body {
   font-family:
-    system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+    var(--font-mono), "Hiragino Kaku Gothic ProN", "Noto Sans JP", monospace;
   margin: 0;
   padding: 0;
   background: var(--background);
   color: var(--foreground);
   overflow-x: hidden;
   line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
+  image-rendering: pixelated;
   min-height: 100%;
 }
 
@@ -147,17 +142,17 @@ body {
   /* biome-ignore lint/suspicious/noDuplicateProperties: dvh fallback for older browsers */
   height: 100dvh;
   min-width: 0;
-  /* Two faint accent blooms: depth without a background image or extra DOM. */
+  /* 16-bit pixel dither grid texture over the dark background. */
   background:
-    radial-gradient(
-      70rem 34rem at 88% -12%,
-      oklch(0.72 0.16 300 / 9%),
-      transparent 62%
+    repeating-linear-gradient(
+      0deg,
+      oklch(1 0 0 / 2%) 0 1px,
+      transparent 1px 4px
     ),
-    radial-gradient(
-      52rem 26rem at 6% 112%,
-      oklch(0.75 0.15 345 / 7%),
-      transparent 66%
+    repeating-linear-gradient(
+      90deg,
+      oklch(1 0 0 / 2%) 0 1px,
+      transparent 1px 4px
     ),
     var(--background);
 }
@@ -232,11 +227,9 @@ body {
   flex: none;
   width: 1.05rem;
   height: 1.05rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  fill: currentColor;
+  stroke: none;
+  shape-rendering: crispEdges;
 }
 
 /* Brand + section labels only exist in the rail. */
@@ -346,10 +339,11 @@ body {
     width: 2rem;
     height: 2rem;
     flex: none;
-    border-radius: 0.7rem;
+    border: 2px solid var(--border);
+    border-radius: 0;
     background: var(--accent-gradient);
     color: oklch(0.99 0 0);
-    box-shadow: 0 6px 18px -8px oklch(0.72 0.16 300 / 80%);
+    box-shadow: var(--shadow-sm);
   }
 
   .nav-brand-text {
@@ -381,7 +375,7 @@ body {
     opacity: 0.75;
   }
 
-  /* Active rail item carries the accent as a 3px pill instead of a border. */
+  /* Active rail item carries a crisp 4px pixel bar. */
   .feature-links a.active::before,
   .feature-links-dev.active summary::before {
     content: "";
@@ -389,11 +383,10 @@ body {
     left: -0.35rem;
     top: 50%;
     translate: 0 -50%;
-    width: 3px;
+    width: 4px;
     height: 1.15rem;
-    border-radius: 999px;
-    background: var(--accent-gradient);
-    box-shadow: 0 0 12px oklch(0.72 0.16 300 / 70%);
+    border-radius: 0;
+    background: var(--ring);
   }
 
   /* Submenu expands inline: the rail scrolls, nothing overlays the content. */
@@ -426,10 +419,11 @@ body {
   min-height: 44px;
   padding: 0.25rem 0.75rem;
   background: transparent;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 0;
   color: var(--muted-foreground);
   font-size: 0.8rem;
+  box-shadow: var(--shadow-sm);
 }
 
 #session-toggle:hover:not(:disabled) {
@@ -440,10 +434,11 @@ body {
 #session-new {
   background: var(--primary);
   color: var(--primary-foreground);
-  border-color: transparent;
-  border-radius: 999px;
+  border: 2px solid var(--border);
+  border-radius: 0;
   padding: 0.25rem 0.95rem;
   font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
 
 #session-new:hover:not(:disabled) {
@@ -454,7 +449,8 @@ body {
 
 .session-count {
   padding: 0.05rem 0.4rem;
-  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0;
   background: var(--muted);
   color: var(--muted-foreground);
   font-size: 0.75rem;
@@ -517,9 +513,10 @@ body {
   content: "";
   width: 3rem;
   height: 3rem;
-  border-radius: 1rem;
+  border: 2px solid var(--border);
+  border-radius: 0;
   background: var(--accent-gradient);
-  box-shadow: 0 14px 44px -14px oklch(0.72 0.16 300 / 75%);
+  box-shadow: var(--shadow-md);
 }
 
 #conversation-empty p {
@@ -546,8 +543,8 @@ body {
   max-width: min(85%, 36rem);
   background: var(--secondary);
   color: var(--foreground);
-  border: 1px solid var(--border-subtle);
-  border-radius: 1.15rem 1.15rem 0.35rem 1.15rem;
+  border: 2px solid var(--border-subtle);
+  border-radius: 0;
   padding: 0.45rem 0.95rem;
   box-shadow: var(--shadow-sm);
   min-width: 0;
@@ -814,12 +811,14 @@ body {
 
 button,
 select {
+  font-family: var(--font-mono);
   font-size: 16px;
   background: var(--secondary);
   color: var(--secondary-foreground);
-  border: 1px solid var(--border-subtle);
+  border: 2px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 0.5rem 0.75rem;
+  box-shadow: var(--shadow-sm);
 }
 
 button:not(:disabled),
@@ -830,6 +829,10 @@ select:not(:disabled) {
 button:hover:not(:disabled) {
   background: var(--accent);
   color: var(--accent-foreground);
+}
+
+button:active:not(:disabled) {
+  translate: 1px 1px;
 }
 
 button:disabled {
@@ -847,15 +850,15 @@ button:disabled {
   opacity: 1;
 }
 
-/* Citation chips: quiet pill surfaces that lift on hover. */
+/* Citation chips: quiet pixel surfaces that lift on hover. */
 button[data-action-citation="true"],
 button[data-action-evidence="before"] {
   font-family: var(--font-mono);
   font-size: 0.78rem;
   padding: 0.2rem 0.55rem;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--card);
-  border: 1px solid var(--border-subtle);
+  border: 2px solid var(--border-subtle);
   color: var(--muted-foreground);
 }
 
@@ -865,15 +868,14 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   color: var(--foreground);
 }
 
-/* Primary send: the one place the Sorbet accent gradient appears in the
- * composer; dark text keeps AA contrast across the whole ramp. */
+/* Primary send: pixel command button; dark text keeps AA contrast. */
 #composer-send {
   background: var(--accent-gradient);
   color: oklch(0.17 0.012 285);
-  border-color: transparent;
+  border: 2px solid var(--border);
   border-radius: var(--radius-xl);
   font-weight: 650;
-  box-shadow: 0 8px 22px -12px oklch(0.72 0.16 300 / 85%);
+  box-shadow: var(--shadow-sm);
 }
 
 #composer-send:hover:not(:disabled) {
@@ -2103,9 +2105,9 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 }
 #autonomy .autonomy-dot {
   flex: none;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 0;
   background: var(--muted-foreground);
 }
 #autonomy-control[data-state="running"] .autonomy-dot {
@@ -2184,13 +2186,13 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   letter-spacing: 0.08em;
   color: var(--muted-foreground);
 }
-/* One chip grammar: 22px tall pill, same padding/radius/type everywhere. */
+/* One chip grammar: 22px tall pixel badge, same padding/type everywhere. */
 #autonomy :is(.autonomy-chip, .autonomy-count, .goal-unconfirmed-badge) {
   display: inline-block;
   max-width: 100%;
   padding: 0 0.4375rem;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 0;
   font: 0.6875rem / 1.25rem var(--font-mono);
   letter-spacing: 0;
   color: var(--muted-foreground);
@@ -2662,8 +2664,9 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   gap: 0.75rem;
   padding: 0.875rem 1rem;
   background: var(--card);
-  border: 1px solid var(--border-subtle);
+  border: 2px solid var(--border-subtle);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
 }
 .autonomy-vis-head,
 .autonomy-vis-pipeline-top,
@@ -2729,7 +2732,8 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   display: block;
   width: 100%;
   height: 10px;
-  border-radius: 999px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 0;
   overflow: hidden;
 }
 .autonomy-vis-bar-track,
@@ -2751,18 +2755,20 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 }
 .autonomy-vis-tabs {
   display: inline-flex;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 0;
   padding: 0.15rem;
   background: var(--background);
+  box-shadow: var(--shadow-sm);
 }
 .autonomy-vis-tabs button {
   border: 0;
-  border-radius: 999px;
+  border-radius: 0;
   background: transparent;
   padding: 0.3rem 0.75rem;
   font-size: 0.75rem;
   color: var(--muted-foreground);
+  box-shadow: none;
 }
 .autonomy-vis-tabs button[aria-selected="true"] {
   background: var(--secondary);
@@ -2771,7 +2777,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 }
 .autonomy-vis-arm-banner {
   padding: 0.45rem 0.75rem;
-  border: 1px solid var(--au-warn);
+  border: 2px solid var(--au-warn);
   border-radius: var(--radius-md);
   background: color-mix(in oklch, var(--au-warn) 12%, transparent);
   font-size: 0.8125rem;
@@ -2779,9 +2785,10 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 .autonomy-vis-map-wrap,
 .autonomy-vis-quickbar,
 .autonomy-vis-lane {
-  border: 1px solid var(--border-subtle);
+  border: 2px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: var(--background);
+  box-shadow: var(--shadow-sm);
 }
 .autonomy-vis-map-wrap {
   overflow-x: auto;
