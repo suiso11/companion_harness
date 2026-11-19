@@ -115,15 +115,9 @@ onMount(() => {
     max-width: 52rem;
     margin: 0.75rem auto 0;
     padding: 0.7rem 0.9rem;
-    border: 1px solid oklch(0.8 0.14 85 / 28%);
+    border: 2px solid #e0af68;
     border-radius: var(--radius-lg);
-    background:
-      linear-gradient(
-        90deg,
-        oklch(0.8 0.14 85 / 10%),
-        oklch(0.8 0.14 85 / 3%) 60%
-      ),
-      var(--card);
+    background: color-mix(in srgb, #e0af68 10%, var(--card));
     color: var(--foreground);
     font-size: 0.85rem;
     box-shadow: var(--shadow-sm);
@@ -136,8 +130,8 @@ onMount(() => {
 
   .autonomy-paused-banner button {
     flex: 0 0 auto;
-    border-radius: 999px;
-    border-color: oklch(0.8 0.14 85 / 35%);
+    border-radius: 0;
+    border-color: #e0af68;
     background: transparent;
     color: var(--foreground);
   }

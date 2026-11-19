@@ -17,43 +17,49 @@
   --radius-xl: 0px;
   --radius-2xl: 0px;
 
-  /* Dark-only surfaces: page < sidebar < card < popover (L < 0.3 floor). */
-  --background: oklch(0.145 0.025 268);
-  --foreground: oklch(0.97 0.008 268);
-  --card: oklch(0.19 0.03 268);
-  --card-foreground: oklch(0.97 0.008 268);
-  --popover: oklch(0.21 0.032 268);
-  --popover-foreground: oklch(0.97 0.008 268);
-  --primary: oklch(0.94 0.01 268);
-  --primary-foreground: oklch(0.185 0.025 268);
-  --secondary: oklch(0.24 0.035 268);
-  --secondary-foreground: oklch(0.97 0.008 268);
-  --muted: oklch(0.215 0.028 268);
-  --muted-foreground: oklch(0.75 0.025 268);
-  --accent: oklch(0.28 0.06 285);
-  --accent-foreground: oklch(0.98 0.006 268);
-  --destructive: oklch(0.68 0.2 22);
-  --border: oklch(0.76 0.09 255 / 45%);
-  --input: oklch(0.76 0.09 255 / 38%);
-  --ring: oklch(0.78 0.16 290);
-  --chart-1: oklch(0.74 0.19 295);
-  --chart-2: oklch(0.78 0.17 155);
-  --chart-3: oklch(0.84 0.16 85);
-  --chart-4: oklch(0.74 0.2 345);
-  --chart-5: oklch(0.78 0.15 205);
-  --code-background: oklch(0.165 0.025 268);
-  --code-foreground: oklch(0.92 0.015 268);
-  --border-subtle: oklch(0.74 0.07 255 / 26%);
-  --sidebar: oklch(0.165 0.028 268);
-  --surface: oklch(0.205 0.03 268);
+  /* Tokyo Night dark palette (L < 0.3 floor). */
+  --background: #1a1b26;
+  --foreground: #c0caf5;
+  --card: #24283b;
+  --card-foreground: #c0caf5;
+  --popover: #1f2335;
+  --popover-foreground: #c0caf5;
+  --primary: #7aa2f7;
+  --primary-foreground: #1a1b26;
+  --secondary: #292e42;
+  --secondary-foreground: #c0caf5;
+  --muted: #24283b;
+  --muted-foreground: #9aa5ce;
+  --accent: #2e3c64;
+  --accent-foreground: #7dcfff;
+  --destructive: #f7768e;
+  --border: #3b4261;
+  --input: #3b4261;
+  --ring: #2ac3de;
+  --chart-1: #7aa2f7;
+  --chart-2: #9ece6a;
+  --chart-3: #e0af68;
+  --chart-4: #bb9af7;
+  --chart-5: #7dcfff;
+  --tn-sky: #2ac3de;
+  --tn-teal: #73daca;
+  --tn-orange: #ff9e64;
+  --code-background: #16161e;
+  --code-foreground: #73daca;
+  --border-subtle: #292e42;
+  --sidebar: #16161e;
+  --surface: #24283b;
   --accent-gradient: linear-gradient(
     90deg,
-    oklch(0.74 0.18 295) 0 50%,
-    oklch(0.82 0.16 85) 50% 100%
+    #7aa2f7 0 34%,
+    #bb9af7 34% 67%,
+    #2ac3de 67% 100%
   );
-  --shadow-sm: 2px 2px 0 oklch(0 0 0 / 85%);
-  --shadow-md: 4px 4px 0 oklch(0 0 0 / 90%), inset 1px 1px 0 oklch(1 0 0 / 12%);
-  --shadow-lg: 6px 6px 0 oklch(0 0 0 / 92%), inset 2px 2px 0 oklch(1 0 0 / 15%);
+  --shadow-sm: 2px 2px 0 rgb(15 15 23 / 90%);
+  --shadow-md:
+    4px 4px 0 rgb(15 15 23 / 92%), inset 1px 1px 0 rgb(192 202 245 / 12%);
+  --shadow-lg:
+    6px 6px 0 rgb(15 15 23 / 95%), inset 2px 2px 0 rgb(192 202 245 / 15%);
   --sidebar-width: 15.5rem;
   /* llama-webui: `--font-mono` stack for code/stats. */
   --font-mono:
@@ -342,7 +348,7 @@ body {
     border: 2px solid var(--border);
     border-radius: 0;
     background: var(--accent-gradient);
-    color: oklch(0.99 0 0);
+    color: #1a1b26;
     box-shadow: var(--shadow-sm);
   }
 
@@ -704,7 +710,7 @@ body {
 #composer:focus-within {
   border-color: var(--ring);
   box-shadow:
-    0 0 0 3px oklch(0.72 0.15 300 / 18%),
+    0 0 0 3px rgb(42 195 222 / 22%),
     var(--shadow-md);
 }
 
@@ -871,7 +877,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 /* Primary send: pixel command button; dark text keeps AA contrast. */
 #composer-send {
   background: var(--accent-gradient);
-  color: oklch(0.17 0.012 285);
+  color: #1a1b26;
   border: 2px solid var(--border);
   border-radius: var(--radius-xl);
   font-weight: 650;
@@ -880,7 +886,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 
 #composer-send:hover:not(:disabled) {
   background: var(--accent-gradient);
-  color: oklch(0.17 0.012 285);
+  color: #1a1b26;
   filter: brightness(1.08);
 }
 
@@ -2009,12 +2015,12 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
  * → selected purpose + task flow (right) → quiet record dock. State colour
  * comes from `data-status` on the card/row and feeds rails, chips, bars. */
 #autonomy {
-  --au-accent: oklch(0.74 0.13 250);
-  --au-ok: var(--chart-2);
-  --au-warn: var(--chart-3);
-  --au-bad: var(--destructive);
-  --au-done: var(--muted);
-  --au-raised: oklch(0.24 0 0);
+  --au-accent: #7aa2f7;
+  --au-ok: #9ece6a;
+  --au-warn: #ff9e64;
+  --au-bad: #f7768e;
+  --au-done: #3b4261;
+  --au-raised: #292e42;
   display: grid;
   grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
   grid-template-areas:
@@ -2061,7 +2067,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
 
 /* State palette: active=green, held=amber, done=muted, revoked=red. */
 #autonomy [data-status] {
-  --au-state: oklch(0.85 0 0 / 55%);
+  --au-state: #7dcfff;
 }
 #autonomy :is([data-status="active"], [data-status="in_progress"]) {
   --au-state: var(--au-ok);
@@ -2611,7 +2617,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 1rem 1.25rem 1.125rem;
-  background: oklch(0.18 0 0);
+  background: #16161e;
   border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-lg);
 }
