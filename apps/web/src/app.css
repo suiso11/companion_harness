@@ -2017,6 +2017,7 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
   grid-template-areas:
     "bar bar"
+    "vis vis"
     "rail work"
     "dock dock";
   gap: 1.25rem 1.5rem;
@@ -2638,16 +2639,303 @@ button[data-action-evidence="before"]:hover:not(:disabled) {
   font-size: 0.875rem;
 }
 
+/* Interactive visualizer studio on `/tasks`: gauges, SVG hierarchy/conflict map,
+ * Kanban lanes, and visual history lifecycle stepper. */
+#autonomy [data-tone] {
+  --vt: var(--muted-foreground);
+}
+#autonomy [data-tone="ok"] {
+  --vt: var(--au-ok);
+}
+#autonomy [data-tone="accent"] {
+  --vt: var(--au-accent);
+}
+#autonomy [data-tone="warn"] {
+  --vt: var(--au-warn);
+}
+#autonomy [data-tone="bad"] {
+  --vt: var(--au-bad);
+}
+.autonomy-visualizer {
+  grid-area: vis;
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  background: var(--card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+.autonomy-vis-head,
+.autonomy-vis-pipeline-top,
+.autonomy-vis-arm-banner,
+.autonomy-vis-lane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.autonomy-vis-gauges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  flex: 1 1 24rem;
+}
+.autonomy-vis-donut-card,
+.autonomy-vis-step-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.autonomy-vis-donut-track {
+  fill: none;
+  stroke: var(--secondary);
+  stroke-width: 7;
+}
+.autonomy-vis-donut-seg {
+  fill: none;
+  stroke: var(--vt);
+  stroke-width: 7;
+}
+.autonomy-vis-donut-text {
+  fill: var(--foreground);
+  font: 600 12px var(--font-mono);
+}
+.autonomy-vis-gauge-meta,
+.autonomy-vis-pipeline-card {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.autonomy-vis-pipeline-card {
+  flex: 1 1 14rem;
+}
+.autonomy-vis-gauge-line,
+.autonomy-vis-empty,
+.autonomy-vis-hint,
+.autonomy-vis-quicktitle,
+.autonomy-vis-kcard-title {
+  font-size: 0.8125rem;
+}
+.autonomy-vis-gauge-line strong[data-conflict="true"] {
+  color: var(--au-bad);
+}
+.autonomy-vis-pct {
+  font: 600 0.75rem var(--font-mono);
+  color: var(--au-ok);
+}
+.autonomy-vis-bar {
+  display: block;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.autonomy-vis-bar-track,
+.autonomy-vis-node-count-bg {
+  fill: var(--secondary);
+}
+.autonomy-vis-bar-seg,
+.autonomy-vis-node-dot {
+  fill: var(--vt);
+}
+.autonomy-vis-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  font: 0.6875rem var(--font-mono);
+}
+.autonomy-vis-legend span {
+  color: var(--vt);
+}
+.autonomy-vis-tabs {
+  display: inline-flex;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 0.15rem;
+  background: var(--background);
+}
+.autonomy-vis-tabs button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.autonomy-vis-tabs button[aria-selected="true"] {
+  background: var(--secondary);
+  color: var(--foreground);
+  font-weight: 600;
+}
+.autonomy-vis-arm-banner {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--au-warn);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--au-warn) 12%, transparent);
+  font-size: 0.8125rem;
+}
+.autonomy-vis-map-wrap,
+.autonomy-vis-quickbar,
+.autonomy-vis-lane {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--background);
+}
+.autonomy-vis-map-wrap {
+  overflow-x: auto;
+}
+.autonomy-vis-svg {
+  display: block;
+  width: 100%;
+  min-width: 320px;
+  height: auto;
+  max-height: 24rem;
+}
+.autonomy-vis-col-label,
+.autonomy-vis-node-sub {
+  fill: var(--muted-foreground);
+  font: 10px var(--font-mono);
+}
+.autonomy-vis-edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+.autonomy-vis-edge[data-highlighted="true"] {
+  stroke: var(--au-accent);
+  stroke-width: 2.5;
+}
+.autonomy-vis-conflict-path {
+  fill: none;
+  stroke: var(--au-bad);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+}
+.autonomy-vis-conflict-dot {
+  fill: var(--card);
+  stroke: var(--au-bad);
+  stroke-width: 1.5;
+}
+.autonomy-vis-conflict-icon,
+.autonomy-vis-node-count {
+  fill: var(--foreground);
+  font: 600 10px var(--font-mono);
+}
+.autonomy-vis-node {
+  cursor: pointer;
+}
+.autonomy-vis-node-box {
+  fill: var(--card);
+  stroke: var(--border-subtle);
+  stroke-width: 1.5;
+}
+.autonomy-vis-node[data-selected="true"] .autonomy-vis-node-box {
+  fill: var(--au-raised);
+  stroke: var(--au-accent);
+  stroke-width: 2.5;
+}
+.autonomy-vis-node[data-armed="true"] .autonomy-vis-node-box {
+  stroke: var(--au-warn);
+  stroke-width: 2.5;
+  stroke-dasharray: 5 3;
+}
+.autonomy-vis-node[data-conflicting="true"] .autonomy-vis-node-box {
+  stroke: var(--au-bad);
+}
+.autonomy-vis-node-title {
+  fill: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.autonomy-vis-quickbar,
+.autonomy-vis-lane,
+.autonomy-vis-lane-cards,
+.autonomy-vis-kcard {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem;
+}
+.autonomy-vis-lane-cards {
+  padding: 0;
+}
+.autonomy-vis-quickgroup,
+.autonomy-vis-kcard-meta,
+.autonomy-vis-kcard-actions,
+.autonomy-vis-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+.autonomy-vis-quickgroup button,
+.autonomy-vis-kcard-actions button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+}
+.autonomy-vis-kanban {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+.autonomy-vis-lane {
+  align-content: start;
+  min-width: 0;
+}
+.autonomy-vis-lane-head,
+.autonomy-vis-lane-empty,
+.autonomy-vis-empty,
+.autonomy-vis-hint,
+.autonomy-vis-step-seq,
+.autonomy-vis-step-arrow,
+.autonomy-vis-step-note {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.autonomy-vis-kcard {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+}
+.autonomy-vis-kcard[data-selected="true"] {
+  border-color: var(--au-accent);
+  background: var(--au-raised);
+}
+.autonomy-vis-kcard-body {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--foreground);
+}
+.autonomy-vis-step {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--vt);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  font-size: 0.72rem;
+}
+
 @media (max-width: 800px) {
   #autonomy {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "bar"
+      "vis"
       "rail"
       "work"
       "dock";
     gap: 1rem;
     padding: 0.75rem;
+  }
+  #autonomy .autonomy-vis-kanban {
+    grid-template-columns: minmax(0, 1fr);
   }
   #autonomy-control h2 {
     flex-basis: 100%;
