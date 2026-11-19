@@ -14,6 +14,7 @@
 //   `learning_frozen` / global pause stop new work.
 // - Fail-open: every failure logs a fixed code and drops the item.
 
+import { randomUUID } from "node:crypto";
 import type { TrialProfileSnapshot } from "@companion/contracts";
 import type { KernelRepository } from "@companion/kernel";
 import type { ModelGateway } from "@companion/model-local";
@@ -40,7 +41,10 @@ export const REFLECT_DAY_MS = 86_400_000;
  * paused, and the next check must not wait a whole day after a resume.
  */
 export const REFLECT_PLAN_INTERVAL_MS = 10 * 60_000;
-export const REFLECT_PROPOSAL_EXPIRY_MS = 3 * 3_600_000;
+// A proposal waits for a human; it must not die before anyone sees it. The
+// approval path still rejects profile/alias drift and a paused control, so a
+// long horizon cannot execute against a stale frozen profile.
+export const REFLECT_PROPOSAL_EXPIRY_MS = 365 * 24 * 3_600_000;
 
 export const REFLECT_SYSTEM_PROMPT =
   "You review ONE failed assistant run and propose ONE behavioural " +
@@ -125,6 +129,8 @@ export interface ReflectServiceOptions {
   /** Frozen trial profile used to stage proposals (from server config). */
   readonly trialProfile?: TrialProfileSnapshot | null;
   readonly workspaceAlias?: string | null;
+  /** IANA zone for the staging chat notice's frozen context. */
+  readonly timeZone?: string;
 }
 
 export interface ReflectService {
@@ -304,6 +310,27 @@ export function createReflectService(
   }
 
   /**
+   * Best-effort chat notice in the user's most recent session: a staged
+   * proposal must not wait invisibly in /trials.
+   */
+  function notifyProposal(loopSessionId: string, statement: string): void {
+    try {
+      const target = repo.latestSessionId() ?? loopSessionId;
+      const snippet = Array.from(statement.replace(/\s+/g, " ").trim())
+        .slice(0, 60)
+        .join("");
+      const subject = snippet.length > 0 ? `「${snippet}」— ` : "";
+      repo.postCompanionMessage(
+        target,
+        `自己改善の試行提案を作った（読み取り専用）。${subject}/trials?session=${loopSessionId} で承認して。`,
+        options.timeZone === undefined ? {} : { timeZone: options.timeZone },
+      );
+    } catch {
+      warn("reflect.notice_failed");
+    }
+  }
+
+  /**
    * Stage at most `dailyProposals` read-only investigations for the most
    * repeated staged hypotheses. Requires an operator-configured standing
    * task; the loop never creates one and never writes a grant.
@@ -325,9 +352,16 @@ export function createReflectService(
     if (control.paused || control.learningFrozen) return;
     const day = utcDayStart(now());
     if (day === planDay) return;
+    // A restart resets planDay: the durable ledger decides whether this UTC
+    // day was already spent.
+    if (repo.loopProposalExistsSince(day)) {
+      planDay = day;
+      return;
+    }
     const eligible = repo.listEligibleLoopHypotheses(
       cfg.minEvidence,
       cfg.dailyProposals,
+      { now: now(), alias, profile },
     );
     if (eligible.length === 0) return;
     planDay = day;
@@ -353,7 +387,9 @@ export function createReflectService(
             requiredChecks: [...profile.mandatoryChecks],
           },
           {
-            key: hypothesis.id,
+            // Fresh key per stage: re-staging the same hypothesis after a
+            // profile change must not collide with its idempotency record.
+            key: randomUUID(),
             profile,
             workspaceAlias: alias,
             hypothesisId: hypothesis.id,
@@ -361,6 +397,7 @@ export function createReflectService(
           },
         );
         log("reflect.proposed_trial", { hypothesisId: hypothesis.id });
+        notifyProposal(cfg.sessionId, hypothesis.statement);
       } catch {
         warn("reflect.proposal_failed");
       }

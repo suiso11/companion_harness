@@ -2399,6 +2399,7 @@ export async function startServer(
               modelRoute: config.trial.modelRoute,
             },
       workspaceAlias: config.trial?.workspaceAlias ?? null,
+      timeZone: config.timeZone,
     });
     reflect.start();
     repo = wrapRepoWithReflect(repo, reflect);

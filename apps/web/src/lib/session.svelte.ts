@@ -8,12 +8,24 @@
 // polling watchers with one reactive source of truth. localStorage stays the
 // durable mirror (same `ch.sessionId` key the legacy client used).
 import { fetchJson, postJson, randomUuid } from "./api.js";
+import { sessionFromSearch } from "./session_url.js";
 
 const LS_SESSION = "ch.sessionId";
 
 function readStoredSession(): string | null {
   try {
     return localStorage.getItem(LS_SESSION);
+  } catch {
+    return null;
+  }
+}
+
+/** History-probe one session id; null means the transport failed. */
+async function probeSession(id: string): Promise<number | null> {
+  try {
+    return (
+      await fetchJson(`/api/sessions/${encodeURIComponent(id)}/history?limit=1`)
+    ).status;
   } catch {
     return null;
   }
@@ -49,18 +61,20 @@ export function setSessionId(id: string | null): void {
  * null when the transport failed.
  */
 export async function ensureSession(): Promise<string | null> {
+  // An explicit `?session=` link is page-load only: it must not overwrite
+  // the durable chat session the user returns to at `/`.
+  const fromUrl = sessionFromSearch(window.location.search);
+  if (fromUrl !== null) {
+    if (getSessionId() === fromUrl) return fromUrl;
+    const status = await probeSession(fromUrl);
+    if (status !== 404 && status !== 410) {
+      sessionId = fromUrl;
+      return fromUrl;
+    }
+  }
   const stored = getSessionId() ?? readStoredSession();
   if (stored !== null && stored.length > 0) {
-    let probeStatus: number | null = null;
-    try {
-      probeStatus = (
-        await fetchJson(
-          `/api/sessions/${encodeURIComponent(stored)}/history?limit=1`,
-        )
-      ).status;
-    } catch {
-      probeStatus = null;
-    }
+    const probeStatus = await probeSession(stored);
     if (probeStatus === 200 || probeStatus === null) {
       setSessionId(stored);
       return stored;
