@@ -528,15 +528,16 @@ function onKey(event: KeyboardEvent): void {
               <svg
                 class="constellation-svg"
                 viewBox={`0 0 ${constellation.width} ${constellation.height}`}
+                shape-rendering="crispEdges"
                 role="img"
                 aria-label="ペルソナ相関図"
               >
-                <ellipse
+                <rect
                   class="constellation-orbit"
-                  cx={constellation.width / 2}
-                  cy={constellation.height / 2 + 4}
-                  rx="220"
-                  ry="82"
+                  x="96"
+                  y="40"
+                  width="448"
+                  height="172"
                 />
 
                 {#each constellation.edges as edge (edge.id)}
@@ -570,7 +571,6 @@ function onKey(event: KeyboardEvent): void {
                       y={edge.labelY - 10}
                       width="56"
                       height="20"
-                      rx="10"
                     />
                     <text
                       class="constellation-edge-text"
@@ -612,9 +612,21 @@ function onKey(event: KeyboardEvent): void {
                     }}
                   >
                     {#if node.role === "primary" || node.role === "partner"}
-                      <circle class="constellation-node-halo" cx="0" cy="0" r={node.r + 6} />
+                      <rect
+                        class="constellation-node-halo"
+                        x={-node.r - 5}
+                        y={-node.r - 5}
+                        width={(node.r + 5) * 2}
+                        height={(node.r + 5) * 2}
+                      />
                     {/if}
-                    <circle class="constellation-node-disc" cx="0" cy="0" r={node.r} />
+                    <rect
+                      class="constellation-node-disc"
+                      x={-node.r}
+                      y={-node.r}
+                      width={node.r * 2}
+                      height={node.r * 2}
+                    />
                     <text class="constellation-node-avatar" x="0" y="6" text-anchor="middle">
                       {node.avatar}
                     </text>
@@ -639,15 +651,14 @@ function onKey(event: KeyboardEvent): void {
                         <rect
                           class="constellation-node-role-bg"
                           x="-18"
-                          y={-node.r - 16}
+                          y={-node.r - 17}
                           width="36"
                           height="15"
-                          rx="7"
                         />
                         <text
                           class="constellation-node-role"
                           x="0"
-                          y={-node.r - 5}
+                          y={-node.r - 6}
                           text-anchor="middle"
                         >
                           {node.role === "primary" ? "主役" : "相手"}
@@ -740,21 +751,23 @@ function onKey(event: KeyboardEvent): void {
                 <svg
                   class="stage-wave-svg"
                   viewBox="0 0 160 28"
+                  shape-rendering="crispEdges"
                   aria-hidden="true"
                 >
                   <line class="stage-wave-track" x1="8" y1="14" x2="152" y2="14" />
                   {#if sending || selected.autotalk}
                     <path
                       class="stage-wave-active"
-                      d="M 8 14 Q 26 2, 44 14 T 80 14 T 116 14 T 152 14"
+                      d="M 8 14 H 24 V 5 H 40 V 23 H 56 V 9 H 72 V 19 H 88 V 5 H 104 V 23 H 120 V 9 H 136 V 14 H 152"
                     />
                   {/if}
-                  <circle class="stage-wave-node" cx="80" cy="14" r="4" />
+                  <rect class="stage-wave-node" x="76" y="10" width="8" height="8" />
                 </svg>
                 <svg
                   class="stage-balance-svg"
                   viewBox={`0 0 ${BALANCE_SVG_WIDTH} 6`}
                   preserveAspectRatio="none"
+                  shape-rendering="crispEdges"
                   aria-label="発言バランス"
                 >
                   <rect
@@ -763,7 +776,6 @@ function onKey(event: KeyboardEvent): void {
                     y="0"
                     width={BALANCE_SVG_WIDTH}
                     height="6"
-                    rx="3"
                   />
                   {#each dialogueStage.balanceSegments as seg (seg.slot)}
                     <rect
@@ -847,6 +859,7 @@ function onKey(event: KeyboardEvent): void {
                   class="turn-timeline-svg"
                   viewBox={`0 0 ${dialogueStage.timelineWidth} ${dialogueStage.timelineHeight}`}
                   preserveAspectRatio="none"
+                  shape-rendering="crispEdges"
                   role="group"
                   aria-label="会話ターン・ミニマップ"
                 >
@@ -860,7 +873,6 @@ function onKey(event: KeyboardEvent): void {
                       y={bar.y}
                       width={bar.width}
                       height={bar.height}
-                      rx="2"
                       role="button"
                       tabindex="0"
                       aria-label={`ターン #${bar.index} ${bar.speakerName}: ${bar.preview}`}
@@ -944,9 +956,9 @@ function onKey(event: KeyboardEvent): void {
   button { cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button { background: none; border: 0; padding: 0.2rem; }
-  .avatar { flex: none; display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--secondary); }
+  .avatar { flex: none; display: grid; place-items: center; width: 2rem; height: 2rem; border: 2px solid var(--border); background: var(--secondary); box-shadow: var(--shadow-sm); }
   .pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-subtle); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border-subtle); }
   .header-controls { display: flex; align-items: center; gap: 0.4rem; }
   .studio-btn[aria-pressed="true"], .primary-btn { border-color: var(--ring); background: var(--accent); color: var(--accent-foreground); font-weight: 600; }
   .toggle { display: none; }
@@ -955,81 +967,81 @@ function onKey(event: KeyboardEvent): void {
   .msg.user { justify-content: flex-end; }
   .msg[data-dimmed="true"] { opacity: 0.28; }
   .msg[data-highlighted="true"] .bubble { outline: 2px solid var(--ring); outline-offset: 2px; }
-  .msg[data-slot="partner"] .bubble { border-left: 3px solid var(--chart-2); }
-  .msg[data-slot="primary"] .bubble { border-left: 3px solid var(--chart-1); }
-  .bubble { max-width: 70%; padding: 0.5rem 0.75rem; border-radius: var(--radius-lg); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); }
+  .msg[data-slot="partner"] .bubble { border-left: 4px solid var(--chart-2); }
+  .msg[data-slot="primary"] .bubble { border-left: 4px solid var(--chart-1); }
+  .bubble { max-width: 70%; padding: 0.5rem 0.75rem; border: 2px solid var(--border-subtle); box-shadow: var(--shadow-sm); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); }
   .user .bubble { background: var(--secondary); }
   .typing { color: var(--muted-foreground); }
-  .composer { display: flex; gap: 0.5rem; padding: 0.5rem; border-top: 1px solid var(--border-subtle); }
+  .composer { display: flex; gap: 0.5rem; padding: 0.5rem; border-top: 2px solid var(--border-subtle); }
   .composer textarea { flex: 1; resize: none; }
-  .banner { margin: 0.5rem; padding: 0.5rem 0.75rem; border: 1px solid var(--destructive); border-radius: var(--radius-sm); color: var(--destructive); }
+  .banner { margin: 0.5rem; padding: 0.5rem 0.75rem; border: 2px solid var(--destructive); color: var(--destructive); }
   .empty { padding: 1rem; }
-  .partner { margin-left: -0.6rem; }
-  .badge { font-size: 0.7rem; padding: 0 0.4rem; border-radius: var(--radius-sm); background: var(--secondary); }
-  .name { color: var(--muted-foreground); font-size: 0.75rem; margin: 0 0 0.15rem 2.5rem; }
+  .partner { margin-left: -0.4rem; }
+  .badge { font-size: 0.7rem; padding: 0 0.4rem; border: 1px solid var(--border); background: var(--secondary); }
+  .name { color: var(--muted-foreground); font-size: 0.75rem; margin: 0 0 0.15rem 2.5rem; font-family: var(--font-mono); }
   .who { flex: 1; min-width: 0; display: grid; }
   .opts { flex-direction: column; }
 
   /* Sidebar visual persona palette */
-  .palette { display: grid; gap: 0.35rem; padding: 0.45rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--background); }
+  .palette { display: grid; gap: 0.35rem; padding: 0.45rem; border: 2px solid var(--border-subtle); background: var(--background); }
   .palette-head { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; }
   .palette-clear { font-size: 0.7rem; padding: 0.1rem 0.4rem; }
   .palette-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-  .palette-chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.45rem; border-radius: 999px; font-size: 0.78rem; background: var(--card); border: 1px solid var(--border-subtle); }
+  .palette-chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.45rem; font-size: 0.78rem; background: var(--card); border: 2px solid var(--border-subtle); box-shadow: var(--shadow-sm); }
   .palette-chip[data-role="primary"] { border-color: var(--chart-1); background: color-mix(in oklab, var(--chart-1) 18%, var(--card)); }
   .palette-chip[data-role="partner"] { border-color: var(--chart-2); background: color-mix(in oklab, var(--chart-2) 18%, var(--card)); }
-  .palette-tag { font-size: 0.65rem; padding: 0 0.3rem; border-radius: 999px; background: var(--secondary); }
+  .palette-tag { font-size: 0.65rem; padding: 0 0.3rem; background: var(--secondary); font-family: var(--font-mono); }
 
   /* Constellation Studio */
-  .constellation-studio { display: grid; gap: 0.6rem; padding: 0.75rem; border-bottom: 1px solid var(--border-subtle); background: color-mix(in oklab, var(--card) 75%, var(--background)); }
+  .constellation-studio { display: grid; gap: 0.6rem; padding: 0.75rem; border-bottom: 2px solid var(--border-subtle); background: color-mix(in oklab, var(--card) 75%, var(--background)); }
   .constellation-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
   .constellation-head div { display: grid; gap: 0.15rem; }
-  .constellation-canvas-wrap { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--background); overflow: hidden; }
+  .constellation-canvas-wrap { border: 2px solid var(--border-subtle); background: var(--background); overflow: hidden; box-shadow: var(--shadow-sm); }
   .constellation-svg { display: block; width: 100%; height: auto; max-height: 15.5rem; }
   .constellation-orbit { fill: none; stroke: var(--border-subtle); stroke-dasharray: 4 4; }
   .constellation-edge-group { cursor: pointer; }
-  .constellation-edge { fill: none; stroke: var(--muted-foreground); stroke-opacity: 0.55; stroke-linecap: round; }
-  .constellation-edge-group[data-autotalk="true"] .constellation-edge { stroke: var(--chart-3); stroke-dasharray: 6 4; stroke-opacity: 0.85; }
+  .constellation-edge { fill: none; stroke: var(--muted-foreground); stroke-opacity: 0.65; }
+  .constellation-edge-group[data-autotalk="true"] .constellation-edge { stroke: var(--chart-3); stroke-dasharray: 6 4; stroke-opacity: 0.9; }
   .constellation-edge-group[data-active="true"] .constellation-edge, .constellation-edge-group:hover .constellation-edge { stroke: var(--chart-1); stroke-opacity: 1; }
-  .constellation-edge-pill { fill: var(--card); stroke: var(--border-subtle); }
+  .constellation-edge-pill { fill: var(--card); stroke: var(--border); stroke-width: 2; }
   .constellation-edge-text { fill: var(--foreground); font-size: 10px; font-family: var(--font-mono); }
-  .constellation-beam { stroke: var(--ring); stroke-width: 2; stroke-dasharray: 5 3; }
+  .constellation-beam { stroke: var(--ring); stroke-width: 2; stroke-dasharray: 4 4; }
   .constellation-node { cursor: pointer; }
   .constellation-node[data-available="false"] { opacity: 0.45; cursor: not-allowed; }
   .constellation-node-halo { fill: none; stroke: var(--chart-1); stroke-width: 2; stroke-dasharray: 4 2; }
   .constellation-node[data-role="partner"] .constellation-node-halo { stroke: var(--chart-2); }
-  .constellation-node-disc { fill: var(--card); stroke: var(--border); stroke-width: 1.5; }
-  .constellation-node[data-role="primary"] .constellation-node-disc { stroke: var(--chart-1); stroke-width: 2.5; }
-  .constellation-node[data-role="partner"] .constellation-node-disc { stroke: var(--chart-2); stroke-width: 2.5; }
+  .constellation-node-disc { fill: var(--card); stroke: var(--border); stroke-width: 2; }
+  .constellation-node[data-role="primary"] .constellation-node-disc { stroke: var(--chart-1); stroke-width: 3; }
+  .constellation-node[data-role="partner"] .constellation-node-disc { stroke: var(--chart-2); stroke-width: 3; }
   .constellation-node-avatar { font-size: 18px; }
-  .constellation-node-name { fill: var(--foreground); font-size: 11px; font-weight: 600; }
-  .constellation-node-ai { fill: var(--muted-foreground); font-size: 9px; }
+  .constellation-node-name { fill: var(--foreground); font-size: 11px; font-weight: 700; font-family: var(--font-mono); }
+  .constellation-node-ai { fill: var(--muted-foreground); font-size: 9px; font-family: var(--font-mono); }
   .constellation-node-role-bg { fill: var(--chart-1); }
   .constellation-node[data-role="partner"] .constellation-node-role-bg { fill: var(--chart-2); }
-  .constellation-node-role { fill: var(--background); font-size: 9px; font-weight: 700; }
-  .constellation-dock { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.65rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--card); }
+  .constellation-node-role { fill: var(--background); font-size: 9px; font-weight: 700; font-family: var(--font-mono); }
+  .constellation-dock { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0.65rem; border: 2px solid var(--border-subtle); background: var(--card); box-shadow: var(--shadow-sm); }
   .constellation-pair-preview { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
   .pair-slot { display: inline-flex; align-items: center; gap: 0.4rem; }
   .pair-slot span { display: grid; line-height: 1.2; }
-  .pair-bridge { color: var(--muted-foreground); font-weight: 700; }
+  .pair-bridge { color: var(--muted-foreground); font-weight: 700; font-family: var(--font-mono); }
   .constellation-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 
   /* Live Dialogue Stage & Turn Scrubber */
-  .dialogue-stage { display: grid; gap: 0.5rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border-subtle); background: color-mix(in oklab, var(--card) 60%, var(--background)); }
+  .dialogue-stage { display: grid; gap: 0.5rem; padding: 0.55rem 0.75rem; border-bottom: 2px solid var(--border-subtle); background: color-mix(in oklab, var(--card) 60%, var(--background)); }
   .stage-actors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(7rem, 11rem) minmax(0, 1fr); align-items: center; gap: 0.5rem; }
-  .stage-actor { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.55rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--card); min-width: 0; }
-  .stage-actor[data-slot="primary"][data-active="true"] { border-color: var(--chart-1); box-shadow: inset 3px 0 0 var(--chart-1); }
-  .stage-actor[data-slot="partner"][data-active="true"] { border-color: var(--chart-2); box-shadow: inset -3px 0 0 var(--chart-2); }
+  .stage-actor { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.55rem; border: 2px solid var(--border-subtle); background: var(--card); box-shadow: var(--shadow-sm); min-width: 0; }
+  .stage-actor[data-slot="primary"][data-active="true"] { border-color: var(--chart-1); box-shadow: inset 4px 0 0 var(--chart-1), var(--shadow-sm); }
+  .stage-actor[data-slot="partner"][data-active="true"] { border-color: var(--chart-2); box-shadow: inset -4px 0 0 var(--chart-2), var(--shadow-sm); }
   .stage-actor-right { justify-content: flex-end; text-align: right; }
-  .stage-avatar { flex: none; display: grid; place-items: center; width: 2.2rem; height: 2.2rem; border-radius: 50%; background: var(--secondary); font-size: 1.1rem; }
+  .stage-avatar { flex: none; display: grid; place-items: center; width: 2.2rem; height: 2.2rem; border: 2px solid var(--border); background: var(--secondary); font-size: 1.1rem; }
   .stage-actor-meta { display: grid; min-width: 0; }
   .stage-actor-meta strong, .stage-actor-meta small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stage-bridge { display: grid; justify-items: center; gap: 0.2rem; }
   .stage-wave-svg { width: 100%; height: 1.4rem; }
-  .stage-wave-track { stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .stage-wave-track { stroke: var(--border); stroke-width: 2; stroke-dasharray: 4 2; }
   .stage-wave-active { fill: none; stroke: var(--chart-3); stroke-width: 2; }
   .stage-wave-node { fill: var(--ring); }
-  .stage-balance-svg { width: 100%; height: 6px; border-radius: 999px; overflow: hidden; }
+  .stage-balance-svg { width: 100%; height: 6px; border: 1px solid var(--border-subtle); }
   .stage-balance-track { fill: var(--secondary); }
   .stage-balance-seg[data-slot="primary"] { fill: var(--chart-1); }
   .stage-balance-seg[data-slot="partner"] { fill: var(--chart-2); }
@@ -1037,9 +1049,9 @@ function onKey(event: KeyboardEvent): void {
   .turn-scrubber { display: grid; gap: 0.3rem; }
   .turn-scrubber-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem; }
   .turn-filters { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-  .turn-filter-chip { font-size: 0.72rem; padding: 0.15rem 0.45rem; border-radius: 999px; }
+  .turn-filter-chip { font-size: 0.72rem; padding: 0.15rem 0.45rem; }
   .turn-filter-chip[aria-pressed="true"] { border-color: var(--ring); background: var(--accent); }
-  .turn-timeline-svg { display: block; width: 100%; height: 2.25rem; padding: 0.15rem 0.25rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--background); }
+  .turn-timeline-svg { display: block; width: 100%; height: 2.25rem; padding: 0.15rem 0.25rem; border: 2px solid var(--border-subtle); background: var(--background); }
   .turn-bar { fill: var(--chart-3); cursor: pointer; opacity: 0.85; }
   .turn-bar[data-slot="primary"] { fill: var(--chart-1); }
   .turn-bar[data-slot="partner"] { fill: var(--chart-2); }

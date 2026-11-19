@@ -1489,6 +1489,7 @@ $effect(() => {
             class="autonomy-vis-bar"
             viewBox={`0 0 ${BAR_TOTAL_WIDTH} 10`}
             preserveAspectRatio="none"
+            shape-rendering="crispEdges"
             aria-hidden="true"
           >
             <rect
@@ -1497,7 +1498,6 @@ $effect(() => {
               y="0"
               width={BAR_TOTAL_WIDTH}
               height="10"
-              rx="5"
             />
             {#each visMetrics.taskBarSegments as seg (seg.key)}
               <rect
@@ -1571,14 +1571,15 @@ $effect(() => {
             id="autonomy-visualizer-svg"
             class="autonomy-vis-svg"
             viewBox={`0 0 ${visGraph.width} ${visGraph.height}`}
+            shape-rendering="crispEdges"
             role="img"
             aria-label="目的と作業の関係および競合マップ"
           >
             <text class="autonomy-vis-col-label" x="64" y="20">
-              目的 (クリックで選択・操作)
+              ▶ 目的 (クリックで選択・操作)
             </text>
             <text class="autonomy-vis-col-label" x="432" y="20">
-              作業 (親の目的と接続)
+              ▶ 作業 (親の目的と接続)
             </text>
 
             {#each visGraph.edges as edge (edge.id)}
@@ -1593,11 +1594,12 @@ $effect(() => {
             {#each visGraph.conflictArcs as arc (arc.id)}
               <g class="autonomy-vis-conflict-arc" data-highlighted={arc.highlighted}>
                 <path class="autonomy-vis-conflict-path" d={arc.path} />
-                <circle
+                <rect
                   class="autonomy-vis-conflict-dot"
-                  cx={arc.badgeX}
-                  cy={arc.badgeY}
-                  r="9"
+                  x={arc.badgeX - 8}
+                  y={arc.badgeY - 8}
+                  width="16"
+                  height="16"
                 />
                 <text
                   class="autonomy-vis-conflict-icon"
@@ -1639,9 +1641,8 @@ $effect(() => {
                   y="0"
                   width={node.width}
                   height={node.height}
-                  rx="10"
                 />
-                <circle class="autonomy-vis-node-dot" cx="14" cy="23" r="5" />
+                <rect class="autonomy-vis-node-dot" x="10" y="18" width="9" height="9" />
                 <text class="autonomy-vis-node-title" x="26" y="19">
                   {node.shortLabel}
                 </text>
@@ -1652,15 +1653,14 @@ $effect(() => {
                 </text>
                 <rect
                   class="autonomy-vis-node-count-bg"
-                  x={node.width - 42}
+                  x={node.width - 40}
                   y="13"
-                  width="32"
+                  width="30"
                   height="20"
-                  rx="10"
                 />
                 <text
                   class="autonomy-vis-node-count"
-                  x={node.width - 26}
+                  x={node.width - 25}
                   y="27"
                   text-anchor="middle"
                 >
@@ -1694,9 +1694,8 @@ $effect(() => {
                   y="0"
                   width={tnode.width}
                   height={tnode.height}
-                  rx="9"
                 />
-                <circle class="autonomy-vis-node-dot" cx="14" cy="21" r="4.5" />
+                <rect class="autonomy-vis-node-dot" x="10" y="16" width="8" height="8" />
                 <text class="autonomy-vis-node-title" x="26" y="18">
                   {tnode.shortLabel}
                 </text>
