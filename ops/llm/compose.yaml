@@ -10,17 +10,28 @@
 # the current model — re-measure them when the GGUF changes.
 services:
   main:
-    # Chat model for Companion (LiteLLM `local-chat`). Source:
-    # huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated, GGUF by mradermacher
-    # i1-Q4_K_M (21,713,463,808 bytes). Measured on the P40 (2026-10-22):
-    # 20.8 GiB VRAM @ 16k, decode ~61 tok/s, prefill ~961 tok/s @ 6k;
-    # thinking on/off gives the same decode rate.
+    # Chat model for Companion when the Strata primary is not used
+    # (profile p40; it is no longer LiteLLM's `local-chat` backend). Source:
+    # huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF, Unsloth dynamic quant
+    # UD-Q5_K_XL (20,673,612,704 bytes, sha256 a6ff5208…), arch qwen35 (dense).
+    # Swapped in 2026-11-12 from Huihui Ornith 1.5 35B A3B (MoE, i1-Q4_K_M).
+    # Measured on the P40 (2026-11-12): 21,467 MiB VRAM @ 64k, prefill
+    # ~223 tok/s @ 14k, decode 11.7 tok/s short / 10.9 tok/s @ 14k. The dense
+    # 27B is ~5x slower than the MoE it replaced (59 tok/s) because every
+    # weight is read per token; P40 memory bandwidth is the ceiling.
     # 2026-10-26 P40: 65536 ctx q8_0 KV. Must be >= the pi-orch guest
     # contextWindow (65536) so the guest's own compaction kicks in before
     # llama.cpp rejects the request; 49152 overflowed in a real trial after
     # ~7 turns. Guest needs ~17k tokens of system+tools too, so 16k was out
-    # (rejected at 17,026). At 49152 q8_0 measured GPU0 21.0/24.0 GiB,
-    # prefill ~557 tok/s @20k, decode 59 tok/s short / 32 tok/s @20k.
+    # (rejected at 17,026). At 49152 q8_0 the previous MoE model measured
+    # GPU0 21.0/24.0 GiB, prefill ~557 tok/s @20k, decode 59 tok/s short /
+    # 32 tok/s @20k.
+    # Behind a profile: the P40 is owned by the Strata engine
+    # (127.0.0.1:8091, `qwen3.8-flash-next-q2_0`), so a plain `up -d` must
+    # not start this container or the two fight for the same 24 GiB. Start
+    # it deliberately, after stopping strata:
+    #   docker compose --profile p40 up -d main
+    profiles: ["p40"]
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
     container_name: companion-main
     restart: unless-stopped
@@ -37,7 +48,7 @@ services:
               capabilities: [gpu]
     command:
       - -m
-      - ${MAIN_MODEL_FILE:-/root/.cache/huggingface/huihui-ornith-35b/Huihui-Ornith-1.5-35B-A3B-abliterated.i1-Q4_K_M.gguf}
+      - ${MAIN_MODEL_FILE:-/root/.cache/huggingface/huihui-qwen3.8-27b/Huihui-Qwen3.8-27B-abliterated-UD-Q5_K_XL.gguf}
       - --host
       - 0.0.0.0
       - --port
@@ -89,7 +100,9 @@ services:
 
   maint:
     # Maintenance LLM for remind (importance / topics / consolidation),
-    # called directly on loopback by remind. Not registered in LiteLLM.
+    # called directly on loopback by remind, and the backend that LiteLLM
+    # exposes as `local-chat` when the Strata primary (127.0.0.1:8091) is
+    # unavailable — a manual switch, not an automatic failover.
     # Shares the pinned llama.cpp build with main.
     image: ghcr.io/ggml-org/llama.cpp@sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb
     container_name: companion-maint
@@ -115,7 +128,11 @@ services:
       - --port
       - "8080"
       - -c
-      - "8192"
+      # 8192 rejected real 7-15k companion turns as soon as LiteLLM began
+      # routing `local-chat` here; 32768 matches the Strata primary so the
+      # fallback does not narrow the prompt budget. Measured VRAM after the
+      # change: 6,977 / 16,384 MiB on the P5000.
+      - "32768"
       - -ngl
       - "99"
       - -fa
@@ -147,7 +164,9 @@ services:
       - --port
       - "4000"
     depends_on:
-      main:
+      # `main` is profile-gated and must not be started by a plain `up -d`;
+      # litellm's backend is `maint` now (see litellm_config.yaml).
+      maint:
         condition: service_healthy
 
   searxng:

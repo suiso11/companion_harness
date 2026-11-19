@@ -21,7 +21,9 @@
 # so a plain `up -d` would keep the old config live inside the container.
 # Recreating bind-mounted services is an additional step: apply.sh always
 # runs a plain `up -d --remove-orphans` first so compose.yaml changes to any
-# service (main included) are reconciled even when a config file also changed.
+# service are reconciled even when a config file also changed. `main` is
+# profile-gated (the P40 belongs to the Strata primary), so plain `up -d`
+# leaves it alone unless --profile p40 is passed.
 #
 # Usage: ops/llm/apply.sh [--yes] [--dest /srv/llm]
 
@@ -246,4 +248,4 @@ if [ -n "$RECREATE_SERVICES" ]; then
   docker compose --project-directory "$DEST" --env-file "$DEST/.env" \
     -f "$DEST/compose.yaml" up -d --remove-orphans --force-recreate $RECREATE_SERVICES
 fi
-printf 'apply: containers reconciled (litellm on :4000, main/companion-main internal :8080, maint on 127.0.0.1:18090, searxng on 127.0.0.1:8888)\n'
+printf 'apply: containers reconciled (litellm on :4000 -> maint, maint on 127.0.0.1:18090, searxng on 127.0.0.1:8888; main is profile p40)\n'

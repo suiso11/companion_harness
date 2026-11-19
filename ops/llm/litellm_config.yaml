@@ -1,13 +1,17 @@
 # LiteLLM model list for the local stack.
 # `local-chat` is the model Companion uses; it is a stable routing name.
-# The upstream model must match main's llama.cpp `--alias` in compose.yaml:
-# both are model-independent, so swapping the GGUF only changes
-# MAIN_MODEL_FILE in /srv/llm/.env.
+# Companion normally talks to the Strata engine (127.0.0.1:8091) directly —
+# this route is the manual fallback, so the upstream is maint's llama.cpp
+# `--alias` in compose.yaml. It cannot be `main`: that model needs the P40,
+# which the Strata primary owns. Swapping the GGUF only changes
+# MAINT_MODEL_FILE in /srv/llm/.env.
 model_list:
   - model_name: local-chat
     litellm_params:
-      model: openai/companion-main
-      api_base: http://main:8080/v1
+      # Recreating the maint container reassigns its IP; restart litellm
+      # afterwards or every request fails with "Connection error" until it is.
+      model: openai/companion-maint
+      api_base: http://companion-maint:8080/v1
       api_key: os.environ/LLAMA_API_KEY
       # The relay abandons a turn at 60s, but llama.cpp keeps generating.
       # Do not multiply those abandoned requests: no automatic retries, and
