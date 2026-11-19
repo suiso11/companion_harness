@@ -37,6 +37,17 @@ import {
   fetchAutonomyControl,
 } from "./lib/autonomy_control.js";
 import {
+  BAR_TOTAL_WIDTH,
+  buildAutonomyGraphLayout,
+  buildAutonomyMetrics,
+  buildTaskKanbanLanes,
+  DONUT_RADIUS,
+  parseConflictPairs,
+  parseHistorySteps,
+  type VisConflictPair,
+  type VisHistoryStep,
+} from "./lib/autonomy_visualizer.js";
+import {
   CONFIRM_GOAL_LABEL,
   goalConfirmPath,
   isConversationAdoptedGoal,
@@ -152,6 +163,11 @@ let taskDetailVisible = $state(false);
 let taskDetailBody = $state("");
 let purposeHistoryMoreVisible = $state(false);
 let taskHistoryMoreVisible = $state(false);
+let conflictPairs = $state<VisConflictPair[]>([]);
+let armedPurposeId = $state<string | null>(null);
+let purposeHistorySteps = $state<VisHistoryStep[]>([]);
+let taskHistorySteps = $state<VisHistoryStep[]>([]);
+let visTab = $state<"map" | "kanban" | "hide">("map");
 
 // Creation form drafts.
 let purposeScope = $state("");
@@ -368,6 +384,10 @@ async function refreshLists(): Promise<void> {
     selectedTask = null;
     selectedTaskView = null;
     conflictArm = null;
+    armedPurposeId = null;
+    conflictPairs = [];
+    purposeHistorySteps = [];
+    taskHistorySteps = [];
     clearPurposeDrafts();
     clearTaskDrafts();
     purposeHistoryCursor = null;
@@ -446,10 +466,14 @@ function renderPurposes(result: { status: number; body: unknown }): void {
       selectedPurpose = null;
       selectedPurposeView = null;
       conflictArm = null;
+      armedPurposeId = null;
+      purposeHistorySteps = [];
       clearPurposeDrafts();
       purposeDetailVisible = false;
     }
   }
+  conflictArm = revalidateConflictArm(conflictArm, purposeActiveIds);
+  armedPurposeId = conflictArm;
 }
 
 function renderTasks(result: { status: number; body: unknown }): void {
@@ -488,6 +512,7 @@ function renderTasks(result: { status: number; body: unknown }): void {
     } else {
       selectedTask = null;
       selectedTaskView = null;
+      taskHistorySteps = [];
       clearTaskDrafts();
       taskDetailVisible = false;
     }
@@ -497,8 +522,10 @@ function renderTasks(result: { status: number; body: unknown }): void {
 function renderConflicts(result: { status: number; body: unknown }): void {
   if (result.status !== 200) {
     conflictsText = "";
+    conflictPairs = [];
     return;
   }
+  conflictPairs = parseConflictPairs(result.body);
   const groups =
     ((result.body as { conflicts?: unknown }).conflicts as
       | unknown[]
@@ -577,10 +604,9 @@ async function selectPurpose(id: string): Promise<void> {
     (interpretation.length > 0 ? `解釈: ${interpretation}\n` : "") +
     "許可の記録は主張のみで、権限の付与ではありません。";
   if (history !== null && history.status === 200) {
-    const lines = formatHistoryEvents(
-      (history.body as { events?: unknown }).events,
-      false,
-    );
+    const rawEvents = (history.body as { events?: unknown }).events;
+    purposeHistorySteps = parseHistorySteps(rawEvents, false);
+    const lines = formatHistoryEvents(rawEvents, false);
     if (lines.length > 0) {
       purposeDetailBody += `\n履歴:\n${lines.join("\n")}`;
     }
@@ -593,6 +619,7 @@ async function selectPurpose(id: string): Promise<void> {
       purposeHistoryMoreVisible = false;
     }
   } else {
+    purposeHistorySteps = [];
     purposeHistoryCursor = null;
     purposeHistoryMoreVisible = false;
   }
@@ -631,10 +658,12 @@ async function loadMorePurposeHistory(): Promise<void> {
     return;
   }
   if (page.status !== 200) return;
-  const lines = formatHistoryEvents(
-    (page.body as { events?: unknown }).events,
-    false,
-  );
+  const rawEvents = (page.body as { events?: unknown }).events;
+  const moreSteps = parseHistorySteps(rawEvents, false);
+  if (moreSteps.length > 0) {
+    purposeHistorySteps = [...purposeHistorySteps, ...moreSteps];
+  }
+  const lines = formatHistoryEvents(rawEvents, false);
   if (lines.length > 0) {
     purposeDetailBody += `\n履歴:\n${lines.join("\n")}`;
   }
@@ -708,10 +737,9 @@ async function selectTask(id: string): Promise<void> {
     `【${typeof row.kind === "string" ? row.kind : ""}・${typeof row.status === "string" ? row.status : ""}】${row.title}${deadline}${hold}${trigger}\n` +
     "作業はカレンダーと連携しません。期限は入力した値のみです。";
   if (history !== null && history.status === 200) {
-    const lines = formatHistoryEvents(
-      (history.body as { events?: unknown }).events,
-      true,
-    );
+    const rawEvents = (history.body as { events?: unknown }).events;
+    taskHistorySteps = parseHistorySteps(rawEvents, true);
+    const lines = formatHistoryEvents(rawEvents, true);
     if (lines.length > 0) {
       taskDetailBody += `\n履歴:\n${lines.join("\n")}`;
     }
@@ -724,6 +752,7 @@ async function selectTask(id: string): Promise<void> {
       taskHistoryMoreVisible = false;
     }
   } else {
+    taskHistorySteps = [];
     taskHistoryCursor = null;
     taskHistoryMoreVisible = false;
   }
@@ -762,10 +791,12 @@ async function loadMoreTaskHistory(): Promise<void> {
     return;
   }
   if (page.status !== 200) return;
-  const lines = formatHistoryEvents(
-    (page.body as { events?: unknown }).events,
-    true,
-  );
+  const rawEvents = (page.body as { events?: unknown }).events;
+  const moreSteps = parseHistorySteps(rawEvents, true);
+  if (moreSteps.length > 0) {
+    taskHistorySteps = [...taskHistorySteps, ...moreSteps];
+  }
+  const lines = formatHistoryEvents(rawEvents, true);
   if (lines.length > 0) {
     taskDetailBody += `\n${lines.join("\n")}`;
   }
@@ -955,8 +986,10 @@ async function markConflict(): Promise<void> {
   if (conflictArm !== null && !purposeVersions.has(conflictArm)) {
     conflictArm = null;
   }
+  armedPurposeId = conflictArm;
   if (conflictArm === null) {
     conflictArm = id;
+    armedPurposeId = id;
     notice("競合の起点を保持しました。もう一方を選んで再度押してください");
     return;
   }
@@ -972,16 +1005,99 @@ async function markConflict(): Promise<void> {
   if (result === null) return;
   if (result.status === 201 || result.status === 200) {
     conflictArm = null;
+    armedPurposeId = null;
     await refreshLists();
     notice("競合を記録しました（自動解決されません）");
   } else if (result.status === 409) {
-    if (shouldResetConflictArm(result.status)) conflictArm = null;
+    if (shouldResetConflictArm(result.status)) {
+      conflictArm = null;
+      armedPurposeId = null;
+    }
     await refreshLists();
     notice("他の変更がありました。一覧を更新しました");
   } else {
     notice("競合の記録に失敗しました");
   }
 }
+
+function clearConflictArm(): void {
+  conflictArm = null;
+  armedPurposeId = null;
+  notice("競合の起点を解除しました");
+}
+
+async function quickLinkConflictWith(targetPurposeId: string): Promise<void> {
+  await selectPurpose(targetPurposeId);
+  if (selectedPurpose === targetPurposeId) {
+    await markConflict();
+  }
+}
+
+async function quickAddChildTask(purposeId: string): Promise<void> {
+  await selectPurpose(purposeId);
+  taskParentMode = "attached";
+  const el = document.getElementById("autonomy-task-title");
+  if (el !== null) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus();
+  }
+}
+
+async function quickTransitionTask(
+  id: string,
+  op: "start" | "complete" | "cancel",
+): Promise<void> {
+  if (selectedTask !== id) {
+    await selectTask(id);
+  }
+  if (selectedTask === id) {
+    await transitionTask(op);
+  }
+}
+
+async function quickFocusTaskField(
+  id: string,
+  fieldId: "autonomy-task-hold-input" | "autonomy-task-resume-input",
+): Promise<void> {
+  if (selectedTask !== id) {
+    await selectTask(id);
+  }
+  const el = document.getElementById(fieldId);
+  if (el !== null) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus();
+  }
+}
+
+const visMetrics = $derived(buildAutonomyMetrics(purposes, tasks));
+const visGraph = $derived(
+  buildAutonomyGraphLayout(
+    purposes,
+    tasks,
+    conflictPairs,
+    selectedPurpose,
+    selectedTask,
+    armedPurposeId,
+  ),
+);
+const visKanbanLanes = $derived(
+  buildTaskKanbanLanes(tasks, purposes, selectedPurpose, selectedTask),
+);
+const selectedPurposeRow = $derived(
+  selectedPurpose === null
+    ? null
+    : (purposes.find((p) => p.id === selectedPurpose) ?? null),
+);
+const selectedTaskRow = $derived(
+  selectedTask === null
+    ? null
+    : (tasks.find((t) => t.id === selectedTask) ?? null),
+);
+const armedPurposeRow = $derived(
+  armedPurposeId === null
+    ? null
+    : (purposes.find((p) => p.id === armedPurposeId) ?? null),
+);
 
 async function createTask(): Promise<void> {
   const sessionId = getSessionId();
@@ -1188,6 +1304,11 @@ $effect(() => {
   selectedTask = null;
   selectedPurposeView = null;
   selectedTaskView = null;
+  conflictArm = null;
+  armedPurposeId = null;
+  conflictPairs = [];
+  purposeHistorySteps = [];
+  taskHistorySteps = [];
   purposeDetailVisible = false;
   taskDetailVisible = false;
   purposeDetailBody = "";
@@ -1204,6 +1325,27 @@ $effect(() => {
   void refreshLists();
 });
 </script>
+
+{#snippet historyTimeline(steps: readonly VisHistoryStep[])}
+  {#if steps.length > 0}
+    <ol class="autonomy-vis-timeline" data-history-visualizer="true" aria-label="状態遷移タイムライン">
+      {#each steps.slice(-12) as step (step.seq)}
+        <li class="autonomy-vis-step" data-tone={step.tone}>
+          <span class="autonomy-vis-step-head">
+            <span class="autonomy-vis-step-seq">#{step.seq}</span>
+            <strong class="autonomy-vis-step-event">{step.eventLabel}</strong>
+            {#if step.toStatus.length > 0}
+              <span class="autonomy-vis-step-arrow">{step.fromStatus}→{step.toStatus}</span>
+            {/if}
+          </span>
+          {#if step.note.length > 0}
+            <span class="autonomy-vis-step-note">{step.note}</span>
+          {/if}
+        </li>
+      {/each}
+    </ol>
+  {/if}
+{/snippet}
 
 {#snippet purposeMeta(purpose: PurposeRow)}
   <span class="autonomy-chips">
@@ -1283,6 +1425,469 @@ $effect(() => {
   </header>
 
   {#if !compact}
+  <section
+    id="autonomy-visualizer"
+    class="autonomy-visualizer"
+    aria-label="タスク・目的ビジュアライザ"
+    data-autonomy-visualizer="true"
+  >
+    <div class="autonomy-vis-head">
+      <div class="autonomy-vis-gauges">
+        <div class="autonomy-vis-donut-card">
+          <svg
+            class="autonomy-vis-donut"
+            viewBox="0 0 76 76"
+            width="60"
+            height="60"
+            aria-hidden="true"
+          >
+            <circle
+              class="autonomy-vis-donut-track"
+              cx="38"
+              cy="38"
+              r={DONUT_RADIUS}
+            />
+            {#each visMetrics.donutSegments as seg (seg.key)}
+              <circle
+                class="autonomy-vis-donut-seg"
+                data-tone={seg.tone}
+                cx="38"
+                cy="38"
+                r={DONUT_RADIUS}
+                stroke-dasharray={seg.dasharray}
+                stroke-dashoffset={seg.dashoffset}
+                transform="rotate(-90 38 38)"
+              />
+            {/each}
+            <text
+              class="autonomy-vis-donut-text"
+              x="38"
+              y="42"
+              text-anchor="middle"
+            >
+              {visMetrics.purposeActive}/{visMetrics.purposeTotal}
+            </text>
+          </svg>
+          <div class="autonomy-vis-gauge-meta">
+            <span class="autonomy-eyebrow">目的の稼働状況</span>
+            <p class="autonomy-vis-gauge-line">
+              有効 <strong>{visMetrics.purposeActive}</strong> · 達成
+              <strong>{visMetrics.purposeAchieved}</strong> · 競合
+              <strong data-conflict={conflictPairs.length > 0}
+                >{conflictPairs.length}</strong
+              >
+            </p>
+          </div>
+        </div>
+
+        <div class="autonomy-vis-pipeline-card">
+          <div class="autonomy-vis-pipeline-top">
+            <span class="autonomy-eyebrow">作業パイプライン</span>
+            <strong class="autonomy-vis-pct">{visMetrics.completionPct}% 完了</strong>
+          </div>
+          <svg
+            class="autonomy-vis-bar"
+            viewBox={`0 0 ${BAR_TOTAL_WIDTH} 10`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <rect
+              class="autonomy-vis-bar-track"
+              x="0"
+              y="0"
+              width={BAR_TOTAL_WIDTH}
+              height="10"
+              rx="5"
+            />
+            {#each visMetrics.taskBarSegments as seg (seg.key)}
+              <rect
+                class="autonomy-vis-bar-seg"
+                data-tone={seg.tone}
+                x={seg.x}
+                y="0"
+                width={seg.width}
+                height="10"
+              />
+            {/each}
+          </svg>
+          <div class="autonomy-vis-legend">
+            <span data-tone="ok">進行中 {visMetrics.taskInProgress}</span>
+            <span data-tone="accent">未着手 {visMetrics.taskOpen}</span>
+            <span data-tone="warn">保留 {visMetrics.taskHeld}</span>
+            <span data-tone="done">完了 {visMetrics.taskCompleted}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="autonomy-vis-tabs" role="tablist" aria-label="表示モード">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={visTab === "map"}
+          data-vis-tab="map"
+          onclick={() => (visTab = "map")}
+        >
+          関係マップ
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={visTab === "kanban"}
+          data-vis-tab="kanban"
+          onclick={() => (visTab = "kanban")}
+        >
+          カンバンボード
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={visTab === "hide"}
+          data-vis-tab="hide"
+          onclick={() => (visTab = "hide")}
+        >
+          折りたたむ
+        </button>
+      </div>
+    </div>
+
+    {#if armedPurposeRow !== null}
+      <div class="autonomy-vis-arm-banner" data-vis-arm-banner="true">
+        <span>
+          ⚡ 競合の起点: <strong>{armedPurposeRow.statement}</strong> —
+          もう一方の目的をクリックして競合ペアを記録できます
+        </span>
+        <button type="button" onclick={clearConflictArm}>起点を解除</button>
+      </div>
+    {/if}
+
+    {#if visTab === "map"}
+      {#if purposes.length === 0 && tasks.length === 0}
+        <p class="autonomy-vis-empty">
+          目的や作業を追加すると、ここに関係マップと競合・進行状況が可視化されます。下のフォームから追加できます。
+        </p>
+      {:else}
+        <div class="autonomy-vis-map-wrap">
+          <svg
+            id="autonomy-visualizer-svg"
+            class="autonomy-vis-svg"
+            viewBox={`0 0 ${visGraph.width} ${visGraph.height}`}
+            role="img"
+            aria-label="目的と作業の関係および競合マップ"
+          >
+            <text class="autonomy-vis-col-label" x="64" y="20">
+              目的 (クリックで選択・操作)
+            </text>
+            <text class="autonomy-vis-col-label" x="432" y="20">
+              作業 (親の目的と接続)
+            </text>
+
+            {#each visGraph.edges as edge (edge.id)}
+              <path
+                class="autonomy-vis-edge"
+                data-tone={edge.tone}
+                data-highlighted={edge.highlighted}
+                d={edge.path}
+              />
+            {/each}
+
+            {#each visGraph.conflictArcs as arc (arc.id)}
+              <g class="autonomy-vis-conflict-arc" data-highlighted={arc.highlighted}>
+                <path class="autonomy-vis-conflict-path" d={arc.path} />
+                <circle
+                  class="autonomy-vis-conflict-dot"
+                  cx={arc.badgeX}
+                  cy={arc.badgeY}
+                  r="9"
+                />
+                <text
+                  class="autonomy-vis-conflict-icon"
+                  x={arc.badgeX}
+                  y={arc.badgeY + 4}
+                  text-anchor="middle"
+                >
+                  ⚡
+                </text>
+              </g>
+            {/each}
+
+            {#each visGraph.purposeNodes as node (node.id)}
+              <g
+                class="autonomy-vis-node"
+                data-node-kind="purpose"
+                data-tone={node.tone}
+                data-selected={node.selected}
+                data-armed={node.armed}
+                data-conflicting={node.conflicting}
+                data-standalone={node.standalone}
+                transform={`translate(${node.x}, ${node.y})`}
+                role="button"
+                tabindex="0"
+                aria-label={`目的マップ選択: ${node.statement}`}
+                onclick={() => {
+                  if (!node.standalone) void selectPurpose(node.id);
+                }}
+                onkeydown={(e) => {
+                  if (!node.standalone && (e.key === "Enter" || e.key === " ")) {
+                    e.preventDefault();
+                    void selectPurpose(node.id);
+                  }
+                }}
+              >
+                <rect
+                  class="autonomy-vis-node-box"
+                  x="0"
+                  y="0"
+                  width={node.width}
+                  height={node.height}
+                  rx="10"
+                />
+                <circle class="autonomy-vis-node-dot" cx="14" cy="23" r="5" />
+                <text class="autonomy-vis-node-title" x="26" y="19">
+                  {node.shortLabel}
+                </text>
+                <text class="autonomy-vis-node-sub" x="26" y="36">
+                  {node.kindLabel} · {node.statusLabel}
+                  {node.conflicting ? " · ⚡競合" : ""}
+                  {node.armed ? " · 起点" : ""}
+                </text>
+                <rect
+                  class="autonomy-vis-node-count-bg"
+                  x={node.width - 42}
+                  y="13"
+                  width="32"
+                  height="20"
+                  rx="10"
+                />
+                <text
+                  class="autonomy-vis-node-count"
+                  x={node.width - 26}
+                  y="27"
+                  text-anchor="middle"
+                >
+                  {node.childCount}
+                </text>
+              </g>
+            {/each}
+
+            {#each visGraph.taskNodes as tnode (tnode.id)}
+              <g
+                class="autonomy-vis-node"
+                data-node-kind="task"
+                data-tone={tnode.tone}
+                data-selected={tnode.selected}
+                data-parent-selected={tnode.attachedToSelectedPurpose}
+                transform={`translate(${tnode.x}, ${tnode.y})`}
+                role="button"
+                tabindex="0"
+                aria-label={`作業マップ選択: ${tnode.title}`}
+                onclick={() => void selectTask(tnode.id)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void selectTask(tnode.id);
+                  }
+                }}
+              >
+                <rect
+                  class="autonomy-vis-node-box"
+                  x="0"
+                  y="0"
+                  width={tnode.width}
+                  height={tnode.height}
+                  rx="9"
+                />
+                <circle class="autonomy-vis-node-dot" cx="14" cy="21" r="4.5" />
+                <text class="autonomy-vis-node-title" x="26" y="18">
+                  {tnode.shortLabel}
+                </text>
+                <text class="autonomy-vis-node-sub" x="26" y="33">
+                  {tnode.kindLabel} · {tnode.statusLabel}{tnode.deadline.length > 0 ? " · 期限あり" : ""}
+                </text>
+              </g>
+            {/each}
+          </svg>
+        </div>
+
+        <div class="autonomy-vis-quickbar" data-vis-quickbar="true">
+          {#if selectedPurposeRow !== null}
+            <div class="autonomy-vis-quickgroup">
+              <span class="autonomy-eyebrow">目的操作:</span>
+              <strong class="autonomy-vis-quicktitle">{selectedPurposeRow.statement}</strong>
+              <button
+                type="button"
+                data-vis-action="add-child-task"
+                onclick={() => void quickAddChildTask(selectedPurposeRow.id)}
+              >
+                ＋ 子作業を追加
+              </button>
+              <button
+                type="button"
+                data-vis-action="purpose-achieve"
+                onclick={() => void transitionPurpose("achieve")}
+              >
+                ✓ 達成
+              </button>
+              <button
+                type="button"
+                data-vis-action="purpose-conflict"
+                onclick={() => void quickLinkConflictWith(selectedPurposeRow.id)}
+              >
+                {#if armedPurposeId === null}
+                  ⚡ 競合の起点にする
+                {:else if armedPurposeId === selectedPurposeRow.id}
+                  ⚡ 起点選択中
+                {:else}
+                  ⚡ 起点と競合記録
+                {/if}
+              </button>
+              <button
+                type="button"
+                class="autonomy-danger"
+                data-vis-action="purpose-revoke"
+                onclick={() => void transitionPurpose("revoke")}
+              >
+                ✕ 取消
+              </button>
+            </div>
+          {/if}
+          {#if selectedTaskRow !== null}
+            <div class="autonomy-vis-quickgroup">
+              <span class="autonomy-eyebrow">作業操作:</span>
+              <strong class="autonomy-vis-quicktitle">{selectedTaskRow.title}</strong>
+              <button
+                type="button"
+                class="autonomy-primary"
+                data-vis-action="task-start"
+                onclick={() => void quickTransitionTask(selectedTaskRow.id, "start")}
+              >
+                ▶ 開始
+              </button>
+              <button
+                type="button"
+                data-vis-action="task-complete"
+                onclick={() => void quickTransitionTask(selectedTaskRow.id, "complete")}
+              >
+                ✓ 完了
+              </button>
+              <button
+                type="button"
+                data-vis-action="task-hold-focus"
+                onclick={() => void quickFocusTaskField(selectedTaskRow.id, "autonomy-task-hold-input")}
+              >
+                ⏸ 保留入力へ
+              </button>
+              <button
+                type="button"
+                data-vis-action="task-resume-focus"
+                onclick={() => void quickFocusTaskField(selectedTaskRow.id, "autonomy-task-resume-input")}
+              >
+                ↻ 再開入力へ
+              </button>
+              <button
+                type="button"
+                class="autonomy-danger"
+                data-vis-action="task-cancel"
+                onclick={() => void quickTransitionTask(selectedTaskRow.id, "cancel")}
+              >
+                ✕ 中止
+              </button>
+            </div>
+          {/if}
+          {#if selectedPurposeRow === null && selectedTaskRow === null}
+            <p class="autonomy-vis-hint">
+              マップ上のノードをクリックすると、接続関係のハイライトと直感的なワンクリック操作が表示されます。
+            </p>
+          {/if}
+        </div>
+      {/if}
+    {:else if visTab === "kanban"}
+      <div class="autonomy-vis-kanban" data-vis-kanban="true">
+        {#each visKanbanLanes as lane (lane.key)}
+          <div class="autonomy-vis-lane" data-lane={lane.key} data-tone={lane.tone}>
+            <header class="autonomy-vis-lane-head">
+              <span>{lane.label}</span>
+              <span class="autonomy-count">{lane.items.length}</span>
+            </header>
+            {#if lane.items.length === 0}
+              <p class="autonomy-vis-lane-empty">なし</p>
+            {:else}
+              <ul class="autonomy-vis-lane-cards">
+                {#each lane.items as card (card.id)}
+                  <li
+                    class="autonomy-vis-kcard"
+                    data-tone={card.tone}
+                    data-selected={card.selected}
+                    data-parent-selected={card.attachedToSelectedPurpose}
+                  >
+                    <button
+                      type="button"
+                      class="autonomy-vis-kcard-body"
+                      onclick={() => void selectTask(card.id)}
+                    >
+                      <span class="autonomy-vis-kcard-title">{card.title}</span>
+                      <span class="autonomy-vis-kcard-meta">
+                        <span class="autonomy-chip">{card.kindLabel}</span>
+                        {#if card.parentStatement !== null}
+                          <span class="autonomy-chip">🎯 {card.parentStatement}</span>
+                        {/if}
+                      </span>
+                    </button>
+                    <div class="autonomy-vis-kcard-actions">
+                      {#if card.status === "open"}
+                        <button
+                          type="button"
+                          title="開始"
+                          onclick={() => void quickTransitionTask(card.id, "start")}
+                        >
+                          ▶ 開始
+                        </button>
+                      {/if}
+                      {#if card.status === "open" || card.status === "in_progress"}
+                        <button
+                          type="button"
+                          title="完了"
+                          onclick={() => void quickTransitionTask(card.id, "complete")}
+                        >
+                          ✓ 完了
+                        </button>
+                        <button
+                          type="button"
+                          title="保留理由を入力"
+                          onclick={() => void quickFocusTaskField(card.id, "autonomy-task-hold-input")}
+                        >
+                          ⏸ 保留
+                        </button>
+                      {/if}
+                      {#if card.status === "held"}
+                        <button
+                          type="button"
+                          title="再開根拠を入力"
+                          onclick={() => void quickFocusTaskField(card.id, "autonomy-task-resume-input")}
+                        >
+                          ↻ 再開
+                        </button>
+                      {/if}
+                      {#if card.status !== "completed" && card.status !== "cancelled"}
+                        <button
+                          type="button"
+                          class="autonomy-danger"
+                          title="中止"
+                          onclick={() => void quickTransitionTask(card.id, "cancel")}
+                        >
+                          ✕
+                        </button>
+                      {/if}
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </section>
+
   <div class="autonomy-rail">
     <h3 class="autonomy-heading">
       目的<span class="autonomy-count">{purposes.length}</span>
@@ -1337,6 +1942,7 @@ $effect(() => {
       {/each}
       <div class="autonomy-ledger-block">
         <p class="autonomy-eyebrow">記録と履歴</p>
+        {@render historyTimeline(purposeHistorySteps)}
         <pre id="autonomy-purpose-detail-body" class="autonomy-ledger">{purposeDetailBody}</pre>
         <button
           id="autonomy-purpose-history-more-button"
@@ -1460,6 +2066,7 @@ $effect(() => {
       >
         <div class="autonomy-ledger-block">
           <p class="autonomy-eyebrow">選択中の作業</p>
+          {@render historyTimeline(taskHistorySteps)}
           <pre id="autonomy-task-detail-body" class="autonomy-ledger">{taskDetailBody}</pre>
           <button
             id="autonomy-task-history-more-button"

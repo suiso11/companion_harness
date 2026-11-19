@@ -198,11 +198,26 @@ async function remove(p: Persona): Promise<void> {
       {#if loaded && personas.length === 0}
         <p class="hint">ペルソナがまだありません。「新規作成」から追加してください。</p>
       {/if}
-      <ul>
+      <ul class="persona-cards" data-persona-gallery="true">
         {#each personas as p (p.id)}
-          <li>
+          {@const prov = providers.find((x) => x.id === p.provider)}
+          {@const pct = Math.min(100, Math.max(4, Math.round((p.systemPrompt.length / 8000) * 100)))}
+          <li data-available={prov?.available === true}>
             <span class="avatar" aria-hidden="true">{p.avatar}</span>
-            <span class="meta"><strong>{p.name}</strong><small>{personaAiLabel(providers, p)}</small></span>
+            <span class="meta">
+              <span class="meta-top">
+                <strong>{p.name}</strong>
+                <span class="prov-badge" data-ready={prov?.available === true}>
+                  {personaAiLabel(providers, p)}
+                </span>
+              </span>
+              <small class="prompt-preview">{p.systemPrompt}</small>
+              <svg class="prompt-meter" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true">
+                <rect class="prompt-meter-track" x="0" y="0" width="100" height="4" rx="2" />
+                <rect class="prompt-meter-fill" x="0" y="0" width={pct} height="4" rx="2" />
+              </svg>
+            </span>
+            <a class="chat-jump" href="/chats">💬 会話</a>
             <button type="button" onclick={() => openForm(p)}>編集</button>
             <button type="button" class="danger" onclick={() => remove(p)}>削除</button>
           </li>
@@ -213,22 +228,29 @@ async function remove(p: Persona): Promise<void> {
 </ChatPage>
 
 <style>
-  .personas { display: grid; gap: 0.75rem; max-width: 40rem; padding: 1rem; }
+  .personas { display: grid; gap: 0.75rem; max-width: 48rem; padding: 1rem; }
   header, .row, li { display: flex; align-items: center; gap: 0.5rem; }
   header { justify-content: space-between; }
   h2, h3 { margin: 0; font-size: 1.1rem; }
   form { display: grid; gap: 0.6rem; padding: 0.75rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
   label { display: grid; gap: 0.25rem; font-size: 0.85rem; }
-  input, select, textarea, button { font: inherit; color: var(--foreground); background: var(--muted); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.35rem 0.6rem; }
+  input, select, textarea, button, .chat-jump { font: inherit; color: var(--foreground); background: var(--muted); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.35rem 0.6rem; text-decoration: none; }
   button { cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .danger { color: var(--destructive); }
   ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
-  li { padding: 0.5rem 0.75rem; background: var(--card); border: 1px solid var(--border-subtle); border-radius: var(--radius); }
-  .meta { flex: 1; display: grid; min-width: 0; }
+  li { padding: 0.65rem 0.85rem; background: var(--card); border: 1px solid var(--border-subtle); border-radius: var(--radius); }
+  .meta { flex: 1; display: grid; gap: 0.25rem; min-width: 0; }
+  .meta-top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+  .prov-badge { font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--border-subtle); color: var(--muted-foreground); }
+  .prov-badge[data-ready="true"] { border-color: var(--chart-2); color: var(--chart-2); }
+  .prompt-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prompt-meter { width: 100%; height: 4px; display: block; }
+  .prompt-meter-track { fill: var(--secondary); }
+  .prompt-meter-fill { fill: var(--chart-1); }
   small, .hint { color: var(--muted-foreground); font-size: 0.8rem; margin: 0; }
   fieldset { display: grid; gap: 0.6rem; margin: 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border-subtle); border-radius: var(--radius); }
   legend { padding: 0 0.3rem; font-size: 0.85rem; color: var(--muted-foreground); }
-  .avatar { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 50%; background: var(--accent); }
+  .avatar { flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; background: var(--accent); font-size: 1.2rem; }
   .banner { margin: 0; padding: 0.5rem 0.75rem; border: 1px solid var(--destructive); border-radius: var(--radius-sm); color: var(--destructive); }
 </style>
