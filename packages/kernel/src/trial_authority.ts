@@ -816,6 +816,14 @@ export function stageTrialProposal(
       input.hypothesisId === undefined
         ? null
         : requireId(input.hypothesisId, "hypothesisId");
+    if (hypothesisId !== null) {
+      // This loop proposal supersedes older staged ones for the hypothesis:
+      // they are no longer approvable (expired or drifted frozen profile),
+      // and leaving them staged would show dead rows in /trials.
+      db.prepare(
+        "UPDATE trial_proposals SET status='expired' WHERE hypothesis_id=? AND status='staged'",
+      ).run(hypothesisId);
+    }
     db.prepare(
       "INSERT INTO trial_proposals (id, session_id, scope, task_id, goal_id, goal_version, task_version, objective, acceptance_json, paths_json, operation, read_only, expiry, consent, timeout_ms, max_output_bytes, checks_json, status, created_at, workspace_alias, profile_json, hypothesis_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?, ?, ?)",
     ).run(

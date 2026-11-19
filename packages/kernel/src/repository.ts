@@ -6830,10 +6830,16 @@ export function createKernelRepository(
          FROM learning_hypotheses h
          JOIN learning_evidence e
            ON e.hypothesis_id = h.id AND e.source_kind = 'run'
+         LEFT JOIN (
+           SELECT hypothesis_id AS hid, MAX(created_at) AS last_at
+           FROM trial_proposals WHERE hypothesis_id IS NOT NULL
+           GROUP BY hypothesis_id
+         ) lp ON lp.hid = h.id
          WHERE h.staged = 1 AND h.status = 'open'
          GROUP BY h.id
          HAVING COUNT(DISTINCT e.source_id) >= ?
-         ORDER BY evidenceCount DESC, h.created_at ASC`,
+         ORDER BY COALESCE(lp.last_at, 0) ASC, evidenceCount DESC,
+                  h.created_at ASC`,
       )
       .all(capped) as Array<{
       id: string;

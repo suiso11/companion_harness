@@ -6343,7 +6343,8 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - P2 の自動観測は 1 失敗 = 1 hypothesis + 1 run evidence なので、`minEvidence` を 2 以上にすると人間が evidence を足すまで提案は永遠に出ません（`loop` の evidence attach は人間 HTTP のみ）。`1` なら未提案 hypothesis を毎日 1 件ずつ消化します
 - 提案は `operation="investigate"`, `readOnlyMode=true`, `literalPatchPaths=[]`（pathless read）で、objective は `仮説の検証: <statement>`
 - 期限は 1 年（人間が承認するまで消えない。承認時に profile/alias drift と pause を再検査するので、古い提案は実行されない）、caps/checks は凍結 profile から
-- 冪等キーは staging ごとに新規。`trial_proposals.hypothesis_id` に提案元を記録し、**承認可能な提案**（staged・期限内・現行 profile/alias 一致）がある間は再提案しません。deploy で profile が変わった提案や期限切れの提案は無効とみなし、次の日に現行 profile で再提案します（granted 済みは対象外）
+- 冪等キーは staging ごとに新規。`trial_proposals.hypothesis_id` に提案元を記録し、**承認可能な提案**（staged・期限内・現行 profile/alias 一致）がある間は再提案しません。deploy で profile が変わった提案や期限切れの提案は無効とみなし、次の日に現行 profile で再提案します（granted 済みは対象外）。再提案時、古い staged 行は同じトランザクションで `expired` にします
+- 候補の並びは「その hypothesis の最終提案時刻が古い順」なので、再提案が必要な場合でも同じ1件に固定されず巡回します
 - `paused` / `learning_frozen` の間は作らない。日次 1 回（UTC）で、当日分の判定は DB の loop 提案（`hypothesis_id IS NOT NULL`）を見るため再起動で二重に消費しません
 - staging 時、最新のアクティブセッションへ `companion_text` を 1 件投稿します（`/trials` を開かなくても気づけるように）
 - 承認は従来どおり `/trials` の人間クリック。grant はループから発行しません

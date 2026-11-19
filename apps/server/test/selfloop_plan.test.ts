@@ -362,6 +362,8 @@ describe("daily plan", () => {
       expect(items[0]).toMatchObject({
         objective: expect.stringContaining("drift behaviour"),
       });
+      // The superseded (drifted) proposal is retired, not left looking live.
+      expect(items[1]).toMatchObject({ status: "expired" });
       await dayTwo.stop();
 
       // An approvable proposal now holds the hypothesis: no third stage.
