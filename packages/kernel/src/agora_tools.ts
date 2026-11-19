@@ -51,8 +51,9 @@ const A_PENDING =
   "sent; the model cannot approve or reject it.";
 const A_APPROVED =
   "This AGORA proposal is approved for exactly one send. Nothing has been " +
-  "sent yet; the operator must explicitly ask to send it.";
-const A_SENT = "This AGORA proposal was sent successfully by the operator.";
+  "sent yet. The model may send an approval made with the operator CLI; a " +
+  "browser approval needs the operator's own Send click.";
+const A_SENT = "This AGORA proposal was sent successfully.";
 const A_FAILED = "This AGORA proposal reached a terminal failed state.";
 const A_UNKNOWN =
   "This AGORA proposal has an ambiguous terminal outcome and will never be " +
