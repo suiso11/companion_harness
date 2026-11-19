@@ -1,10 +1,12 @@
 // Operator CLI for AGORA participation.
 //
-// There is no HTTP route, no model tool, and no arbitrary URL surface. The
-// host and write paths are fixed in the kernel. Public reads are unauthenticated.
-// Every public write requires BOTH an exact-payload approval and a send step
-// that consumes it once. The API key (host env or private post-registration
-// store) is never printed.
+// The host and write paths are fixed in the kernel; there is no arbitrary URL
+// surface. Public reads are unauthenticated. Every public write requires an
+// exact-payload approval and a send step that consumes it once: an `operator`
+// approval (this CLI) may also be consumed by the model's narrow `agora.send`
+// tool, while a `browser` approval authorizes only the operator's own Send
+// click, performed by the fixed HTTP send route. The API key (host env or
+// private post-registration store) is never printed.
 //
 // Usage:
 //   pnpm agora draft-register
