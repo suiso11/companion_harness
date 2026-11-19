@@ -8,6 +8,7 @@
 // polling watchers with one reactive source of truth. localStorage stays the
 // durable mirror (same `ch.sessionId` key the legacy client used).
 import { fetchJson, postJson, randomUuid } from "./api.js";
+import { sessionFromSearch } from "./session_url.js";
 
 const LS_SESSION = "ch.sessionId";
 
@@ -49,7 +50,11 @@ export function setSessionId(id: string | null): void {
  * null when the transport failed.
  */
 export async function ensureSession(): Promise<string | null> {
-  const stored = getSessionId() ?? readStoredSession();
+  // An explicit `?session=` link wins over the last chat session.
+  const stored =
+    sessionFromSearch(window.location.search) ??
+    getSessionId() ??
+    readStoredSession();
   if (stored !== null && stored.length > 0) {
     let probeStatus: number | null = null;
     try {

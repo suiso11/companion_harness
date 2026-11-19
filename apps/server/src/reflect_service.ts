@@ -322,7 +322,7 @@ export function createReflectService(
       const subject = snippet.length > 0 ? `「${snippet}」— ` : "";
       repo.postCompanionMessage(
         target,
-        `自己改善の試行提案を作った（読み取り専用）。${subject}/trials で承認して。`,
+        `自己改善の試行提案を作った（読み取り専用）。${subject}/trials?session=${loopSessionId} で承認して。`,
         options.timeZone === undefined ? {} : { timeZone: options.timeZone },
       );
     } catch {

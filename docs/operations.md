@@ -6346,7 +6346,7 @@ master or a changed guest never leaves a stale digest (trials fail closed).
 - 冪等キーは staging ごとに新規。`trial_proposals.hypothesis_id` に提案元を記録し、**承認可能な提案**（staged・期限内・現行 profile/alias 一致）がある間は再提案しません。deploy で profile が変わった提案や期限切れの提案は無効とみなし、次の日に現行 profile で再提案します（granted 済みは対象外）。再提案時、古い staged 行は同じトランザクションで `expired` にします
 - 候補の並びは「その hypothesis の最終提案時刻が古い順」なので、再提案が必要な場合でも同じ1件に固定されず巡回します
 - `paused` / `learning_frozen` の間は作らない。日次 1 回（UTC）で、当日分の判定は DB の loop 提案（`hypothesis_id IS NOT NULL`）を見るため再起動で二重に消費しません
-- staging 時、最新のアクティブセッションへ `companion_text` を 1 件投稿します（`/trials` を開かなくても気づけるように）
+- staging 時、最新のアクティブセッションへ `companion_text` を 1 件投稿します（`/trials` を開かなくても気づけるように）。本文にはループ側セッションの `/trials?session=<uuid>` を載せ、feature page の boot は `?session=` を localStorage より優先して採用します
 - 承認は従来どおり `/trials` の人間クリック。grant はループから発行しません
 
 未設定（既定）では観測（P2）だけが動き、提案は出ません。
