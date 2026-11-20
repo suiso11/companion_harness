@@ -12,7 +12,10 @@ import type { ModelGateway } from "@companion/model-local";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { SpeechConfig } from "../src/config.js";
-import { createDayActivityStore } from "../src/day_activity.js";
+import {
+  createDayActivityStore,
+  type DayActivityStore,
+} from "../src/day_activity.js";
 import { createDiaryStore } from "../src/diary_store.js";
 import {
   createSpontaneousService,
@@ -664,6 +667,84 @@ describe("GET /api/diary", () => {
       }
       const junk = await f.app.request("/diary/foo", { headers: headers() });
       expect(junk.status).toBe(404);
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("GET /api/character/today", () => {
+  const headers = { host: "127.0.0.1" };
+
+  async function appWith(dayActivity?: DayActivityStore) {
+    const cleanups: Array<() => void> = [];
+    const {
+      repo,
+      config: serverConfig,
+      engine,
+    } = await createServerFixtureContext(cleanups);
+    const { app } = createApp({
+      config: serverConfig,
+      repo,
+      engine,
+      now: () => NOW,
+      ...(dayActivity !== undefined ? { dayActivity } : {}),
+    });
+    return {
+      app,
+      timeZone: serverConfig.timeZone,
+      close: () => {
+        for (const fn of cleanups) fn();
+      },
+    };
+  }
+
+  it("serves the local day's activity and rejects query parameters", async () => {
+    const reads: Array<{ day: string; dayOf: (at: number) => string }> = [];
+    const f = await appWith({
+      read: (day, dayOf) => {
+        reads.push({ day, dayOf });
+        return { companionMessages: ["m"], tasks: ["t"], actions: ["a"] };
+      },
+    });
+    try {
+      const response = await f.app.request("/api/character/today", { headers });
+      expect(response.status).toBe(200);
+      const day = new Intl.DateTimeFormat("en-CA", {
+        timeZone: f.timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date(NOW));
+      expect(await response.json()).toEqual({
+        day,
+        companionMessages: ["m"],
+        tasks: ["t"],
+        actions: ["a"],
+      });
+      expect(reads).toHaveLength(1);
+      expect(reads[0]?.day).toBe(day);
+      expect(reads[0]?.dayOf(NOW)).toBe(day);
+      const extra = await f.app.request("/api/character/today?x=1", {
+        headers,
+      });
+      expect(extra.status).toBe(400);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("answers a fixed 404 when the store is absent", async () => {
+    const f = await appWith();
+    try {
+      const response = await f.app.request("/api/character/today", { headers });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "character_today_unavailable",
+          message: "day activity is disabled",
+        },
+      });
     } finally {
       f.close();
     }

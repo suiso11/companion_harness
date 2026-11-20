@@ -58,6 +58,7 @@ describe("extractLatestAnswer", () => {
           turnId: "t1",
           selectedRun: {
             runId: "r1",
+            finishedAt: 1_700_000_000_000,
             result: v2(["予定を確認しました。"], ["予定、確かめたとこどす。"]),
           },
         },
@@ -66,6 +67,7 @@ describe("extractLatestAnswer", () => {
     expect(extractLatestAnswer(body)).toEqual({
       runId: "r1",
       text: "予定、確かめたとこどす。",
+      finishedAt: 1_700_000_000_000,
     });
   });
 
@@ -81,7 +83,25 @@ describe("extractLatestAnswer", () => {
     expect(extractLatestAnswer(body)).toEqual({
       runId: "r1",
       text: "予定を確認しました。",
+      finishedAt: null,
     });
+  });
+
+  it("treats a malformed finishedAt as null", () => {
+    for (const finishedAt of [-1, Number.NaN, "1", null]) {
+      const body = {
+        items: [
+          {
+            selectedRun: {
+              runId: "r1",
+              finishedAt,
+              result: v2(["東京は晴れです。"]),
+            },
+          },
+        ],
+      };
+      expect(extractLatestAnswer(body)?.finishedAt).toBeNull();
+    }
   });
 
   it("skips turns without a selected run", () => {

@@ -39,7 +39,10 @@ const outDir = join(serverDir, "dist", "assets");
 // (~0.3KB), and the /diary route adds one more (+84B). Keep the gzip cap as
 // the real regression guard; revisit the raw cap in a dedicated trim.
 const PAGE_JS_BUDGET = 312 * 1024;
-const ROUTE_TOTAL_BUDGET = 400 * 1024;
+// 402KB: the character card adds ~2KB of scoped CSS to the single stylesheet
+// (the entry JS cap is unchanged); the gzip cap remains the real regression
+// guard, and the raw total needs a dedicated CSS trim before the next raise.
+const ROUTE_TOTAL_BUDGET = 402 * 1024;
 const GZIP_BUDGET = 120 * 1024;
 
 async function gzipSizeBytes(path) {
