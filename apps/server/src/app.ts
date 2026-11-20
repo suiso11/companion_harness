@@ -5983,6 +5983,47 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
     }
   });
 
+  // Global approval queue (cross-session): self-loop proposals are staged in
+  // an operator-configured standing session, so the reviewer's current
+  // session must not hide them. Pure read; each item carries its sessionId.
+  app.get("/api/trials", (c) => {
+    const query = strictQuery(c, ["limit"]);
+    if (!query.ok) {
+      return validationError(c);
+    }
+    const parsed = AutonomyListQuerySchema.safeParse({
+      ...(query.values.limit !== undefined
+        ? { limit: query.values.limit }
+        : {}),
+    });
+    if (!parsed.success) {
+      return validationError(c);
+    }
+    if (trialProfileOf(config) === null) {
+      return trialsDisabled(c, false);
+    }
+    try {
+      const body = repo.listAllTrials({ limit: parsed.data.limit });
+      const items = body.items.map((item) => {
+        const report = repo.readTrialWorkerReportByProposal(
+          item.sessionId,
+          item.id,
+        );
+        return {
+          ...item,
+          outcome: repo.readTrialWorkerOutcomeByProposal(
+            item.sessionId,
+            item.id,
+          ),
+          reportSummary: report === null ? null : report.summary,
+        };
+      });
+      return c.json({ ...body, items }, 200);
+    } catch (error) {
+      return mapDomainError(c, error);
+    }
+  });
+
   // List proposals for a session (pure read, never expires/mutates).
   app.get("/api/sessions/:sessionId/trials", (c) => {
     const session = requireUuid(c, c.req.param("sessionId"), "sessionId");

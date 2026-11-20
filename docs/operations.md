@@ -4829,8 +4829,19 @@ redacted `lastAssistantTail` so such aborts stay diagnosable.
 
 ### UI staging (native /trials)
 
-The native `/trials` page can create one DATA-only proposal without
-leaving the UI. It first reads `GET
+The page is primarily an approval queue. It reads `GET /api/trials`
+(pure cross-session read; fixed `trials_disabled` 404 when unset) because
+self-loop proposals are staged in an operator-configured standing
+session, not necessarily the session the reviewer is browsing. Each
+staged proposal shows the decision facts frozen at stage time (objective,
+operation/read-write, workspace alias, target paths, acceptance, checks,
+caps, expiry) with 「承認する」/「承認しない」; a staged proposal past
+its expiry renders as 期限切れ and cannot be approved. Approve/expire
+target that proposal's own `sessionId`.
+
+Manual staging is collapsed under 「自分で試行を提案する（通常は不要）」.
+It can create one DATA-only proposal without leaving the UI. It first
+reads `GET
 /api/sessions/:id/trial-profile` (pure read; fixed `trials_disabled` 404
 when unset) for the frozen form facts: `workspaceAlias`,
 `mandatoryChecks`, `allowedPaths`, `modelRoute`, the

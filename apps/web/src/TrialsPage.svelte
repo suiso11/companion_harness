@@ -39,6 +39,7 @@ import {
 
 interface TrialProposal {
   readonly id: string;
+  readonly sessionId: string;
   readonly status: TrialProposalStatus;
   readonly objective: string;
   readonly acceptance: readonly string[];
@@ -82,6 +83,8 @@ function isTrialProposal(value: unknown): value is TrialProposal {
   }
   return (
     typeof item.id === "string" &&
+    typeof item.sessionId === "string" &&
+    item.sessionId.length > 0 &&
     (item.status === "staged" ||
       item.status === "granted" ||
       item.status === "expired" ||
@@ -131,6 +134,47 @@ function readTrialOutcome(value: unknown): {
     authorized: record.authorized,
     summary: typeof record.summary === "string" ? record.summary : "",
   };
+}
+
+/** Approval decision is about this run, not raw wire values: local time and
+ * whole seconds/KiB. Unparseable values fall back to the stored string. */
+function expiryText(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? value : new Date(ms).toLocaleString("ja-JP");
+}
+
+function capText(bytes: number): string {
+  return `${Math.round(bytes / 1024)} KiB`;
+}
+
+function durationText(ms: number): string {
+  return `${Math.round(ms / 1000)}秒`;
+}
+
+function proposalStatusLabel(status: TrialProposalStatus): string {
+  switch (status) {
+    case "staged":
+      return "承認待ち";
+    case "granted":
+      return "承認済み";
+    case "expired":
+      return "期限切れ";
+    case "invalidated":
+      return "無効";
+  }
+}
+
+/** Server expiry is enforced on approve; show it before the human clicks. */
+function proposalExpired(proposal: TrialProposal): boolean {
+  if (proposal.status !== "staged") return false;
+  const ms = Date.parse(proposal.expiry);
+  return !Number.isNaN(ms) && ms <= Date.now();
+}
+
+function effectiveStatusLabel(proposal: TrialProposal): string {
+  return proposalExpired(proposal)
+    ? "期限切れ"
+    : proposalStatusLabel(proposal.status);
 }
 
 /** Fixed plain-text outcome lines (legacy `trialOutcomeLines`). */
@@ -404,13 +448,30 @@ function isTaskOption(value: unknown): value is TaskOption {
 }
 
 let proposals = $state<TrialProposal[]>([]);
+/** Actionable queue (staged and not past expiry) vs. read-only history. */
+const pendingProposals = $derived(
+  proposals.filter(
+    (proposal) => proposal.status === "staged" && !proposalExpired(proposal),
+  ),
+);
+const pastProposals = $derived(
+  proposals.filter(
+    (proposal) => proposal.status !== "staged" || proposalExpired(proposal),
+  ),
+);
 let statusText = $state("");
 let detailVisible = $state(false);
+/** Proposal whose decision summary is shown (web-only; null before select). */
+let detailProposal = $state<TrialProposal | null>(null);
+/** Outcome lines for a granted/consumed proposal, kept out of the summary. */
+let detailOutcomeLines = $state<readonly string[]>([]);
 let detailLines = $state<readonly string[]>([]);
 let detailTitles = $state<readonly (string | undefined)[]>([]);
 let opStatus = $state("");
 let decisionVisible = $state(false);
 let selected = $state<string | null>(null);
+/** Owning session of the shown proposal (cross-session queue). */
+let selectedSessionId = $state<string | null>(null);
 /** The staged proposal is read-only; the human may widen it at approval. */
 let selectedReadOnly = $state(false);
 /** Widening needs literal paths: a pathless read-only trial cannot widen. */
@@ -431,6 +492,7 @@ let seq = 0;
 // selected operation; requiredChecks is always the frozen mandatory set.
 let profile = $state<TrialProfileFacts | null>(null);
 let formVisible = $state(false);
+let stageOpen = $state(false);
 let formStatus = $state("");
 let submitting = $state(false);
 let tasks = $state<TaskOption[]>([]);
@@ -449,24 +511,26 @@ let defaultsApplied = false;
 let setupSeq = 0;
 
 /** Stale-response guard: only the latest generation may render. */
-function current(mine: number, sessionId: string | null): boolean {
-  return seq === mine && getSessionId() === sessionId;
+function current(mine: number): boolean {
+  return seq === mine;
 }
 
 async function refreshList(): Promise<void> {
-  const sessionId = getSessionId();
-  if (sessionId === null) return;
   seq += 1;
   const mine = seq;
-  const listed = await fetchJson(
-    `/api/sessions/${encodeURIComponent(sessionId)}/trials`,
-  );
-  if (!current(mine, sessionId)) return;
+  // Cross-session queue: self-loop proposals live in a fixed standing
+  // session, not necessarily the session the reviewer is browsing.
+  const listed = await fetchJson("/api/trials?limit=100");
+  if (!current(mine)) return;
   if (listed.status === 404) {
-    // Disabled config (or unknown session): fixed disabled state, no card.
+    // Disabled config: fixed disabled state, no card.
     proposals = [];
     detailVisible = false;
     selected = null;
+    selectedSessionId = null;
+    detailProposal = null;
+    detailOutcomeLines = [];
+    detailLines = [];
     detailReport = null;
     statusText = "試行の提案は無効です";
     return;
@@ -477,7 +541,7 @@ async function refreshList(): Promise<void> {
   proposals = items.filter(isTrialProposal);
   let staged = 0;
   for (const proposal of proposals) {
-    if (proposal.status === "staged") staged += 1;
+    if (proposal.status === "staged" && !proposalExpired(proposal)) staged += 1;
   }
   statusText =
     staged > 0
@@ -485,7 +549,18 @@ async function refreshList(): Promise<void> {
       : "承認待ちの試行の提案はありません";
   // Re-selecting the detail must not wipe an adoption failure message that
   // exists only in adoptionStatus (e.g. adoption_disabled: no durable row).
-  if (selected !== null) await select(selected, true);
+  // Auto-open the first staged proposal: the page's job is deciding on it.
+  const kept = proposals.find((entry) => entry.id === selected);
+  if (kept !== undefined) {
+    await select(kept.id, kept.sessionId, true);
+  } else {
+    selected = null;
+    selectedSessionId = null;
+    detailVisible = false;
+    detailProposal = null;
+    const first = pendingProposals[0];
+    if (first !== undefined) await select(first.id, first.sessionId);
+  }
 }
 
 /** Load the form facts (profile + actionable tasks) for this session. */
@@ -619,25 +694,39 @@ async function stageTrial(): Promise<void> {
     consent = false;
     expiryLocal = defaultTrialExpiryLocal();
     const created = (result.body as { id?: unknown }).id;
+    const createdSession = (result.body as { sessionId?: unknown }).sessionId;
+    stageOpen = false;
     await refreshList();
-    if (typeof created === "string") await select(created);
+    if (typeof created === "string" && typeof createdSession === "string") {
+      await select(created, createdSession);
+      document
+        .getElementById("trial-detail")
+        ?.scrollIntoView({ block: "start" });
+    }
   } finally {
     submitting = false;
   }
 }
 
+/** Select from a list below the detail and bring the detail back into view. */
+async function openProposal(proposal: TrialProposal): Promise<void> {
+  await select(proposal.id, proposal.sessionId);
+  if (detailVisible) {
+    document.getElementById("trial-detail")?.scrollIntoView({ block: "start" });
+  }
+}
+
 async function select(
   proposalId: string,
+  sessionId: string,
   preserveAdoptionStatus = false,
 ): Promise<void> {
-  const sessionId = getSessionId();
-  if (sessionId === null) return;
   seq += 1;
   const mine = seq;
   const fetched = await fetchJson(
     `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposalId)}`,
   );
-  if (!current(mine, sessionId)) return;
+  if (!current(mine)) return;
   if (fetched.status !== 200 || !isTrialProposal(fetched.body)) return;
   const proposal = fetched.body;
   const outcome = readTrialOutcome(fetched.body);
@@ -646,6 +735,7 @@ async function select(
   adoption = readTrialAdoption(fetched.body);
   if (!preserveAdoptionStatus) adoptionStatus = "";
   selected = proposal.id;
+  selectedSessionId = proposal.sessionId;
   candidateView = null;
   candidateError = null;
   candidateLoading = report !== null && report.artifact !== null;
@@ -653,7 +743,7 @@ async function select(
     const candidateFetched = await fetchJson(
       `/api/sessions/${encodeURIComponent(sessionId)}/trials/${encodeURIComponent(proposal.id)}/candidate`,
     );
-    if (!current(mine, sessionId)) return;
+    if (!current(mine)) return;
     candidateLoading = false;
     if (candidateFetched.status === 404) {
       candidateError = trialCandidateErrorText("candidate_unavailable");
@@ -692,7 +782,9 @@ async function select(
     },
     true,
   );
-  const lines = [...model.detailLines, ...trialOutcomeLines(outcome)];
+  detailProposal = proposal;
+  detailOutcomeLines = trialOutcomeLines(outcome);
+  const lines = [...model.detailLines];
   const titles: Array<string | undefined> = lines.map(() => undefined);
   // The config-fingerprint line carries the full fingerprint as its title.
   const fingerprintLine = lines.findIndex((line) =>
@@ -707,8 +799,13 @@ async function select(
   }
   detailLines = lines;
   detailTitles = titles;
-  opStatus = model.statusText;
-  decisionVisible = model.decisionVisible;
+  const expired = proposalExpired(proposal);
+  opStatus = expired
+    ? "期限切れの試行の提案です"
+    : proposal.status === "staged"
+      ? ""
+      : model.statusText;
+  decisionVisible = model.decisionVisible && !expired;
   // A fresh selection always starts at the staged mode.
   selectedReadOnly = proposal.readOnlyMode;
   selectedPathCount = proposal.literalPatchPaths.length;
@@ -719,7 +816,7 @@ async function select(
 /** Human click only: adopt the reviewed candidate. localOnly keeps the
  * commit on a LOCAL branch (no push, no PR); the PR click pushes it. */
 async function adopt(localOnly = false): Promise<void> {
-  const sessionId = getSessionId();
+  const sessionId = selectedSessionId;
   const id = selected;
   const sha = detailReport?.artifact?.sha256 ?? null;
   if (
@@ -782,7 +879,7 @@ async function adopt(localOnly = false): Promise<void> {
 }
 
 async function approve(): Promise<void> {
-  const sessionId = getSessionId();
+  const sessionId = selectedSessionId;
   const id = selected;
   if (sessionId === null || id === null || mutating) return;
   mutating = true;
@@ -792,21 +889,23 @@ async function approve(): Promise<void> {
       allowWrite ? { allowWrite: true } : {},
       randomUuid(),
     );
-    if (result.status === 201) {
-      opStatus = "承認しました";
-    } else if (result.status === 409) {
-      opStatus = "他の変更がありました。一覧を更新しました";
-    } else {
-      opStatus = "承認に失敗しました";
-    }
+    const message =
+      result.status === 201
+        ? "承認しました"
+        : result.status === 409
+          ? "他の変更がありました。一覧を更新しました"
+          : "承認に失敗しました";
     await refreshList();
+    // refreshList re-selects the proposal and resets opStatus to its status;
+    // keep the action result the human just caused.
+    opStatus = message;
   } finally {
     mutating = false;
   }
 }
 
 async function expire(): Promise<void> {
-  const sessionId = getSessionId();
+  const sessionId = selectedSessionId;
   const id = selected;
   if (sessionId === null || id === null || mutating) return;
   mutating = true;
@@ -817,12 +916,13 @@ async function expire(): Promise<void> {
       {},
       null,
     );
-    if (result.status === 200) {
-      opStatus = "取り消しました";
-    } else {
-      opStatus = "取り消しに失敗しました";
-    }
+    const message =
+      result.status === 200
+        ? "承認しませんでした（破棄済み）"
+        : "取り消しに失敗しました";
     await refreshList();
+    // Keep the explicit rejection instead of the derived expiry status.
+    opStatus = message;
   } finally {
     mutating = false;
   }
@@ -845,6 +945,8 @@ $effect(() => {
   selected = null;
   detailVisible = false;
   decisionVisible = false;
+  detailProposal = null;
+  detailOutcomeLines = [];
   detailLines = [];
   detailTitles = [];
   detailReport = null;
@@ -878,8 +980,13 @@ $effect(() => {
 <div class="trials-page">
 <section id="trials" aria-label="試行の提案" class="feature-panel">
   <h2>試行の提案</h2>
+  <p class="trial-intro">
+    companionからの試行提案を承認または拒否します。承認すると、表示された内容で1回だけ隔離環境で実行されます。本番への反映やタスク・目的の完了は行いません。
+  </p>
   <p id="trial-status" aria-live="polite">{statusText}</p>
   {#if formVisible && profile !== null}
+    <details id="trial-stage" bind:open={stageOpen}>
+      <summary>自分で試行を提案する（通常は不要）</summary>
     <form
       id="trial-stage-form"
       aria-label="新しい試行を提案"
@@ -995,26 +1102,115 @@ $effect(() => {
       </button>
       <p id="trial-form-status" aria-live="polite">{formStatus}</p>
     </form>
+    </details>
   {/if}
-  <ul id="trial-list">
-    {#each proposals as proposal (proposal.id)}
-      <li>
-        <button
-          type="button"
-          onclick={() => void select(proposal.id)}
-        >
-          {proposal.operation} [{proposal.workspaceAlias ?? "unbound"}]:
-          {proposal.objective} ({proposal.status})
-        </button>
-      </li>
-    {/each}
-  </ul>
   <div id="trial-detail" hidden={!detailVisible}>
-    <pre id="trial-detail-body">
-      {#each detailLines as line, i}
-        <div title={detailTitles[i]}>{line}</div>
-      {/each}
-    </pre>
+    {#if detailProposal !== null}
+      {@const p = detailProposal}
+      {@const canExpire = p.status === "staged" && p.workspaceAlias !== null}
+      <section id="trial-decision" aria-label="承認の判断材料">
+        <h3>判断材料</h3>
+        <p class="trial-decision-note">
+          承認すると、この内容で<strong>1回だけ</strong>隔離環境で実行します。本番への反映、タスク・目的の完了は行いません。
+        </p>
+        <dl id="trial-decision-facts">
+          <dt>状態</dt>
+          <dd>{effectiveStatusLabel(p)}</dd>
+          <dt>目的</dt>
+          <dd>{p.objective}</dd>
+          <dt>操作</dt>
+          <dd>
+            {trialOperation(p.operation)?.label ?? p.operation}（{p.readOnlyMode
+              ? "読み取り専用"
+              : "ワークスペースを変更"}）
+          </dd>
+          <dt>作業場所</dt>
+          <dd>
+            {p.workspaceAlias ?? "未束縛（この提案は承認できません）"}
+          </dd>
+          <dt>対象パス</dt>
+          <dd>
+            {#if p.literalPatchPaths.length === 0}
+              指定なし（読み取りのみ）
+            {:else}
+              <ul>
+                {#each p.literalPatchPaths as path (path)}
+                  <li><code>{path}</code></li>
+                {/each}
+              </ul>
+            {/if}
+          </dd>
+          <dt>受け入れ条件</dt>
+          <dd>
+            <ul>
+              {#each p.acceptance as item, index (index)}
+                <li>{item}</li>
+              {/each}
+            </ul>
+          </dd>
+          <dt>実行される必須チェック</dt>
+          <dd>{p.requiredChecks.join(", ")}</dd>
+          <dt>制限</dt>
+          <dd>
+            タイムアウト {durationText(p.timeoutMs)}・出力上限 {capText(
+              p.maxOutputBytes,
+            )}・期限 {expiryText(p.expiry)}
+          </dd>
+          <dt>外部データ</dt>
+          <dd>
+            {p.possibleExternalDataConsent
+              ? "取り込みに同意済み"
+              : "取り込まない"}
+          </dd>
+        </dl>
+        {#if selectedReadOnly && selectedPathCount > 0 && decisionVisible}
+          <label for="trial-allow-write">
+            <input
+              id="trial-allow-write"
+              type="checkbox"
+              bind:checked={allowWrite}
+              disabled={mutating}
+            />
+            この試行で編集を許可する（読み取り専用 → 書き込み）
+          </label>
+        {/if}
+        <div id="trial-decision-actions">
+          <button
+            id="trial-approve-button"
+            type="button"
+            disabled={!decisionVisible || mutating}
+            onclick={() => void approve()}
+          >
+            承認する
+          </button>
+          <button
+            id="trial-expire-button"
+            type="button"
+            title="この提案を承認せずに破棄します"
+            disabled={!canExpire || mutating}
+            onclick={() => void expire()}
+          >
+            承認しない
+          </button>
+        </div>
+        <p id="trial-op-status" aria-live="polite">{opStatus}</p>
+        {#if detailOutcomeLines.length > 0}
+          <ul id="trial-outcome">
+            {#each detailOutcomeLines as line, index (index)}
+              <li>{line}</li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+    <details id="trial-wire-detail">
+      <summary>技術的な詳細</summary>
+      <pre id="trial-detail-body">
+        {#each detailLines as line, i}
+          <div title={detailTitles[i]}>{line}</div>
+        {/each}
+      </pre>
+    </details>
     {#if candidateLoading}
       <p id="trial-candidate-loading">差分を読み込んでいます</p>
     {/if}
@@ -1135,35 +1331,44 @@ $effect(() => {
         {/if}
       </section>
     {/if}
-    {#if selectedReadOnly && selectedPathCount > 0 && decisionVisible}
-      <label for="trial-allow-write">
-        <input
-          id="trial-allow-write"
-          type="checkbox"
-          bind:checked={allowWrite}
-          disabled={mutating}
-        />
-        この試行で編集を許可する（読み取り専用 → 書き込み）
-      </label>
-    {/if}
-    <button
-      id="trial-approve-button"
-      type="button"
-      disabled={!decisionVisible || mutating}
-      onclick={() => void approve()}
-    >
-      承認する
-    </button>
-    <button
-      id="trial-expire-button"
-      type="button"
-      disabled={!decisionVisible || mutating}
-      onclick={() => void expire()}
-    >
-      取り消す
-    </button>
-    <p id="trial-op-status" aria-live="polite">{opStatus}</p>
   </div>
+  {#if pendingProposals.length > 0}
+    <h3>承認待ち</h3>
+    <ul id="trial-list">
+      {#each pendingProposals as proposal (proposal.id)}
+        <li>
+          <button
+            type="button"
+            onclick={() => void openProposal(proposal)}
+          >
+            {trialOperation(proposal.operation)?.label ?? proposal.operation}
+            [{proposal.workspaceAlias ?? "未束縛"}] {proposal.objective}
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {:else}
+    <p id="trial-list-empty">承認待ちの提案はありません</p>
+  {/if}
+  {#if pastProposals.length > 0}
+    <details id="trial-history">
+      <summary>過去の提案（{pastProposals.length}件）</summary>
+      <ul id="trial-history-list">
+        {#each pastProposals as proposal (proposal.id)}
+          <li>
+            <button
+              type="button"
+              onclick={() => void openProposal(proposal)}
+            >
+              {trialOperation(proposal.operation)?.label ?? proposal.operation}
+              [{proposal.workspaceAlias ?? "未束縛"}] {proposal.objective}
+              （{effectiveStatusLabel(proposal)}）
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </details>
+  {/if}
 </section>
 </div>
   {/snippet}
@@ -1173,5 +1378,28 @@ $effect(() => {
   /* The shared shell strips feature-panel padding on chat-hidden routes. */
   .trials-page {
     padding: 1rem;
+  }
+  .trial-intro {
+    max-width: 60ch;
+  }
+  #trial-decision-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.35rem 1rem;
+  }
+  #trial-decision-facts dt {
+    font-weight: 600;
+  }
+  #trial-decision-facts dd {
+    margin: 0;
+  }
+  #trial-decision-facts ul {
+    margin: 0;
+    padding-left: 1.2rem;
+  }
+  #trial-decision-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
   }
 </style>

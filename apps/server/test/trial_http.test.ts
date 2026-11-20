@@ -540,6 +540,29 @@ describe("trial HTTP proposal lifecycle", () => {
         1,
       );
 
+      // The approval queue is cross-session: self-loop proposals live in a
+      // fixed standing session, not the reviewer's current one.
+      const all = await get(app, "/api/trials?limit=100");
+      expect(all.status).toBe(200);
+      const allItems =
+        typeof all.body === "object" &&
+        all.body !== null &&
+        "items" in all.body &&
+        Array.isArray(all.body.items)
+          ? all.body.items
+          : [];
+      expect(
+        allItems.some(
+          (item: unknown) =>
+            typeof item === "object" &&
+            item !== null &&
+            "id" in item &&
+            item.id === proposalId &&
+            "sessionId" in item &&
+            item.sessionId === sessionId,
+        ),
+      ).toBe(true);
+
       const single = await get(app, `${base}/${proposalId}`);
       expect(single.status).toBe(200);
       expect((single.body as { id: string }).id).toBe(proposalId);
