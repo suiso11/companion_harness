@@ -5319,7 +5319,12 @@ export function createMemoryService(
     if (envelope.code === "BAD_REQUEST") {
       throw new MemoryManageError("memory_graph_unavailable");
     }
-    if (envelope.code === "TIMEOUT" || envelope.code === "STORE_UNAVAILABLE") {
+    if (envelope.code === "TIMEOUT") {
+      log("warn", "memory_graph_cli_timeout");
+      throw new MemoryManageError("service_unavailable");
+    }
+    if (envelope.code === "STORE_UNAVAILABLE") {
+      log("warn", "memory_graph_store_unavailable");
       throw new MemoryManageError("service_unavailable");
     }
     throw new MemoryManageError(fallback);
@@ -5339,6 +5344,7 @@ export function createMemoryService(
       if (out !== null) {
         return out;
       }
+      log("warn", "memory_graph_version_drift", { attempt });
       if (attempt >= MEMORY_GRAPH_VERSION_ATTEMPTS) {
         throw new MemoryManageError("service_unavailable");
       }

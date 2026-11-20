@@ -173,12 +173,10 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
   );
   await page.locator("#memory-view-graph").click();
   const globalResponse = await initial;
-  let unavailableCode: unknown;
   if (globalResponse.status() === 503) {
     const body = (await globalResponse.json()) as {
       error?: { code?: unknown };
     };
-    unavailableCode = body.error?.code;
     if (body.error?.code === "memory_graph_unavailable") {
       // The pinned CI remind build (03ecf53) includes graph ops; this
       // remains for an older local CLI build (bump the pin when remind
@@ -190,12 +188,7 @@ test("graph view renders, highlights, opens detail, local depth 1, zooms, and re
       return;
     }
   }
-  // Surface the server's own code on failure: version drift, timeouts, and
-  // store contention all render 503 but point at different fixes.
-  expect(
-    globalResponse.status(),
-    `graph 503 code=${String(unavailableCode)}`,
-  ).toBe(200);
+  expect(globalResponse.status()).toBe(200);
   const globalBody = (await globalResponse.json()) as {
     scope?: unknown;
     nodes?: unknown;
