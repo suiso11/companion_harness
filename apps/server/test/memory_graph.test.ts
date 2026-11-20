@@ -16,6 +16,7 @@ import {
   openKernelDatabase,
 } from "@companion/kernel";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ServerLogger } from "../src/logger.js";
 import type {
   MemoryCliAddress,
   MemoryCliCallOptions,
@@ -161,6 +162,7 @@ function makeService(
   repo: KernelRepository,
   cliCall: CliCall,
   graphPageLimit?: number,
+  logger?: ServerLogger,
 ): MemoryService {
   const service = createMemoryService({
     address: {
@@ -178,6 +180,7 @@ function makeService(
     model: "test-model",
     cliCall,
     ...(graphPageLimit !== undefined ? { graphPageLimit } : {}),
+    ...(logger !== undefined ? { logger } : {}),
   });
   services.push(service);
   return service;
@@ -398,7 +401,18 @@ describe("global graph: stable opaque handles", () => {
         }
         return base(address, op, params, key, options);
       };
-      const service = makeService(f.repo, cli);
+      const warned: string[] = [];
+      const logger: ServerLogger = {
+        level: "debug",
+        log: () => undefined,
+        debug: () => undefined,
+        info: () => undefined,
+        warn: (code) => {
+          warned.push(code);
+        },
+        error: () => undefined,
+      };
+      const service = makeService(f.repo, cli, undefined, logger);
       const { sessionId, runId } = completeRun(f.repo);
 
       const out = await service.getMemoryGraphGlobal(sessionId, { runId });
@@ -410,6 +424,8 @@ describe("global graph: stable opaque handles", () => {
         "graph.version",
         "graph.page",
       ]);
+      // The server log names the cause (the HTTP code cannot).
+      expect(warned).toEqual(["memory_graph_version_drift"]);
     } finally {
       f.close();
     }
