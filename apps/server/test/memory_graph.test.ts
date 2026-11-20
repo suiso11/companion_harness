@@ -383,6 +383,66 @@ describe("global graph: stable opaque handles", () => {
       f.close();
     }
   });
+
+  it("re-reads once when a concurrent write changes the version", async () => {
+    const f = await openRepo();
+    try {
+      const graph = state();
+      const base = makeCli(graph);
+      let written = false;
+      const cli: CliCall = async (address, op, params, key, options) => {
+        if (op === "graph.page" && !written) {
+          // A store write lands after graph.version was recorded.
+          written = true;
+          graph.version = "o2:r3.2:a4:e0.0.";
+        }
+        return base(address, op, params, key, options);
+      };
+      const service = makeService(f.repo, cli);
+      const { sessionId, runId } = completeRun(f.repo);
+
+      const out = await service.getMemoryGraphGlobal(sessionId, { runId });
+      expect(out.version).toBe("o2:r3.2:a4:e0.0.");
+      expect(out.nodes.map((n) => n.handle)).toEqual(["m1", "m2"]);
+      expect(graph.ops).toEqual([
+        "graph.version",
+        "graph.page",
+        "graph.version",
+        "graph.page",
+      ]);
+    } finally {
+      f.close();
+    }
+  });
+
+  it("gives up after one re-read when the version keeps changing", async () => {
+    const f = await openRepo();
+    try {
+      const graph = state();
+      const base = makeCli(graph);
+      let revision = 1;
+      const cli: CliCall = async (address, op, params, key, options) => {
+        if (op === "graph.page") {
+          revision += 1;
+          graph.version = `o${revision}:r2.2:a3:e0.0.`;
+        }
+        return base(address, op, params, key, options);
+      };
+      const service = makeService(f.repo, cli);
+      const { sessionId, runId } = completeRun(f.repo);
+
+      await expect(
+        service.getMemoryGraphGlobal(sessionId, { runId }),
+      ).rejects.toMatchObject({
+        name: "MemoryManageError",
+        code: "service_unavailable",
+      });
+      expect(graph.versionCalls).toBe(2);
+      expect(graph.ops.filter((op) => op === "graph.page")).toHaveLength(2);
+    } finally {
+      f.close();
+    }
+  });
 });
 
 describe("graph shutdown tracking", () => {

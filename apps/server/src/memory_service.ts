@@ -232,6 +232,12 @@ export const MEMORY_GRAPH_EDGE_MAX = 4000;
 export const MEMORY_GRAPH_PAGE_LIMIT_DEFAULT = 50;
 /** Hard stop for a misbehaving remind cursor loop (fixed failure). */
 const MEMORY_GRAPH_PAGE_MAX = 100;
+/**
+ * Global reads allowed when a concurrent store write flips graph.version
+ * between the version probe and a page. Two attempts absorb the write
+ * without ever looping unbounded.
+ */
+const MEMORY_GRAPH_VERSION_ATTEMPTS = 2;
 export const MEMORY_GRAPH_LABEL_MAX_CP = 512;
 /**
  * Memory-content statistics (read-only panel). `record.stats` (remind#42) is
@@ -5328,6 +5334,30 @@ export function createMemoryService(
     edges: RawGraphEdge[];
     truncated: boolean;
   }> {
+    for (let attempt = 1; ; attempt += 1) {
+      const out = await readGlobalGraph(input);
+      if (out !== null) {
+        return out;
+      }
+      if (attempt >= MEMORY_GRAPH_VERSION_ATTEMPTS) {
+        throw new MemoryManageError("service_unavailable");
+      }
+    }
+  }
+
+  /**
+   * One global read. Returns null when the store changed between the
+   * version probe and a page (caller re-reads instead of surfacing 503).
+   */
+  async function readGlobalGraph(input: {
+    includeRetired: boolean;
+    signal?: AbortSignal;
+  }): Promise<{
+    version: string;
+    nodes: RawGraphNode[];
+    edges: RawGraphEdge[];
+    truncated: boolean;
+  } | null> {
     const versionEnvelope = await callGraphCli(
       "graph.version",
       { scope },
@@ -5371,8 +5401,11 @@ export function createMemoryService(
         graphFailure(envelope, "service_unavailable");
       }
       const page = parseGraphPage(envelope.data);
-      if (page === null || page.version !== version) {
+      if (page === null) {
         throw new MemoryManageError("service_unavailable");
+      }
+      if (page.version !== version) {
+        return null;
       }
       for (const node of page.nodes) {
         if (nodeIds.has(node.id)) {
