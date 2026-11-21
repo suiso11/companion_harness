@@ -871,6 +871,25 @@ export function stageTrialProposal(
   });
 }
 
+/**
+ * Session-less approval queue: self-loop proposals are staged in an
+ * operator-configured standing session, so the reviewer's current session
+ * cannot be assumed. Pure read; ids still carry their owning session for
+ * approve/expire/detail.
+ */
+export function listAllTrialProposals(
+  db: Database.Database,
+  limit = 50,
+): { items: TrialProposalView[] } {
+  const capped = Math.min(Math.max(limit, 1), 100);
+  const rows = db
+    .prepare(
+      "SELECT * FROM trial_proposals ORDER BY (status='staged') DESC, created_at DESC LIMIT ?",
+    )
+    .all(capped) as Parameters<typeof toProposalView>[0][];
+  return { items: rows.map((r) => toProposalView(r)) };
+}
+
 export function listTrialProposals(
   db: Database.Database,
   sessionId: string,

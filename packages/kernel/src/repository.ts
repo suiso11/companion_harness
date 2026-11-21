@@ -383,6 +383,7 @@ import {
   finishTrialAdoption as finishTrialAdoptionFn,
   hashTrialRequest,
   issueLaunchPermit,
+  listAllTrialProposals,
   listClaimedTrialWorkers,
   listQueuedTrialGrants,
   listTrialProposals,
@@ -8212,6 +8213,22 @@ export function createKernelRepository(
     return shadowHasActiveRuns(db);
   }
 
+  function listAllTrials(query: unknown = {}): { items: TrialProposalView[] } {
+    const parsed = parseOrValidation(
+      () => AutonomyListQuerySchema.parse(query ?? {}),
+      "trial list query",
+    );
+    const out = listAllTrialProposals(db, parsed.limit);
+    return {
+      items: out.items.map((item) =>
+        parseOrValidation(
+          () => TrialProposalViewSchema.parse(item),
+          "trial proposal",
+        ),
+      ),
+    };
+  }
+
   function listTrials(
     sessionId: string,
     query: unknown = {},
@@ -8932,6 +8949,7 @@ export function createKernelRepository(
     readAutodispatchExecution,
     readAutodispatchMaterialization,
     stageTrial,
+    listAllTrials,
     listTrials,
     readTrial,
     approveTrial,
