@@ -151,6 +151,80 @@ test("character page renders the avatar and speaks a draft", async ({
   expect(cspViolations).toEqual([]);
 });
 
+test("the character page frames the portrait, meters and today's activity", async ({
+  page,
+}) => {
+  const cspViolations: string[] = [];
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /content security policy/i.test(message.text())
+    ) {
+      cspViolations.push(message.text());
+    }
+  });
+
+  const json = (body: unknown) => ({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+  await page.route("**/api/memory/stats", (route) =>
+    route.fulfill(
+      json({
+        byKind: { user_fact: 4, model_inference: 2, summary: 1, correction: 0 },
+        byStatus: { active: 6, retired: 1, superseded: 0, archived: 0 },
+        computedAt: 1795000000000,
+        truncated: false,
+      }),
+    ),
+  );
+  await page.route("**/api/diary**", (route) =>
+    route.fulfill(
+      json({
+        items: [
+          { day: "2026-11-18", body: "x", createdAt: 1795000000000 },
+          { day: "2026-11-19", body: "y", createdAt: 1795000000000 },
+        ],
+      }),
+    ),
+  );
+  await page.route("**/api/character/today", (route) =>
+    route.fulfill(
+      json({
+        day: "2026-11-19",
+        companionMessages: ["今日は静かだったね"],
+        tasks: ["[done] diary: 日記を書いた"],
+        actions: ["calendar.read ok"],
+      }),
+    ),
+  );
+
+  await page.goto("/character");
+  await expect(page.locator("[data-character-card]")).toBeVisible();
+  await expect(page.locator("[data-character-nameplate]")).toHaveText("春琴");
+
+  const meters = page.locator("[data-character-meters]");
+  await expect(meters).toBeVisible();
+  await expect(meters.locator("[data-character-meter]")).toHaveCount(2);
+  const memory = meters.locator('[data-character-meter="memory"]');
+  const diary = meters.locator('[data-character-meter="diary"]');
+  await expect(memory).toContainText("記憶");
+  await expect(memory).toContainText("6");
+  await expect(diary).toContainText("日記");
+  await expect(diary).toContainText("2");
+
+  await expect(page.locator("[data-character-bubble]")).toContainText(
+    "今日は静かだったね",
+  );
+  const today = page.locator("[data-character-today]");
+  await expect(today).toContainText("今日のあなた");
+  await expect(today).toContainText("日記を書いた");
+  await expect(today).not.toContainText("今日は静かだったね");
+
+  expect(cspViolations).toEqual([]);
+});
+
 test("the pet page speaks the newest answer without page chrome", async ({
   page,
   request,

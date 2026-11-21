@@ -164,6 +164,7 @@ import {
 } from "./avatar_files.js";
 import type { RemoteConfig, ServerConfig } from "./config.js";
 import { ServerConfigError } from "./config.js";
+import type { DayActivityStore } from "./day_activity.js";
 import { type DiaryStore, isDiaryDay } from "./diary_store.js";
 import { createStdServerLogger, type ServerLogger } from "./logger.js";
 import {
@@ -548,6 +549,11 @@ export interface CreateAppDeps {
    * spontaneous speech is disabled.
    */
   diary?: DiaryStore | null;
+  /**
+   * Day-activity store for GET /api/character/today. Null/absent keeps the
+   * route at a fixed 404; bootstrap supplies it unconditionally.
+   */
+  dayActivity?: DayActivityStore | null;
   /** In-memory viewed-session registry for spontaneous speech targeting. */
   sessionPresence?: SessionPresence;
   /**
@@ -1608,6 +1614,7 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
   const createEnabled = deps.createEnabled === true;
   const memory = deps.memory ?? null;
   const diary = deps.diary ?? null;
+  const dayActivity = deps.dayActivity ?? null;
   const learningStore = deps.learningStore ?? null;
   const personaChat = deps.personaChat;
   const providerKeys = deps.providerKeys ?? null;
@@ -5660,6 +5667,43 @@ export function createApp(deps: CreateAppDeps): CreatedServerApp {
       return validationError(c);
     }
     return c.json({ version: 1, avatar: avatarConfig(config.avatarDir) }, 200);
+  });
+
+  // Today's companion messages / tasks / actions for the character card; the
+  // store clips text and never throws, so the route only picks the local day.
+  app.get("/api/character/today", (c) => {
+    if (!strictQuery(c, []).ok) {
+      return validationError(c);
+    }
+    if (dayActivity === null) {
+      return c.json(
+        {
+          error: {
+            code: "character_today_unavailable",
+            message: "day activity is disabled",
+          },
+        },
+        404,
+      );
+    }
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: config.timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const localDayOf = (at: number): string => {
+      const parts = formatter.formatToParts(new Date(at));
+      const get = (type: string): string =>
+        parts.find((p) => p.type === type)?.value ?? "";
+      return `${get("year")}-${get("month")}-${get("day")}`;
+    };
+    const day = localDayOf(now());
+    const { companionMessages, tasks, actions } = dayActivity.read(
+      day,
+      localDayOf,
+    );
+    return c.json({ day, companionMessages, tasks, actions }, 200);
   });
 
   app.get("/avatar/:file", (c) => {

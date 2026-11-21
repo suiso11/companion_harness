@@ -9,6 +9,7 @@
 // (`ry`) driven by state.
 
 import { onMount } from "svelte";
+import { fetchJson } from "./lib/api.js";
 import { BehaviorBrain } from "./lib/avatar_behavior.js";
 import {
   type CharacterAvatar,
@@ -18,6 +19,17 @@ import {
   type LatestAnswer,
   mouthOpen,
 } from "./lib/character.js";
+import {
+  activeMemoryCount,
+  bubbleText,
+  buildCharacterMeters,
+  type CharacterMeter,
+  type CharacterToday,
+  countDiaryEntries,
+  parseCharacterToday,
+  relativeTimeLabel,
+  todayLines,
+} from "./lib/character_status.js";
 import {
   captureCameraFrame,
   describeVision,
@@ -43,6 +55,27 @@ let status = $state("回答を待っています");
 let draft = $state("");
 let latest = $state<LatestAnswer | null>(null);
 let avatar = $state<CharacterAvatar | null>(null);
+let meters = $state<CharacterMeter[]>([]);
+let today = $state<CharacterToday | null>(null);
+let bubbleTime = $state("");
+
+const bubble = $derived(
+  bubbleText(
+    latest !== null ? latest.text : (today?.companionMessages.at(-1) ?? ""),
+  ),
+);
+const lines = $derived(
+  todayLines(
+    // The bubble already shows the newest companion message when there is no
+    // answer yet; do not repeat that same line in the activity block.
+    today !== null && latest === null && today.companionMessages.length > 0
+      ? {
+          ...today,
+          companionMessages: today.companionMessages.slice(0, -1),
+        }
+      : today,
+  ),
+);
 
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
@@ -127,19 +160,46 @@ async function refresh(): Promise<void> {
   if (destroyed) {
     return;
   }
+  if (answer !== null) {
+    latest = answer;
+  }
+  bubbleTime =
+    latest?.finishedAt != null
+      ? relativeTimeLabel(Date.now(), latest.finishedAt)
+      : "";
   if (answer === null) {
     status = "回答がまだありません";
     return;
   }
-  latest = answer;
   if (answer.runId === lastRunId) {
     return;
   }
   lastRunId = answer.runId;
   status = "新しい回答があります";
+  void loadCard();
   if (auto) {
     await speak(answer.text);
   }
+}
+
+/** Portrait-card side data: meter counts and today's activity block. */
+async function loadCard(): Promise<void> {
+  if (pet) {
+    return;
+  }
+  const [stats, diary, todayRes] = await Promise.all([
+    fetchJson("/api/memory/stats"),
+    fetchJson("/api/diary?limit=100"),
+    fetchJson("/api/character/today"),
+  ]);
+  if (destroyed) {
+    return;
+  }
+  meters = buildCharacterMeters({
+    activeMemories: stats.status === 200 ? activeMemoryCount(stats.body) : null,
+    diaryEntries: diary.status === 200 ? countDiaryEntries(diary.body) : null,
+  });
+  today = todayRes.status === 200 ? parseCharacterToday(todayRes.body) : null;
 }
 
 async function speakLatest(): Promise<void> {
@@ -190,6 +250,7 @@ onMount(() => {
   void (async () => {
     avatar = await fetchCharacterConfig();
   })();
+  void loadCard();
   // Pet mode owns itself: a local HFSM picks idle/walk/rest and the stage
   // turns the snapshot into movement + a procedural walk cycle.
   let petRaf = 0;
@@ -244,58 +305,131 @@ onMount(() => {
 
 <section class="character" class:pet data-character-panel="true">
   <div
-    class="stage"
-    data-speaking={speaking ? "true" : "false"}
-    data-move={walkMode}
-    data-x={walkX.toFixed(3)}
+    class="card"
+    data-character-card={pet ? undefined : "true"}
   >
-    {#if avatar?.kind === "vrm"}
-      {#await import("./VrmStage.svelte") then mod}
-        <svelte:component this={mod.default} url={avatar.url} {level} />
-      {:catch}
-        <p class="notice">3Dステージを読み込めませんでした</p>
-      {/await}
-    {:else if avatar?.kind === "fbx"}
-      {#await import("./FbxStage.svelte") then mod}
-        <svelte:component
-          this={mod.default}
-          url={avatar.url}
-          texturesUrl={avatar.texturesUrl}
-          version={avatar.assetVersion}
-          {level}
-          x={walkX}
-          facing={walkFacing}
-          walk={walkAmount}
-          {walkPhase}
-          mode={walkMode}
-          rest={walkMode === "rest" ? 1 : 0}
-        />
-      {:catch}
-        <p class="notice">3Dステージを読み込めませんでした</p>
-      {/await}
-    {:else}
-      <svg
-      class="avatar"
-      viewBox="0 0 200 220"
-      role="img"
-      aria-label="春琴のアバター"
-      data-character-avatar="true"
-    >
-      <path
-        class="hair"
-        d="M100 18c-44 0-70 28-70 70 0 22 8 40 18 52l10-6c-6-14-8-30-6-44 12 10 30 16 48 16s36-6 48-16c2 14 0 30-6 44l10 6c10-12 18-30 18-52 0-42-26-70-70-70z"
-      />
-      <circle class="face" cx="100" cy="96" r="52" />
-      <ellipse class="eye" cx="80" cy="92" rx="5" ry="7" />
-      <ellipse class="eye" cx="120" cy="92" rx="5" ry="7" />
-      <ellipse
-        class="mouth"
-        cx="100"
-        cy="122"
-        rx="12"
-        ry={3 + 10 * level}
-      />
-      </svg>
+    <div class="portrait">
+      <div
+        class="stage"
+        data-speaking={speaking ? "true" : "false"}
+        data-move={walkMode}
+        data-x={walkX.toFixed(3)}
+      >
+        {#if avatar?.kind === "vrm"}
+          {#await import("./VrmStage.svelte") then mod}
+            <svelte:component this={mod.default} url={avatar.url} {level} />
+          {:catch}
+            <p class="notice">3Dステージを読み込めませんでした</p>
+          {/await}
+        {:else if avatar?.kind === "fbx"}
+          {#await import("./FbxStage.svelte") then mod}
+            <svelte:component
+              this={mod.default}
+              url={avatar.url}
+              texturesUrl={avatar.texturesUrl}
+              version={avatar.assetVersion}
+              {level}
+              x={walkX}
+              facing={walkFacing}
+              walk={walkAmount}
+              {walkPhase}
+              mode={walkMode}
+              rest={walkMode === "rest" ? 1 : 0}
+            />
+          {:catch}
+            <p class="notice">3Dステージを読み込めませんでした</p>
+          {/await}
+        {:else}
+          <svg
+            class="avatar"
+            viewBox="0 0 200 220"
+            role="img"
+            aria-label="春琴のアバター"
+            data-character-avatar="true"
+          >
+            <path
+              class="hair"
+              d="M100 18c-44 0-70 28-70 70 0 22 8 40 18 52l10-6c-6-14-8-30-6-44 12 10 30 16 48 16s36-6 48-16c2 14 0 30-6 44l10 6c10-12 18-30 18-52 0-42-26-70-70-70z"
+            />
+            <circle class="face" cx="100" cy="96" r="52" />
+            <ellipse class="eye" cx="80" cy="92" rx="5" ry="7" />
+            <ellipse class="eye" cx="120" cy="92" rx="5" ry="7" />
+            <ellipse
+              class="mouth"
+              cx="100"
+              cy="122"
+              rx="12"
+              ry={3 + 10 * level}
+            />
+          </svg>
+        {/if}
+      </div>
+
+      {#if !pet}
+        {#if bubble !== ""}
+          <p class="bubble" data-character-bubble>
+            {bubble}
+            {#if bubbleTime !== ""}
+              <span class="bubble-time" data-character-bubble-time>
+                {bubbleTime}
+              </span>
+            {/if}
+          </p>
+        {/if}
+        <p class="nameplate" data-character-nameplate>春琴</p>
+      {/if}
+    </div>
+
+    {#if !pet}
+      {#if meters.length > 0}
+        <ul class="meters" data-character-meters aria-label="ステータス">
+          {#each meters as meter (meter.key)}
+            <li class="meter" data-character-meter={meter.key}>
+              <span class="meter-label">{meter.label}</span>
+              <svg
+                viewBox="0 0 100 8"
+                width="100%"
+                height="8"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <rect
+                  class="meter-track"
+                  x="0"
+                  y="0"
+                  width="100"
+                  height="8"
+                  rx="2"
+                ></rect>
+                <rect
+                  class="meter-fill"
+                  x="0"
+                  y="0"
+                  width={meter.percent}
+                  height="8"
+                  rx="2"
+                ></rect>
+              </svg>
+              <span class="meter-value">{meter.value}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      {#if today !== null}
+        <section class="today" data-character-today aria-label="今日のあなた">
+          <h3>今日のあなた</h3>
+          {#if lines.length > 0}
+            <ul>
+              {#each lines as line}
+                <li>{line}</li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="today-empty">今日の記録はまだありません</p>
+          {/if}
+        </section>
+      {/if}
     {/if}
   </div>
 
@@ -347,6 +481,117 @@ onMount(() => {
     padding: 0;
     gap: 0;
     justify-content: flex-end;
+  }
+  /* Card chrome is page-only: in pet mode it must not wrap the stage. */
+  .character.pet .card,
+  .character.pet .portrait {
+    display: contents;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(360px, 92vw);
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--card);
+  }
+  .portrait {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+  /* Character line over the portrait, with the elapsed-time tag. */
+  .bubble {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 7.5em;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--popover);
+    color: var(--popover-foreground);
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .bubble-time {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted-foreground);
+    font-size: 0.75em;
+    text-align: right;
+  }
+  .nameplate {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    margin: 0;
+    padding: 4px 14px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-weight: 600;
+  }
+  .meters,
+  .today ul {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .meters {
+    gap: 8px;
+  }
+  .meter {
+    display: grid;
+    grid-template-columns: 3.5em 1fr 3em;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85rem;
+  }
+  .meter-label {
+    color: var(--muted-foreground);
+  }
+  .meter-track {
+    fill: var(--muted);
+  }
+  .meter-fill {
+    fill: var(--chart-1, var(--accent));
+  }
+  .today {
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .today h3 {
+    margin: 0 0 6px;
+    color: var(--muted-foreground);
+    font-size: 0.85rem;
+  }
+  .today ul {
+    gap: 4px;
+    font-size: 0.82rem;
+  }
+  .today li {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .today-empty {
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8rem;
+  }
+  .meter-value {
+    text-align: right;
   }
   .character.pet .stage,
   .character.pet :global([data-vrm-stage]),
@@ -402,12 +647,12 @@ onMount(() => {
   }
   .status {
     margin: 0;
-    color: var(--muted, #666);
+    color: var(--muted-foreground, #666);
     font-size: 0.9em;
   }
   .notice {
     margin: 0;
-    color: var(--muted, #666);
+    color: var(--muted-foreground, #666);
     font-size: 0.9em;
   }
 </style>

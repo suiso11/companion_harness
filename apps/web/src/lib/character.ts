@@ -11,6 +11,8 @@ import { runResultToAnswerParts } from "./reducer.js";
 export interface LatestAnswer {
   readonly runId: string;
   readonly text: string;
+  /** Run completion time (epoch ms), or null when absent/malformed. */
+  readonly finishedAt: number | null;
 }
 
 /** Map a 0..1 RMS level to a 0..1 mouth opening (perceptual curve). */
@@ -43,7 +45,11 @@ export function extractLatestAnswer(body: unknown): LatestAnswer | null {
     if (typeof selected !== "object" || selected === null) {
       continue;
     }
-    const run = selected as { runId?: unknown; result?: unknown };
+    const run = selected as {
+      runId?: unknown;
+      result?: unknown;
+      finishedAt?: unknown;
+    };
     if (typeof run.runId !== "string") {
       continue;
     }
@@ -53,7 +59,13 @@ export function extractLatestAnswer(body: unknown): LatestAnswer | null {
       .join("\n\n")
       .trim();
     if (text !== "") {
-      return { runId: run.runId, text };
+      const finishedAt =
+        typeof run.finishedAt === "number" &&
+        Number.isFinite(run.finishedAt) &&
+        run.finishedAt >= 0
+          ? run.finishedAt
+          : null;
+      return { runId: run.runId, text, finishedAt };
     }
   }
   return null;

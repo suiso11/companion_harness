@@ -1438,6 +1438,9 @@ export async function startServer(
     // Companion diary: created unconditionally so GET /api/diary still reads
     // entries when spontaneous speech is disabled.
     const diaryStore = createDiaryStore(handle.raw);
+    // One day-activity store shared by spontaneous speech and the
+    // /api/character/today route.
+    const dayActivity = createDayActivityStore(handle.raw);
 
     // Opt-in private execution records (COMPANION_EXECUTION_RECORDS_JSON).
     // Construction validates/creates the absolute private root fail-closed
@@ -1803,7 +1806,7 @@ export async function startServer(
           repo: baseRepo,
           store: createThoughtStore(handle.raw),
           diary: diaryStore,
-          activity: createDayActivityStore(handle.raw),
+          activity: dayActivity,
           personaInstructions: () => mainPersona.get()?.instructions ?? null,
           config: config.speech,
           memory: {
@@ -3457,6 +3460,7 @@ export async function startServer(
       // persisted, never replayed, polling ignores them).
       modelDeltas: modelDeltaBus,
       diary: diaryStore,
+      dayActivity,
       ...(memory !== null ? { memory } : {}),
       sessionPresence,
       ...(learning !== null ? { learningStore: learning.store } : {}),
